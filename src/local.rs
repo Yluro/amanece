@@ -1,0 +1,163 @@
+//! Left panel: a plain local directory browser.
+
+use std::path::{Path, PathBuf};
+
+pub const SOURCE_FILE: &str = ".alba_source.json";
+
+#[derive(Debug, Clone)]
+pub struct LocalEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    /// Folder holds a downloaded solve, or a sample folder holding one.
+    pub downloaded: bool,
+}
+
+pub struct LocalPanel {
+    pub cwd: PathBuf,
+    pub entries: Vec<LocalEntry>,
+    pub selected: usize,
+    pub error: Option<String>,
+}
+
+impl LocalPanel {
+    pub fn new(cwd: PathBuf) -> Self {
+        let mut p = LocalPanel {
+            cwd,
+            entries: Vec::new(),
+            selected: 0,
+            error: None,
+        };
+        p.refresh();
+        p
+    }
+
+    pub fn refresh(&mut self) {
+        let keep = self.selected_entry().map(|e| e.name.clone());
+        self.entries.clear();
+        self.error = None;
+        if self.cwd.parent().is_some() {
+            self.entries.push(LocalEntry {
+                name: "..".into(),
+                is_dir: true,
+                size: 0,
+                downloaded: false,
+            });
+        }
+        match std::fs::read_dir(&self.cwd) {
+            Ok(rd) => {
+                let mut items: Vec<LocalEntry> = rd
+                    .flatten()
+                    .filter_map(|e| {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        if name == ".alba_watch" || name == SOURCE_FILE {
+                            return None;
+                        }
+                        let md = e.metadata().ok()?;
+                        let is_dir = md.is_dir();
+                        let downloaded = is_dir && holds_download(&e.path());
+                        Some(LocalEntry {
+                            name,
+                            is_dir,
+                            size: md.len(),
+                            downloaded,
+                        })
+                    })
+                    .collect();
+                items.sort_by(|a, b| {
+                    b.is_dir
+                        .cmp(&a.is_dir)
+                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                });
+                self.entries.extend(items);
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
+        self.selected = keep
+            .and_then(|k| self.entries.iter().position(|e| e.name == k))
+            .unwrap_or(0)
+            .min(self.entries.len().saturating_sub(1));
+    }
+
+    pub fn selected_entry(&self) -> Option<&LocalEntry> {
+        self.entries.get(self.selected)
+    }
+
+    pub fn selected_path(&self) -> Option<PathBuf> {
+        self.selected_entry().map(|e| self.cwd.join(&e.name))
+    }
+
+    pub fn move_by(&mut self, delta: isize) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let max = self.entries.len() as isize - 1;
+        self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
+    }
+
+    pub fn select_last(&mut self) {
+        self.selected = self.entries.len().saturating_sub(1);
+    }
+
+    /// Enter the selected directory (or go up for `..`). Returns false for files.
+    pub fn enter(&mut self) -> bool {
+        let Some(e) = self.selected_entry().cloned() else {
+            return false;
+        };
+        if !e.is_dir {
+            return false;
+        }
+        if e.name == ".." {
+            self.up();
+        } else {
+            self.cd(self.cwd.join(&e.name));
+        }
+        true
+    }
+
+    pub fn up(&mut self) {
+        if let Some(parent) = self.cwd.parent().map(Path::to_path_buf) {
+            let from = self
+                .cwd
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string());
+            self.cwd = parent;
+            self.selected = 0;
+            self.refresh();
+            if let Some(from) = from
+                && let Some(i) = self.entries.iter().position(|e| e.name == from)
+            {
+                self.selected = i;
+            }
+        }
+    }
+
+    pub fn cd(&mut self, dir: PathBuf) {
+        let dir = dir.canonicalize().map(strip_verbatim).unwrap_or(dir);
+        if dir.is_dir() {
+            self.cwd = dir;
+            self.selected = 0;
+            self.refresh();
+        } else {
+            self.error = Some(format!("not a directory: {}", dir.display()));
+        }
+    }
+}
+
+fn holds_download(dir: &Path) -> bool {
+    if dir.join(SOURCE_FILE).exists() {
+        return true;
+    }
+    std::fs::read_dir(dir)
+        .map(|rd| rd.flatten().any(|e| e.path().join(SOURCE_FILE).exists()))
+        .unwrap_or(false)
+}
+
+/// `canonicalize` on Windows returns `\\?\C:\...`; strip that for display and for child processes.
+pub fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
+        _ => p,
+    }
+}

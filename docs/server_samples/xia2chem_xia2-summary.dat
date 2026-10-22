@@ -1,0 +1,22 @@
+Project: AUTOMATIC
+Crystal: DEFAULT
+Sequence length: 0
+Wavelength: NATIVE (0.72931)
+Sweep: SWEEP1
+Files /beamlines/bl13/projects/cycle2025-I/2024000000-pi/20251211/RAW_DATA/JSG285b/manually-mounted/manually-mounted_3_####.cbf
+Images: 1 to 720
+Beam 222.51 212.97 => 223.05 212.34
+Distance 123.28 => 124.99
+Date: Thu Dec 11 10:55:57 2025
+For AUTOMATIC/DEFAULT/NATIVE:
+High resolution limit                           0.73    1.99    0.73
+Low resolution limit                           12.84   12.84    0.75
+Completeness                                   99.9    99.9    99.6
+Multiplicity                                   12.0    11.3    10.9
+I/sigma                                         9.1    35.5     0.1
+Rmerge(I+/-)                                  0.085   0.056  11.705
+CC half                                       0.998   0.997   0.059
+Anomalous completeness                         99.9    99.7    99.7
+Anomalous multiplicity                          6.2     6.2     5.6
+Cell:  28.450  28.450  14.390  90.000  90.000  90.000
+Spacegroup: P 4

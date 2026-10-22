@@ -1,0 +1,146 @@
+<?xml version="1.0"?>
+<AutoProcContainer>
+  <AutoProcProgramContainer>
+    <AutoProcProgram>
+      <processingCommandLine>/opt/autoPROC/20250717/autoPROC/bin/linux64/process -B -xml -nthreads 46 -M ReportingInlined autoPROC_HIGHLIGHT=no -Id 157860,/beamlines/bl13/projects/cycle2025-I/2024000000-pi/20251211/RAW_DATA/JSG285b/manually-mounted,manually-mounted_3_####.cbf,1,720</processingCommandLine>
+      <processingPrograms>autoPROC 20250717 (see: http://www.globalphasing.com/autoproc/)</processingPrograms>
+      <processingStatus>1</processingStatus>
+      <processingMessage></processingMessage>
+      <processingStartTime>Thu Dec 11 11:03:58 CET 2025</processingStartTime>
+      <processingEndTime>Thu Dec 11 11:08:06 CET 2025</processingEndTime>
+      <processingEnvironment>
+  Host      : hpcnode054
+  OS        : Ubuntu 24.04.2 LTS
+  User      : opbl13 (group = Xaloc)
+  Directory : /scratch/hpc/opbl13/autoproc_850563/EDApplication_20251211-110354/ControlAutoPROCv1_1/AutoPROCv1_0_noanom
+  Date      : Thu Dec 11 11:03:58 CET 2025
+  autoPROC  : /opt/autoPROC/20250717
+      </processingEnvironment>
+    </AutoProcProgram>
+    <AutoProcProgramAttachment>
+      <fileType>Log</fileType>
+      <fileName>summary_inlined.html</fileName>
+      <filePath>/scratch/hpc/opbl13/autoproc_850563/EDApplication_20251211-110354/ControlAutoPROCv1_1/AutoPROCv1_0_noanom</filePath>
+    </AutoProcProgramAttachment>
+    <AutoProcProgramAttachment>
+      <fileType>Log</fileType>
+      <fileName>summary.tar.gz</fileName>
+      <filePath>/scratch/hpc/opbl13/autoproc_850563/EDApplication_20251211-110354/ControlAutoPROCv1_1/AutoPROCv1_0_noanom</filePath>
+    </AutoProcProgramAttachment>
+    <AutoProcProgramAttachment>
+      <fileType>Result</fileType>
+      <fileName>truncate-unique.mtz</fileName>
+      <filePath>/scratch/hpc/opbl13/autoproc_850563/EDApplication_20251211-110354/ControlAutoPROCv1_1/AutoPROCv1_0_noanom/157860</filePath>
+    </AutoProcProgramAttachment>
+    <AutoProcProgramAttachment>
+      <fileType>Result</fileType>
+      <fileName>truncate-unique.table1</fileName>
+      <filePath>/scratch/hpc/opbl13/autoproc_850563/EDApplication_20251211-110354/ControlAutoPROCv1_1/AutoPROCv1_0_noanom/157860</filePath>
+    </AutoProcProgramAttachment>
+    <AutoProcProgramAttachment>
+      <fileType>Result</fileType>
+      <fileName>truncate-unique.stats</fileName>
+      <filePath>/scratch/hpc/opbl13/autoproc_850563/EDApplication_20251211-110354/ControlAutoPROCv1_1/AutoPROCv1_0_noanom/157860</filePath>
+    </AutoProcProgramAttachment>
+  </AutoProcProgramContainer>
+  <AutoProc>
+    <spaceGroup>P 4</spaceGroup>
+    <wavelength>.72931</wavelength>
+    <refinedCell_a>28.367</refinedCell_a>
+    <refinedCell_b>28.367</refinedCell_b>
+    <refinedCell_c>14.344</refinedCell_c>
+    <refinedCell_alpha>90.000</refinedCell_alpha>
+    <refinedCell_beta>90.000</refinedCell_beta>
+    <refinedCell_gamma>90.000</refinedCell_gamma>
+  </AutoProc>
+  <AutoProcScalingContainer>
+    <AutoProcScaling>
+      <recordTimeStamp>2025-12-11 11:06:51</recordTimeStamp>
+    </AutoProcScaling>
+    <AutoProcScalingStatistics>
+      <scalingStatisticsType>overall</scalingStatisticsType>
+      <resolutionLimitLow>14.184</resolutionLimitLow>
+      <resolutionLimitHigh>.859</resolutionLimitHigh>
+      <rMerge>.089</rMerge>
+      <rMeasWithinIPlusIMinus>.097</rMeasWithinIPlusIMinus>
+      <rMeasAllIPlusIMinus>.093</rMeasAllIPlusIMinus>
+      <rPimWithinIPlusIMinus>.037</rPimWithinIPlusIMinus>
+      <rPimAllIPlusIMinus>.026</rPimAllIPlusIMinus>
+      <nTotalObservations>128522</nTotalObservations>
+      <nTotalUniqueObservations>9959</nTotalUniqueObservations>
+      <meanIOverSigI>10.4</meanIOverSigI>
+      <completeness>100.0</completeness>
+      <multiplicity>12.9</multiplicity>
+      <ccHalf>0.998</ccHalf>
+      <anomalousCompleteness>100.0</anomalousCompleteness>
+      <anomalousMultiplicity>6.7</anomalousMultiplicity>
+      <ccAnomalous>0.237</ccAnomalous>
+      <DanoOverSigDano>.539</DanoOverSigDano>
+    </AutoProcScalingStatistics>
+    <AutoProcScalingStatistics>
+      <scalingStatisticsType>innerShell</scalingStatisticsType>
+      <resolutionLimitLow>14.184</resolutionLimitLow>
+      <resolutionLimitHigh>2.329</resolutionLimitHigh>
+      <rMerge>.069</rMerge>
+      <rMeasWithinIPlusIMinus>.076</rMeasWithinIPlusIMinus>
+      <rMeasAllIPlusIMinus>.072</rMeasAllIPlusIMinus>
+      <rPimWithinIPlusIMinus>.028</rPimWithinIPlusIMinus>
+      <rPimAllIPlusIMinus>.020</rPimAllIPlusIMinus>
+      <nTotalObservations>6896</nTotalObservations>
+      <nTotalUniqueObservations>538</nTotalUniqueObservations>
+      <meanIOverSigI>27.0</meanIOverSigI>
+      <completeness>100.0</completeness>
+      <multiplicity>12.8</multiplicity>
+      <ccHalf>0.998</ccHalf>
+      <anomalousCompleteness>100.0</anomalousCompleteness>
+      <anomalousMultiplicity>7.2</anomalousMultiplicity>
+      <ccAnomalous>0.371</ccAnomalous>
+      <DanoOverSigDano>.420</DanoOverSigDano>
+    </AutoProcScalingStatistics>
+    <AutoProcScalingStatistics>
+      <scalingStatisticsType>outerShell</scalingStatisticsType>
+      <resolutionLimitLow>.874</resolutionLimitLow>
+      <resolutionLimitHigh>.859</resolutionLimitHigh>
+      <rMerge>4.689</rMerge>
+      <rMeasWithinIPlusIMinus>4.769</rMeasWithinIPlusIMinus>
+      <rMeasAllIPlusIMinus>4.889</rMeasAllIPlusIMinus>
+      <rPimWithinIPlusIMinus>1.879</rPimWithinIPlusIMinus>
+      <rPimAllIPlusIMinus>1.377</rPimAllIPlusIMinus>
+      <nTotalObservations>5867</nTotalObservations>
+      <nTotalUniqueObservations>469</nTotalUniqueObservations>
+      <meanIOverSigI>.4</meanIOverSigI>
+      <completeness>100.0</completeness>
+      <multiplicity>12.5</multiplicity>
+      <ccHalf>0.305</ccHalf>
+      <anomalousCompleteness>100.0</anomalousCompleteness>
+      <anomalousMultiplicity>6.4</anomalousMultiplicity>
+      <ccAnomalous>-0.039</ccAnomalous>
+      <DanoOverSigDano>.532</DanoOverSigDano>
+    </AutoProcScalingStatistics>
+    <AutoProcIntegrationContainer>
+      <Image>
+        <fileName>manually-mounted_3_0001.cbf</fileName>
+        <fileLocation>/beamlines/bl13/projects/cycle2025-I/2024000000-pi/20251211/RAW_DATA/JSG285b/manually-mounted</fileLocation>
+      </Image>
+      <AutoProcIntegration>
+        <cell_a>28.4325</cell_a>
+        <cell_b>28.4325</cell_b>
+        <cell_c>14.3746</cell_c>
+        <cell_alpha>90.000</cell_alpha>
+        <cell_beta>90.000</cell_beta>
+        <cell_gamma>90.000</cell_gamma>
+        <startImageNumber>1</startImageNumber>
+        <endImageNumber>720</endImageNumber>
+        <refinedDetectorDistance>125.004326</refinedDetectorDistance>
+        <refinedXBeam>212.427</refinedXBeam>
+        <refinedYBeam>223.129</refinedYBeam>
+        <rotationAxisX>0.999986</rotationAxisX>
+        <rotationAxisY>0.003404</rotationAxisY>
+        <rotationAxisZ>0.004058</rotationAxisZ>
+        <beamVectorX>-0.003191</beamVectorX>
+        <beamVectorY>0.002493</beamVectorY>
+        <beamVectorZ>1.371153</beamVectorZ>
+      </AutoProcIntegration>
+    </AutoProcIntegrationContainer>
+  </AutoProcScalingContainer>
+</AutoProcContainer>

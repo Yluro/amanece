@@ -1,0 +1,145 @@
+Environment configuration...
+Python => /opt/dials-v3-25-0/conda_base/bin/python
+CCTBX => /opt/dials-v3-25-0/modules
+CCP4 => /opt/ccp4-9
+CCP4_SCR => /tmp/tmpatq3ubbc
+Starting directory: /scratch/hpc/opbl13/xia2dials_850566/EDApplication_20251211-110357/ControlXia2DIALSv1_0/Xia2DIALSv1_0_noanom
+Working directory: /scratch/hpc/opbl13/xia2dials_850566/EDApplication_20251211-110357/ControlXia2DIALSv1_0/Xia2DIALSv1_0_noanom
+Free space:        5448380.32 GB
+Host: hpcnode047
+Contact: xia2.support@gmail.com
+XIA2 3.25.0
+DIALS 3.25.0-g16058fb4f-release
+CCP4 9.0.008
+Command line: xia2 pipeline=3dii small_molecule=true cc_ref=0.3 d_min=0.733 image=/beamlines/bl13/projects/cycle2025-I/2024000000-pi/20251211/RAW_DATA/JSG285b/manually-mounted/manually-mounted_3_0001.cbf:1:720 multiprocessing.nproc=46
+Project directory: /scratch/hpc/opbl13/xia2dials_850566/EDApplication_20251211-110357/ControlXia2DIALSv1_0/Xia2DIALSv1_0_noanom
+-------------------- Spotfinding SWEEP1 --------------------
+31771 spots found on 720 images (max 652 / bin)
+         ****                               *               
+      * ******                     *** * *******            
+**  *****************   *     *********************   *    *
+************************************************************
+************************************************************
+************************************************************
+************************************************************
+************************************************************
+************************************************************
+************************************************************
+1                         image                          720
+------------------- Autoindexing SWEEP1 --------------------
+All possible indexing solutions:
+tP  28.50  28.50  14.40  90.00  90.00  90.00
+oC  40.20  40.30  14.40  90.00  90.00  90.00
+oP  14.40  28.50  28.50  90.00  90.00  90.00
+mC  40.20  40.30  14.40  90.00  90.00  90.00
+mP  28.50  14.40  28.50  90.00  90.10  90.00
+aP  14.40  28.50  28.50  90.10  90.00  90.00
+Indexing solution:
+tP  28.46  28.46  14.39  90.00  90.00  90.00
+-------------------- Integrating SWEEP1 --------------------
+Processed batches 1 to 720
+Standard Deviation in pixel range: 0.67 0.91
+Integration status per image (60/record):
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+"o" => good        "%" => ok        "!" => bad rmsd
+"O" => overloaded  "#" => many bad  "." => weak
+"@" => abandoned
+Maximum relative deviation in cell: 0.002
+Mosaic spread: 0.186 < 0.206 < 0.244
+-------------------- Integrating SWEEP1 --------------------
+Processed batches 1 to 720
+Standard Deviation in pixel range: 0.67 0.91
+Integration status per image (60/record):
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+"o" => good        "%" => ok        "!" => bad rmsd
+"O" => overloaded  "#" => many bad  "." => weak
+"@" => abandoned
+Maximum relative deviation in cell: 0.002
+Mosaic spread: 0.230 < 0.230 < 0.230
+-------------------- Preparing DEFAULT ---------------------
+--------------------- Scaling DEFAULT ----------------------
+Resolution for sweep NATIVE/SWEEP1: 0.73 (user provided)
+--------------------- Scaling DEFAULT ----------------------
+Likely spacegroups:
+P 4
+P -4
+Reindexing to first spacegroup setting: P 4 (h,k,l)
+Project: AUTOMATIC
+Crystal: DEFAULT
+Sequence: 
+Wavelength name: NATIVE
+Wavelength 0.72931
+Sweeps:
+SWEEP SWEEP1 [WAVELENGTH NATIVE]
+TEMPLATE manually-mounted_3_####.cbf
+DIRECTORY /beamlines/bl13/projects/cycle2025-I/2024000000-pi/20251211/RAW_DATA/JSG285b/manually-mounted
+IMAGES (USER) 1 to 720
+MTZ file: /scratch/hpc/opbl13/xia2dials_850566/EDApplication_20251211-110357/ControlXia2DIALSv1_0/Xia2DIALSv1_0_noanom/DEFAULT/NATIVE/SWEEP1/integrate/INTEGRATE_reindex.mtz
+For AUTOMATIC/DEFAULT/NATIVE                 Overall    Low     High
+High resolution limit                           0.73    1.99    0.73
+Low resolution limit                           12.84   12.84    0.75
+Completeness                                   99.9    99.9    99.6
+Multiplicity                                   12.0    11.3    10.9
+I/sigma                                         9.1    35.5     0.1
+Rmerge(I)                                     0.088   0.057  12.313
+Rmerge(I+/-)                                  0.085   0.056  11.705
+Rmeas(I)                                      0.092   0.060  12.919
+Rmeas(I+/-)                                   0.093   0.061  12.922
+Rpim(I)                                       0.026   0.017   3.885
+Rpim(I+/-)                                    0.036   0.023   5.436
+CC half                                       0.998   0.997   0.059
+Anomalous completeness                         99.9    99.7    99.7
+Anomalous multiplicity                          6.2     6.2     5.6
+Anomalous correlation                        -0.352  -0.272  -0.041
+Anomalous slope                               0.927
+dF/F                                          0.049
+dI/s(dI)                                      0.637
+Total observations                           193084    9671    8628
+Total unique                                  16078     854     790
+Assuming spacegroup: P 4
+Other likely alternatives are:
+P -4
+Unit cell:
+ 28.450  28.450  14.390
+ 90.000  90.000  90.000
+sca_unmerged format:
+Scaled reflections (NATIVE): /scratch/hpc/opbl13/xia2dials_850566/EDApplication_20251211-110357/ControlXia2DIALSv1_0/Xia2DIALSv1_0_noanom/DataFiles/AUTOMATIC_DEFAULT_scaled_unmerged.sca
+mtz_unmerged format:
+Scaled reflections (NATIVE): /scratch/hpc/opbl13/xia2dials_850566/EDApplication_20251211-110357/ControlXia2DIALSv1_0/Xia2DIALSv1_0_noanom/DataFiles/AUTOMATIC_DEFAULT_scaled_unmerged.mtz
+sca format:
+Scaled reflections (NATIVE): /scratch/hpc/opbl13/xia2dials_850566/EDApplication_20251211-110357/ControlXia2DIALSv1_0/Xia2DIALSv1_0_noanom/DataFiles/AUTOMATIC_DEFAULT_scaled.sca
+hkl format:
+Scaled reflections (NATIVE): /scratch/hpc/opbl13/xia2dials_850566/EDApplication_20251211-110357/ControlXia2DIALSv1_0/Xia2DIALSv1_0_noanom/DataFiles/AUTOMATIC_DEFAULT_scaled.hkl
+mtz format:
+Scaled reflections: /scratch/hpc/opbl13/xia2dials_850566/EDApplication_20251211-110357/ControlXia2DIALSv1_0/Xia2DIALSv1_0_noanom/DataFiles/AUTOMATIC_DEFAULT_scaled.mtz
+Processing took 00h 01m 35s
+XIA2 used... ccp4, dials, pointless, xds, xia2
+Here are the appropriate citations (BIBTeX in xia2-citations.bib)
+Evans, P. (2006) Acta Cryst. D62, 72-82.
+Kabsch, W. (2010) Acta Cryst. D66, 125-132.
+Winn, M. D. et al. (2011) Acta Cryst. D67, 235-242.
+Winter, G. (2010) J. Appl. Cryst. 43, 186-190.
+Winter, G. et al. (2018) Acta Cryst. D74, 85-97.
+Status: normal termination
