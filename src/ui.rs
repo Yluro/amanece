@@ -132,7 +132,7 @@ fn draw_local(f: &mut Frame, app: &App, area: Rect) {
             focused,
         ),
         focused,
-        &[("⏎", "open"), ("⌫", "up"), ("N", "new folder")],
+        &[("⏎", "open"), ("⌫", "up"), ("N", "new folder"), ("Supr", "delete")],
     );
     let inner_w = area.width.saturating_sub(4) as usize;
     let items: Vec<ListItem> = app
@@ -917,6 +917,7 @@ fn help_lines() -> Vec<Line<'static>> {
         sec("Local (left)"),
         row("Enter / →", "open folder        Backspace / ←  parent"),
         row("N / F7", "new folder here    o  open with default program"),
+        row("Supr / Del", "move the selected file or folder to the Recycle Bin (asks)"),
         row("b", "back to the launch folder    r  refresh"),
         sec("ALBA (beamtimes and samples, like folders)"),
         row("Enter / →", "open a beamtime (hides the others) / go to a sample's stats"),

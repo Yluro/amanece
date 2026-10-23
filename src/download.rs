@@ -41,6 +41,19 @@ pub fn write_sources(dir: &Path, s: &Sources) -> std::io::Result<()> {
     )
 }
 
+/// Drops `name` from `dir/.alba_source.json` (after the file was deleted).
+pub fn forget(dir: &Path, name: &str) {
+    let mut s = read_sources(dir);
+    if s.files.remove(name).is_none() {
+        return;
+    }
+    if s.files.is_empty() {
+        let _ = std::fs::remove_file(dir.join(SOURCE_FILE));
+    } else {
+        let _ = write_sources(dir, &s);
+    }
+}
+
 pub fn sanitize(name: &str) -> String {
     name.chars()
         .map(|c| match c {
@@ -209,6 +222,20 @@ mod tests {
         assert_eq!(solve_dir(&cwd, "ednaproc_r1", "d", "S"), cwd.join("ednaproc_r1_S"));
         assert_eq!(frames_tag(&run("p", 3), false), "frames_r3");
         std::fs::remove_dir_all(&cwd).ok();
+    }
+
+    #[test]
+    fn forget_drops_entries() {
+        let dir = std::env::temp_dir().join(format!("alba_watch_forget_{}", std::process::id()));
+        let mut s = Sources::default();
+        s.files.insert("a.hkl".into(), src("/r/a.hkl"));
+        s.files.insert("b.ins".into(), src("/r/b.ins"));
+        write_sources(&dir, &s).unwrap();
+        forget(&dir, "a.hkl");
+        assert!(!read_sources(&dir).files.contains_key("a.hkl"));
+        forget(&dir, "b.ins");
+        assert!(!dir.join(SOURCE_FILE).exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

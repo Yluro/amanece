@@ -68,6 +68,8 @@ pub struct Login {
 }
 
 pub enum Pending {
+    /// Move a local file or folder to the Recycle Bin.
+    Delete(PathBuf),
     Frames {
         date: String,
         sample: String,
@@ -917,10 +919,9 @@ impl App {
                 _ => self.dialog = Some(Dialog::Input { title, value, action }),
             },
             Dialog::Confirm { title, lines, action } => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => match action {
-                    Pending::Quit => self.quit = true,
-                    Pending::Frames { date, sample, files } => self.enqueue_frames(&date, &sample, files),
-                },
+                // Enter alone never deletes: that needs an explicit y.
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirmed(action),
+                KeyCode::Enter if !matches!(action, Pending::Delete(_)) => self.confirmed(action),
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {}
                 _ => self.dialog = Some(Dialog::Confirm { title, lines, action }),
             },
@@ -931,6 +932,52 @@ impl App {
                 }
             }
         }
+    }
+
+    fn confirmed(&mut self, action: Pending) {
+        match action {
+            Pending::Quit => self.quit = true,
+            Pending::Frames { date, sample, files } => self.enqueue_frames(&date, &sample, files),
+            Pending::Delete(path) => self.delete_local(&path),
+        }
+    }
+
+    fn ask_delete(&mut self) {
+        let Some(e) = self.local.selected_entry() else {
+            return;
+        };
+        if e.name == ".." {
+            return;
+        }
+        let path = self.local.cwd.join(&e.name);
+        self.dialog = Some(Dialog::Confirm {
+            title: "Delete".into(),
+            lines: vec![
+                format!("Move {} to the Recycle Bin?", crate::local::describe(&path)),
+                String::new(),
+                "y = delete, n / Esc = keep".into(),
+            ],
+            action: Pending::Delete(path),
+        });
+    }
+
+    fn delete_local(&mut self, path: &std::path::Path) {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        match trash::delete(path) {
+            Ok(()) => {
+                if let Some(dir) = path.parent() {
+                    download::forget(dir, &name);
+                }
+                self.say(LineKind::Good, format!("moved {name} to the Recycle Bin"));
+            }
+            Err(e) => self.say(LineKind::Error, format!("cannot delete {name}: {e}")),
+        }
+        let keep = self.local.selected;
+        self.local.refresh();
+        self.local.selected = keep.min(self.local.entries.len().saturating_sub(1));
     }
 
     /// Returns true when the console consumed the key.
@@ -1002,6 +1049,7 @@ impl App {
             KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => self.local.up(),
             KeyCode::Char('r') => self.local.refresh(),
             KeyCode::Char('b') | KeyCode::Char('~') => self.local.cd(self.base.clone()),
+            KeyCode::Delete => self.ask_delete(),
             KeyCode::Char('N') | KeyCode::F(7) => {
                 self.dialog = Some(Dialog::Input {
                     title: format!("New folder in {}", self.local.cwd.display()),
@@ -1572,6 +1620,56 @@ mod live {
         }
         app.shutdown();
         std::thread::sleep(Duration::from_millis(500));
+        std::fs::remove_dir_all(&base).ok();
+    }
+}
+
+/// Moves one throwaway file to the real Recycle Bin through the key flow, so it is
+/// opt-in: `cargo test trash_flow -- --ignored --nocapture`.
+#[cfg(test)]
+mod trash_check {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn trash_flow() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let remote = crate::remote::spawn(
+            &rt,
+            crate::remote::Settings {
+                host: "h".into(),
+                port: 1,
+                rate: 1.0,
+                burst: 1,
+                known_hosts: None,
+                beamline: "bl13".into(),
+                remote_root: None,
+            },
+            tx.clone(),
+        );
+        let base = std::env::temp_dir().join(format!("alba_watch_trash_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let file = base.join("alba_watch_trash_test.txt");
+        std::fs::write(&file, b"test file from alba_watch, safe to delete").unwrap();
+        let mut app = App::new(Config::default(), None, base.clone(), remote, tx, None, true);
+        app.focus = Focus::Local;
+        app.local.refresh();
+        app.local.select_name("alba_watch_trash_test.txt");
+
+        app.on_key(KeyEvent::from(KeyCode::Delete));
+        assert!(matches!(app.dialog, Some(Dialog::Confirm { .. })));
+        app.on_key(KeyEvent::from(KeyCode::Enter)); // Enter alone must not delete
+        assert!(file.exists() && app.dialog.is_some());
+        app.on_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(file.exists() && app.dialog.is_none());
+
+        app.on_key(KeyEvent::from(KeyCode::Delete));
+        app.on_key(KeyEvent::from(KeyCode::Char('y')));
+        assert!(!file.exists(), "file should be in the Recycle Bin");
+        for l in app.console.lines.iter().rev().take(1) {
+            println!("console: {}", l.text);
+        }
         std::fs::remove_dir_all(&base).ok();
     }
 }

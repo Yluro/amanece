@@ -181,6 +181,38 @@ impl LocalPanel {
     }
 }
 
+/// "XDS_ASCII.HKL (18.7 MB)" or "folder xia2chem_r3 (3 files, 5.6 MB)".
+pub fn describe(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string());
+    if path.is_dir() {
+        let (mut files, mut bytes) = (0u64, 0u64);
+        let mut stack = vec![path.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                match e.metadata() {
+                    Ok(m) if m.is_dir() => stack.push(e.path()),
+                    Ok(m) => {
+                        files += 1;
+                        bytes += m.len();
+                    }
+                    Err(_) => {}
+                }
+            }
+            if files > 100_000 {
+                break;
+            }
+        }
+        let s = if files == 1 { "" } else { "s" };
+        format!("folder {name} ({files} file{s}, {})", crate::model::human_bytes(bytes))
+    } else {
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        format!("{name} ({})", crate::model::human_bytes(size))
+    }
+}
+
 fn holds_download(dir: &Path) -> bool {
     if dir.join(SOURCE_FILE).exists() {
         return true;
@@ -219,6 +251,9 @@ mod tests {
         assert_eq!(p.selected_file(), Some("XDS_ASCII.HKL"));
         p.select_name("JSG300");
         assert_eq!(p.selected_file(), None);
+        assert_eq!(describe(&base.join("XDS_ASCII.HKL")), "XDS_ASCII.HKL (1 B)");
+        std::fs::write(base.join("JSG300").join("a.hkl"), b"12345").unwrap();
+        assert_eq!(describe(&base.join("JSG300")), "folder JSG300 (1 file, 5 B)");
         std::fs::remove_dir_all(&base).ok();
     }
 }

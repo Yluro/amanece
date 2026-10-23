@@ -17,7 +17,8 @@ alba_watch                    # or: alba_watch --user u2025xxxxxxx
 
 Each panel shows its keys on its bottom border; `?` lists them all. In short:
 
-- **Local** (left): browse folders, `N` makes a new folder. Downloads land in one folder per solve
+- **Local** (left): browse folders, `N` makes a new folder, `Supr` moves the selected file or folder
+  to the Recycle Bin (asks first). Downloads land in one folder per solve
   (`xia2chem_r3/`, `ednaproc_r3/`, `autoproc_noanom_r3/`, `frames_r3/` …) inside the folder open here.
 - **ALBA**: beamtimes like folders; `Enter` opens one (the others are hidden), `Backspace` goes back.
 - **Stats**: every solve with its statistics, ★ on the best one. `Space` marks, `d` downloads,
