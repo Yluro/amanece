@@ -807,18 +807,22 @@ impl App {
     }
 
     fn request_quit(&mut self) {
+        let mut lines = Vec::new();
         if self.downloads.queued > 0 {
-            self.dialog = Some(Dialog::Confirm {
-                title: "Quit?".into(),
-                lines: vec![format!(
-                    "{} download(s) still queued or running. Quit anyway? (y/n)",
-                    self.downloads.queued
-                )],
-                action: Pending::Quit,
-            });
-        } else {
-            self.quit = true;
+            lines.push(format!(
+                "{} download(s) still queued or running will be stopped.",
+                self.downloads.queued
+            ));
         }
+        if let Some(r) = &self.console.running {
+            lines.push(format!("`{}` is still running in the console and will be stopped.", r.label));
+        }
+        lines.push("Quit alba_watch? (y/n)".into());
+        self.dialog = Some(Dialog::Confirm {
+            title: "Quit".into(),
+            lines,
+            action: Pending::Quit,
+        });
     }
 
     fn cycle_poll(&mut self) {
@@ -1242,10 +1246,9 @@ impl App {
             return;
         }
         let multi = info.distinct_prefixes() > 1;
-        let dir = self.local.cwd.clone();
-        let mut sources = download::read_sources(&dir);
-        let mut taken = HashSet::new();
+        let cwd = self.local.cwd.clone();
         let mut jobs = Vec::new();
+        let mut folders = Vec::new();
         let mut total: u64 = 0;
         for (ri, solve) in picked {
             let run = &info.runs[ri];
@@ -1258,35 +1261,58 @@ impl App {
                 self.console
                     .push(LineKind::Warn, format!("{} run {}: {why}", solve.kind.label(), run.run));
             }
-            let tag = download::solve_tag(solve, run, multi);
-            for f in files {
-                let name = download::local_name(&dir, &sources, &taken, &f.path, &tag);
-                taken.insert(name.clone());
-                sources.files.insert(
-                    name.clone(),
-                    Source {
-                        date: date.to_string(),
-                        sample: info.name.clone(),
-                        remote: f.path.clone(),
-                        what: solve.kind.label().to_string(),
-                        run: run.run,
-                        downloaded_at: now_secs(),
-                    },
-                );
-                total += f.size.unwrap_or(0);
-                let label = format!("{} → {name}", solve.kind.label());
-                jobs.push(self.job(&f, dir.join(&name), label));
+            if files.is_empty() {
+                continue;
             }
+            let tag = download::solve_tag(solve, run, multi);
+            let dir = download::solve_dir(&cwd, &tag, date, &info.name);
+            let what = solve.kind.label().to_string();
+            let Some(mut batch) = self.plan_folder(&dir, &files, date, &info.name, &what, run.run) else {
+                continue;
+            };
+            total += files.iter().filter_map(|f| f.size).sum::<u64>();
+            folders.push(folder_label(&cwd, &dir));
+            jobs.append(&mut batch);
             self.marks.remove(&solve.key());
         }
-        if jobs.is_empty() {
-            return;
+        self.enqueue(jobs, total, &folders);
+    }
+
+    /// Jobs for `files` into `dir`, recording their origin in `dir/.alba_source.json`.
+    fn plan_folder(
+        &mut self,
+        dir: &std::path::Path,
+        files: &[RemoteFile],
+        date: &str,
+        sample: &str,
+        what: &str,
+        run: u32,
+    ) -> Option<Vec<DownloadJob>> {
+        let mut sources = download::read_sources(dir);
+        let mut taken = HashSet::new();
+        let folder = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let mut jobs = Vec::new();
+        for f in files {
+            let name = download::local_name(dir, &sources, &taken, &f.path, &folder);
+            taken.insert(name.clone());
+            sources.files.insert(
+                name.clone(),
+                Source {
+                    date: date.to_string(),
+                    sample: sample.to_string(),
+                    remote: f.path.clone(),
+                    what: what.to_string(),
+                    run,
+                    downloaded_at: now_secs(),
+                },
+            );
+            jobs.push(self.job(f, dir.join(&name), format!("{folder}/{name}")));
         }
-        if let Err(e) = download::write_sources(&dir, &sources) {
-            self.say(LineKind::Error, format!("cannot write in {}: {e}", dir.display()));
-            return;
+        if let Err(e) = download::write_sources(dir, &sources) {
+            self.say(LineKind::Error, format!("cannot create {}: {e}", dir.display()));
+            return None;
         }
-        self.enqueue(jobs, total, &dir);
+        Some(jobs)
     }
 
     fn job(&mut self, f: &RemoteFile, local: PathBuf, label: String) -> DownloadJob {
@@ -1301,7 +1327,7 @@ impl App {
         }
     }
 
-    fn enqueue(&mut self, jobs: Vec<DownloadJob>, total: u64, dir: &std::path::Path) {
+    fn enqueue(&mut self, jobs: Vec<DownloadJob>, total: u64, folders: &[String]) {
         if jobs.is_empty() {
             return;
         }
@@ -1315,7 +1341,7 @@ impl App {
         };
         self.say(
             LineKind::Info,
-            format!("queued {n} file(s){size} into {}", dir.display()),
+            format!("queued {n} file(s){size} into {}", folders.join(", ")),
         );
     }
 
@@ -1362,8 +1388,7 @@ impl App {
             }
         }
         lines.push(String::new());
-        lines.push(format!("into {}", self.local.cwd.display()));
-        lines.push("(Esc, then N in the Local panel to make a folder for them first)".into());
+        lines.push(format!("into {}{}frames_r…", self.local.cwd.display(), std::path::MAIN_SEPARATOR));
         lines.push(String::new());
         lines.push("Download? (y/n)".into());
         self.dialog = Some(Dialog::Confirm {
@@ -1377,41 +1402,29 @@ impl App {
         let Some(info) = self.info(date, sample).cloned() else {
             return;
         };
-        let dir = self.local.cwd.clone();
-        let mut sources = download::read_sources(&dir);
-        let mut taken = HashSet::new();
+        let cwd = self.local.cwd.clone();
+        let multi = info.distinct_prefixes() > 1;
         let mut jobs = Vec::new();
+        let mut folders = Vec::new();
         let mut total = 0;
         for r in &info.runs {
-            for f in files
+            let mine: Vec<RemoteFile> = files
                 .iter()
                 .filter(|f| layout::is_frame_of(f.name(), &r.prefix, r.run))
-            {
-                let name = download::local_name(&dir, &sources, &taken, &f.path, &format!("r{}", r.run));
-                taken.insert(name.clone());
-                sources.files.insert(
-                    name.clone(),
-                    Source {
-                        date: date.to_string(),
-                        sample: sample.to_string(),
-                        remote: f.path.clone(),
-                        what: "frames".into(),
-                        run: r.run,
-                        downloaded_at: now_secs(),
-                    },
-                );
-                total += f.size.unwrap_or(0);
-                jobs.push(self.job(f, dir.join(&name), name.clone()));
+                .cloned()
+                .collect();
+            if mine.is_empty() {
+                continue;
             }
+            let dir = download::solve_dir(&cwd, &download::frames_tag(r, multi), date, sample);
+            let Some(mut batch) = self.plan_folder(&dir, &mine, date, sample, "frames", r.run) else {
+                continue;
+            };
+            total += mine.iter().filter_map(|f| f.size).sum::<u64>();
+            folders.push(folder_label(&cwd, &dir));
+            jobs.append(&mut batch);
         }
-        if jobs.is_empty() {
-            return;
-        }
-        if let Err(e) = download::write_sources(&dir, &sources) {
-            self.say(LineKind::Error, format!("cannot write in {}: {e}", dir.display()));
-            return;
-        }
-        self.enqueue(jobs, total, &dir);
+        self.enqueue(jobs, total, &folders);
     }
 
     pub fn cancel_downloads(&mut self) {
@@ -1425,6 +1438,12 @@ impl App {
             .map(|(s, k, _)| (s.as_str(), *k))
     }
 
+}
+
+/// `xia2chem_r3/` relative to the Local panel's folder, for messages.
+fn folder_label(cwd: &std::path::Path, dir: &std::path::Path) -> String {
+    let rel = dir.strip_prefix(cwd).unwrap_or(dir).display().to_string();
+    format!("{rel}{}", std::path::MAIN_SEPARATOR)
 }
 
 fn open_with_default_app(path: &std::path::Path) {
@@ -1540,8 +1559,12 @@ mod live {
                 }
                 for e in std::fs::read_dir(&base).unwrap().flatten() {
                     println!("local: {} {} bytes", e.file_name().to_string_lossy(), e.metadata().unwrap().len());
+                    if e.path().is_dir() {
+                        for f in std::fs::read_dir(e.path()).unwrap().flatten() {
+                            println!("local:   {} {} bytes", f.file_name().to_string_lossy(), f.metadata().unwrap().len());
+                        }
+                    }
                 }
-                println!("{}", std::fs::read_to_string(base.join(crate::local::SOURCE_FILE)).unwrap_or_default());
             }
         }
         for l in &app.console.lines {

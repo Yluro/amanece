@@ -13,6 +13,8 @@ use ratatui::widgets::{Block, BorderType, Cell, Clear, List, ListItem, ListState
 use std::time::Instant;
 
 const ACCENT: Color = Color::Cyan;
+/// Width of the Stats panel in the three-column layout: the table and shell lines fit.
+const STATS_WIDTH: u16 = 76;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -32,9 +34,9 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let (local_a, alba_a, stats_a) = if main.width >= 150 {
         let [a, b, c] = Layout::horizontal([
-            Constraint::Percentage(26),
-            Constraint::Percentage(22),
-            Constraint::Percentage(52),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Length(STATS_WIDTH),
         ])
         .areas(main);
         (a, b, c)
@@ -81,10 +83,14 @@ fn hints(keys: &[(&str, &str)], focused: bool) -> Line<'static> {
         (Style::new().fg(Color::DarkGray), Style::new().fg(Color::DarkGray))
     };
     let mut spans = vec![Span::raw(" ")];
-    for (key, desc) in keys {
+    for (i, (key, desc)) in keys.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("   ", d));
+        }
         spans.push(Span::styled(key.to_string(), k));
-        spans.push(Span::styled(format!(" {desc}  "), d));
+        spans.push(Span::styled(format!(" {desc}"), d));
     }
+    spans.push(Span::raw(" "));
     Line::from(spans)
 }
 
@@ -126,7 +132,7 @@ fn draw_local(f: &mut Frame, app: &App, area: Rect) {
             focused,
         ),
         focused,
-        &[("⏎", "open"), ("⌫", "up"), ("N", "new folder"), ("o", "open file"), ("r", "refresh")],
+        &[("⏎", "open"), ("⌫", "up"), ("N", "new folder")],
     );
     let inner_w = area.width.saturating_sub(4) as usize;
     let items: Vec<ListItem> = app
@@ -205,9 +211,9 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     let room = area.width.saturating_sub(28) as usize;
     t.spans.push(Span::raw(format!("{} ", shorten(&path, room))).fg(Color::Gray));
     let keys: &[(&str, &str)] = if app.alba_date.is_some() {
-        &[("⏎", "stats"), ("⌫", "back"), ("s", "rescan"), ("S", "scan all"), ("t", "tests")]
+        &[("⏎", "stats"), ("⌫", "back"), ("S", "scan all")]
     } else {
-        &[("⏎", "open beamtime"), ("S", "scan all"), ("r", "refresh")]
+        &[("⏎", "open"), ("r", "refresh")]
     };
     let block = panel(t, focused, keys);
     let rows = app.alba_rows();
@@ -330,7 +336,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     let block = panel(
         title(format!("{name} · {date}"), focused),
         focused,
-        &[("␣", "mark"), ("a", "all"), ("d", "download here"), ("F", "frames"), ("L", "logs"), ("s", "rescan")],
+        &[("␣", "mark"), ("d", "download"), ("F", "frames")],
     );
     let Some(info) = app.info(&date, &name) else {
         let scanning = app.scanning.contains(&(date.clone(), name.clone()));
@@ -580,7 +586,7 @@ fn solve_details(app: &App, info: &SampleInfo, run: usize, solve: usize) -> Vec<
         lines.push(Line::from("* no Rmerge reported: the R column shows Rmeas").fg(Color::DarkGray));
     }
     lines.push(
-        Line::from("★ best: completeness, CC½, inner-shell R, resolution (solves with HKL only)")
+        Line::from("★ best by completeness, CC½, inner R and resolution")
             .fg(Color::DarkGray),
     );
     lines
@@ -638,7 +644,7 @@ fn draw_console(f: &mut Frame, app: &App, area: Rect) {
         t.spans.push(Span::raw(format!("{file} ")).fg(Color::Gray));
     }
     let keys: &[(&str, &str)] = if focused {
-        &[("⏎", "run"), ("↑↓", "history"), ("PgUp/Dn", "scroll"), ("^C", "stop"), ("Esc", "leave")]
+        &[("⏎", "run"), ("^C", "stop"), ("Esc", "leave")]
     } else {
         &[(":", "type a command")]
     };
@@ -663,12 +669,7 @@ fn draw_console(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), log_a);
 
     let prompt = Span::raw("> ").fg(if focused { ACCENT } else { Color::DarkGray });
-    let hint = match (c.input.is_empty(), app.local.selected_file()) {
-        (true, Some(file)) => Span::raw(format!("a bare program name gets the selected file: xprep → xprep {file}"))
-            .fg(Color::DarkGray),
-        (true, None) if !focused => Span::raw("press : to type a command (shelxt, xprep, dir, cd …)").fg(Color::DarkGray),
-        _ => Span::raw(c.input.clone()),
-    };
+    let hint = Span::raw(c.input.clone());
     f.render_widget(Paragraph::new(Line::from(vec![prompt, hint])), input_a);
     if focused && app.dialog.is_none() {
         let before: usize = c.input.chars().take(c.cursor).count();
@@ -678,24 +679,24 @@ fn draw_console(f: &mut Frame, app: &App, area: Rect) {
 
 // ------------------------------------------------------------------ status bar
 
+fn badge(text: String, fg: Color, bg: Color) -> Span<'static> {
+    Span::styled(
+        format!(" {text} "),
+        Style::new().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+    )
+}
+
+const OFF_FG: Color = Color::Gray;
+const OFF_BG: Color = Color::Rgb(55, 55, 55);
+const BAR_BG: Color = Color::Rgb(25, 25, 25);
+
+/// Status on the right (connection, polling, sound, logs, downloads), global keys on
+/// the left, the latest message in between.
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let mut spans = vec![conn_label(app), Span::raw("  ")];
-    let poll = match (app.poll_mode, app.next_poll) {
-        (PollMode::Manual, _) => "poll: manual".to_string(),
-        (m, Some(at)) => {
-            let left = at.saturating_duration_since(Instant::now()).as_secs();
-            format!("poll: {:?} {}:{:02}", m, left / 60, left % 60).to_lowercase()
-        }
-        (m, None) => format!("poll: {m:?}").to_lowercase(),
-    };
-    spans.push(Span::raw(poll).fg(Color::Gray));
-    spans.push(Span::raw(if app.sound { "  ♪ on" } else { "  ♪ off" }).fg(Color::Gray));
-    spans.push(Span::raw(if app.include_logs { "  logs on" } else { "  logs off" }).fg(Color::Gray));
-    let req = app.remote.requests.load(std::sync::atomic::Ordering::Relaxed);
-    spans.push(Span::raw(format!("  req {req}")).fg(Color::DarkGray));
+    let mut right: Vec<Span> = Vec::new();
     let d = &app.downloads;
     if d.queued > 0 {
-        let mut s = format!("  ↓ {} queued", d.queued);
+        let mut s = format!("↓ {} queued", d.queued);
         if let Some(a) = &d.active {
             let secs = a.started.elapsed().as_secs_f64().max(0.1);
             let speed = human_bytes((a.done as f64 / secs) as u64);
@@ -707,15 +708,82 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             let name = a.label.rsplit('/').next().unwrap_or(&a.label);
             s.push_str(&format!(" · {name}{pct} {speed}/s"));
         }
-        spans.push(Span::raw(s).fg(ACCENT));
+        right.push(badge(s, Color::Black, ACCENT));
+        right.push(Span::raw(" "));
     }
-    if let Some((msg, kind)) = app.status_text() {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(msg.to_string(), line_style(kind)));
+    right.push(match &app.conn {
+        Conn::Connected(u) => badge(format!("● {u}"), Color::Black, Color::Green),
+        Conn::Connecting => badge("◌ connecting".into(), Color::Black, Color::Yellow),
+        Conn::Reconnecting(Some(s)) => badge(format!("◌ reconnecting {s}s"), Color::Black, Color::Yellow),
+        Conn::Reconnecting(None) => badge("◌ reconnecting".into(), Color::Black, Color::Yellow),
+        Conn::Offline => badge("○ offline".into(), OFF_FG, OFF_BG),
+        Conn::Lost(_) => badge("✗ disconnected".into(), Color::White, Color::Red),
+    });
+    right.push(Span::raw(" "));
+    right.push(match (app.poll_mode, app.next_poll) {
+        (PollMode::Manual, _) => badge("poll manual".into(), OFF_FG, OFF_BG),
+        (m, Some(at)) => {
+            let left = at.saturating_duration_since(Instant::now()).as_secs();
+            let mode = format!("{m:?}").to_lowercase();
+            badge(format!("poll {mode} {}:{:02}", left / 60, left % 60), Color::Black, Color::LightBlue)
+        }
+        (m, None) => badge(format!("poll {}", format!("{m:?}").to_lowercase()), Color::Black, Color::LightBlue),
+    });
+    right.push(Span::raw(" "));
+    right.push(if app.sound {
+        badge("♪ sound on".into(), Color::Black, Color::LightMagenta)
     } else {
-        spans.push(Span::raw("  Tab panels · p poll · n sound · ? help · q quit").fg(Color::DarkGray));
+        badge("♪ sound off".into(), OFF_FG, OFF_BG)
+    });
+    right.push(Span::raw(" "));
+    right.push(if app.include_logs {
+        badge("logs on".into(), Color::Black, Color::LightYellow)
+    } else {
+        badge("logs off".into(), OFF_FG, OFF_BG)
+    });
+    let req = app.remote.requests.load(std::sync::atomic::Ordering::Relaxed);
+    right.push(Span::raw(format!(" req {req} ")).fg(Color::DarkGray));
+    let right = Line::from(right);
+
+    let key = |k: &'static str, d: &'static str| {
+        [
+            Span::raw(k).fg(Color::Gray).add_modifier(Modifier::BOLD),
+            Span::raw(format!(" {d}   ")).fg(Color::DarkGray),
+        ]
+    };
+    let full: Vec<Span> = [
+        key("Tab", "panels"),
+        key("p", "poll"),
+        key("n", "sound"),
+        key("L", "logs"),
+        key("?", "help"),
+        key("q", "quit"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let short: Vec<Span> = [key("?", "help"), key("q", "quit")].into_iter().flatten().collect();
+    let mut left = Line::from([vec![Span::raw(" ")], full].concat());
+    if left.width() + right.width() + 4 > area.width as usize {
+        left = Line::from([vec![Span::raw(" ")], short].concat());
     }
-    f.render_widget(Paragraph::new(Line::from(spans)).bg(Color::Rgb(25, 25, 25)), area);
+
+    f.render_widget(Block::default().bg(BAR_BG), area);
+    let [left_a, msg_a, right_a] = Layout::horizontal([
+        Constraint::Length(left.width() as u16),
+        Constraint::Min(0),
+        Constraint::Length(right.width() as u16),
+    ])
+    .areas(area);
+    f.render_widget(Paragraph::new(left), left_a);
+    if let Some((msg, kind)) = app.status_text() {
+        let room = msg_a.width.saturating_sub(2) as usize;
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(truncate(msg, room), line_style(kind)))),
+            msg_a,
+        );
+    }
+    f.render_widget(Paragraph::new(right).alignment(ratatui::layout::Alignment::Right), right_a);
 }
 
 // ------------------------------------------------------------------ dialogs
@@ -858,7 +926,7 @@ fn help_lines() -> Vec<Line<'static>> {
         sec("Stats"),
         row("Space", "mark solve for download / tick a frames run"),
         row("a", "mark all solves with HKL files     ★ marks the best solve"),
-        row("d", "download marked solves into the Local panel's folder"),
+        row("d", "download marked solves into xia2chem_r3/, ednaproc_r3/ … in the Local folder"),
         row("F", "download ticked raw-frame runs (asks first)"),
         sec("Console (runs in the Local panel's folder)"),
         row("Enter", "run; a bare program name gets the selected file"),
@@ -971,7 +1039,11 @@ mod tests {
         // an opened beamtime hides the other beamtimes
         assert!(!wide.contains("20251106"));
         // key hints on the borders
-        assert!(wide.contains("new folder") && wide.contains("download here"));
+        assert!(wide.contains("new folder") && wide.contains("d download"));
+        // status bar: keys on the left, state on the right
+        let bar = wide.lines().last().unwrap();
+        assert!(bar.trim_start().starts_with("Tab panels"));
+        assert!(bar.contains("poll manual") && bar.contains("sound on") && bar.contains("logs off"));
         std::fs::remove_dir_all(&base).ok();
     }
 }

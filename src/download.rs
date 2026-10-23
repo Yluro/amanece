@@ -1,6 +1,7 @@
-//! Downloads land in the Local panel's current folder, keeping the server's file
-//! names. A small `.alba_source.json` in that folder records where each file came
-//! from, so a second download of the same file is recognised and unrelated files
+//! Downloads land in one folder per solve inside the Local panel's current folder
+//! (`xia2chem_r3/`, `autoproc_noanom_r3/`, `frames_r3/` …), keeping the server's file
+//! names. A small `.alba_source.json` in each of those folders records where each file
+//! came from, so a second download of the same file is recognised and unrelated files
 //! are never overwritten.
 
 use crate::local::SOURCE_FILE;
@@ -61,6 +62,37 @@ pub fn solve_tag(solve: &Solve, run: &Run, multi_prefix: bool) -> String {
         s.push_str(&format!("_n{}", solve.n));
     }
     s
+}
+
+pub fn frames_tag(run: &Run, multi_prefix: bool) -> String {
+    if multi_prefix {
+        format!("frames_{}_r{}", sanitize(&run.prefix), run.run)
+    } else {
+        format!("frames_r{}", run.run)
+    }
+}
+
+/// Folder for one solve inside `cwd`: `<tag>`, unless that folder already holds
+/// another sample's (or someone else's) files; then `<tag>_<sample>`,
+/// `<tag>_<sample>_<date>`, then numbered.
+pub fn solve_dir(cwd: &Path, tag: &str, date: &str, sample: &str) -> std::path::PathBuf {
+    let usable = |dir: &Path| -> bool {
+        if !dir.exists() {
+            return true;
+        }
+        let empty = std::fs::read_dir(dir).is_ok_and(|mut r| r.next().is_none());
+        let src = read_sources(dir);
+        empty
+            || (!src.files.is_empty()
+                && src.files.values().all(|s| s.date == date && s.sample == sample))
+    };
+    let s = sanitize(sample);
+    [tag.to_string(), format!("{tag}_{s}"), format!("{tag}_{s}_{date}")]
+        .into_iter()
+        .chain((2..).map(|i| format!("{tag}_{s}_{i}")))
+        .map(|name| cwd.join(name))
+        .find(|d| usable(d))
+        .expect("some numbered folder is usable")
 }
 
 /// Local name for `remote` in `dir`: the server's file name when it's free (or
@@ -150,6 +182,33 @@ mod tests {
         let d = local_name(&dir, &sources, &HashSet::new(), "/r/xia2chem/shelxt.hkl", "xia2chem_r1");
         assert_eq!(d, "shelxt.hkl");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn one_folder_per_solve() {
+        let cwd = std::env::temp_dir().join(format!("alba_watch_dirs_{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let first = solve_dir(&cwd, "xia2chem_r3", "20251211", "JSG285b");
+        assert_eq!(first, cwd.join("xia2chem_r3"));
+        let mut s = Sources::default();
+        let mut origin = src("/r/shelxt.hkl");
+        origin.date = "20251211".into();
+        origin.sample = "JSG285b".into();
+        s.files.insert("shelxt.hkl".into(), origin);
+        write_sources(&first, &s).unwrap();
+        // same sample again: same folder
+        assert_eq!(solve_dir(&cwd, "xia2chem_r3", "20251211", "JSG285b"), first);
+        // another sample with the same run number: its own folder
+        assert_eq!(
+            solve_dir(&cwd, "xia2chem_r3", "20260307", "JSG300kappa0"),
+            cwd.join("xia2chem_r3_JSG300kappa0")
+        );
+        // a folder of the user's with that name (not ours, not empty): left alone
+        std::fs::create_dir_all(cwd.join("ednaproc_r1")).unwrap();
+        std::fs::write(cwd.join("ednaproc_r1").join("notes.txt"), b"mine").unwrap();
+        assert_eq!(solve_dir(&cwd, "ednaproc_r1", "d", "S"), cwd.join("ednaproc_r1_S"));
+        assert_eq!(frames_tag(&run("p", 3), false), "frames_r3");
+        std::fs::remove_dir_all(&cwd).ok();
     }
 
     #[test]
