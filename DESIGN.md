@@ -132,6 +132,16 @@ Gotchas:
   + 0.2·resolution (1 at ≤ 0.80 Å, 0 at ≥ 1.20 Å), only finished solves with HKL files; see `src/rank.rs`.
 - Every panel shows its useful keys on its bottom border; the console is compact and grows while focused.
 
+### 2.8 Terminal and mouse notes
+
+- `portable-pty` opens ConPTY with `PSEUDOCONSOLE_INHERIT_CURSOR`, so ConPTY first asks `ESC[6n` and waits for
+  the cursor-position reply; the reader answers it from the vt100 screen, **in one write** (a split reply is read
+  as separate keys and the program never starts).
+- The pseudo-console is 200 rows tall at the panel's width; the panel shows the log followed by the rows up
+  to the cursor, and resizes the width with the window.
+- Mouse capture is on (crossterm); the last frame's panel/list geometry (`app::Hit`) maps clicks to rows and to
+  the status-bar badges.
+
 ## 3. Gentle-scraping rules (hard requirements)
 
 1. **Read-only by construction.** The SFTP wrapper type exposes only `read_dir`, `stat` and `open_read`.
@@ -153,8 +163,8 @@ Gotchas:
 |---|---|
 | Login | Dialog asks username + password at every launch. **Nothing is stored.** Try to connect; on failure show the error and re-prompt (max 3). `--user` flag may prefill the username. |
 | What to download | The stats panel lists **every solve** with its statistics; the user marks which to download. HKL files: xia2chem `shelxt.hkl`+`.ins`, ednaproc `ep_XDS_ASCII.HKL`, autoPROC `XDS_ASCII.HKL` (anom/noanom). Logs are an optional toggle. |
-| Local layout | *(changed 2026-10-23)* One folder per solve inside the folder open in the Local panel: `xia2chem_r3/`, `ednaproc_r3/`, `autoproc_noanom_r3/`, `autoproc_anom_r3/`, `frames_r3/`, with the server's file names. If that folder already holds another sample's files (or the user's own), the app uses `<folder>_<sample>`, then `_<date>`, then numbers; nothing is overwritten. `.alba_source.json` in each folder records the origin. `N` makes the sample folder first. |
-| Console | Simple command runner (no PTY), run in the Local panel's folder. A bare program name gets the selected file (`xprep` → `xprep XDS_ASCII.HKL`; SHELX programs get the name without extension). *(changed 2026-10-23)* Windows GUI programs (detected from the .exe header, e.g. XPREP) are started directly and open their own window; console programs stream into the panel. |
+| Local layout | *(changed 2026-10-23)* `<sample>/<program>/` inside the folder open in the Local panel, like the old notebook: `JSG285b/xia2chem_r3/`, `…/ednaproc_r3/`, `…/autoproc_noanom_r3/`, `…/frames_r3/`, with the server's file names. Already inside a folder named after the sample: no second level. A program folder holding files from another beamtime gets `<folder>_<date>`; nothing is overwritten. `.alba_source.json` in each program folder records the origin. |
+| Console | *(changed 2026-10-23)* A terminal: console programs run in a Windows pseudo-console (ConPTY via `portable-pty`, screen kept by `vt100`), so interactive programs such as SADABS work; while one runs, each typed line + Enter is its answer, Ctrl-C interrupts (twice: kill), and its output stays in the log as text when it exits. A bare program name gets the selected file (`xprep XDS_ASCII.HKL`, `shelxt <name>`). Windows GUI programs (XPREP) start directly in their own window. |
 | Polling | Three modes: manual, slow (10 min), fast (2 min). Hard floor 60 s. One `RESULTS/` listing per poll. |
 | Notification | Optional sound each time a new **named** (non-test) sample appears. |
 | Test samples | Names containing `test`, or samples with only characterisation runs, are hidden; one key shows them. Never trigger the sound. |

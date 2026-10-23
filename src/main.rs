@@ -9,6 +9,7 @@ mod layout;
 mod local;
 mod model;
 mod notify;
+mod pty;
 mod rank;
 mod remote;
 mod ui;
@@ -89,7 +90,15 @@ fn main() -> Result<()> {
 
     let mut app = app::App::new(cfg, cfg_path, base, remote, tx, args.user, args.offline);
     let mut terminal = ratatui::init();
+    mouse_capture(true);
+    // ratatui's hook restores the screen on a panic; also release the mouse.
+    let restore_screen = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        mouse_capture(false);
+        restore_screen(info);
+    }));
     let result = run(&mut terminal, &mut app, &rx);
+    mouse_capture(false);
     ratatui::restore();
     app.shutdown();
     rt.shutdown_timeout(Duration::from_secs(2));
@@ -99,6 +108,7 @@ fn main() -> Result<()> {
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App, rx: &mpsc::Receiver<AppEvent>) -> Result<()> {
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
+        app.sync_layout();
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(ev) => app.handle(ev),
             Err(RecvTimeoutError::Timeout) => {}
@@ -113,4 +123,15 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App, rx: &mpsc::R
         }
     }
     Ok(())
+}
+
+fn mouse_capture(on: bool) {
+    use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+    use ratatui::crossterm::execute;
+    let mut out = std::io::stdout();
+    let _ = if on {
+        execute!(out, EnableMouseCapture)
+    } else {
+        execute!(out, DisableMouseCapture)
+    };
 }

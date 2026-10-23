@@ -18,14 +18,20 @@ alba_watch                    # or: alba_watch --user u2025xxxxxxx
 Each panel shows its keys on its bottom border; `?` lists them all. In short:
 
 - **Local** (left): browse folders, `N` makes a new folder, `Supr` moves the selected file or folder
-  to the Recycle Bin (asks first). Downloads land in one folder per solve
-  (`xia2chem_r3/`, `ednaproc_r3/`, `autoproc_noanom_r3/`, `frames_r3/` …) inside the folder open here.
+  to the Recycle Bin (asks first). Downloads land in `<sample>/<program>/` inside the folder open
+  here, like the old notebook: `JSG285b/xia2chem_r3/shelxt.hkl`, `JSG285b/autoproc_noanom_r3/…`,
+  `JSG285b/frames_r3/…`.
 - **ALBA**: beamtimes like folders; `Enter` opens one (the others are hidden), `Backspace` goes back.
 - **Stats**: every solve with its statistics, ★ on the best one. `Space` marks, `d` downloads,
   `F` downloads raw frames (asks first).
-- **Console**: `:` to type. Commands run in the Local folder and a bare program name gets the
-  selected file: with `XDS_ASCII.HKL` selected, `xprep` runs `xprep XDS_ASCII.HKL`. XPREP and other
-  Windows GUI programs open in their own window.
+- **Console**: a terminal (Windows ConPTY). `:` to type. Commands run in the Local folder and a
+  bare program name gets the selected file: with `XDS_ASCII.HKL` selected, `xprep` runs
+  `xprep XDS_ASCII.HKL`. Interactive console programs work: while SADABS (or any program) runs,
+  what you type plus Enter is its answer; Ctrl-C interrupts, twice kills. XPREP and other Windows
+  GUI programs open in their own window.
+- **Mouse**: click a panel or row, double-click to open, click a Stats checkbox to mark, wheel to
+  scroll, click the status badges (poll / sound / logs) to toggle. Shift+drag still selects text
+  in Windows Terminal.
 
 `Tab` cycles panels, `p` cycles polling, `n` toggles the new-sample sound, `q` quits (asks first).
 

@@ -1,9 +1,11 @@
-//! Bottom panel: a simple command runner (no PTY). Output streams into the scrollback;
-//! programs listed in `external_window` (XPREP) open in their own console window.
+//! Bottom panel: a terminal. Console programs run in a pseudo-terminal (see `pty.rs`),
+//! so interactive ones (SADABS, …) work: while a program runs, each line you type plus
+//! Enter is its answer. Windows GUI programs (XPREP) start directly in their own window.
 
 use crate::event::AppEvent;
+use crate::pty::PtyRun;
+use portable_pty::CommandBuilder;
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::mpsc::Sender;
@@ -15,7 +17,6 @@ const MAX_LINES: usize = 3000;
 pub enum LineKind {
     Cmd,
     Out,
-    Err,
     Info,
     Good,
     Warn,
@@ -30,17 +31,13 @@ pub struct ConsoleLine {
 
 #[derive(Debug)]
 pub enum ConsoleEvent {
-    Line(LineKind, String),
+    /// The running program printed something (redraw).
+    Output,
     Exited {
         label: String,
         code: Option<i32>,
         external: bool,
     },
-}
-
-pub struct Running {
-    pub pid: u32,
-    pub label: String,
 }
 
 /// What `submit` asks the app to do for builtins.
@@ -58,7 +55,10 @@ pub struct Console {
     pub cursor: usize,
     pub history: Vec<String>,
     hist_pos: Option<usize>,
-    pub running: Option<Running>,
+    /// The console program currently running, if any.
+    pub pty: Option<PtyRun>,
+    /// Terminal width in columns (the panel's inner width).
+    pub cols: u16,
     /// Lines scrolled up from the bottom.
     pub scroll: usize,
     log: Option<std::fs::File>,
@@ -208,6 +208,21 @@ impl Console {
         force_detached: impl Fn(&str) -> bool,
         tx: &Sender<AppEvent>,
     ) -> Option<Builtin> {
+        // While a program runs, the line (even an empty one) is its answer.
+        if self.pty.is_some() {
+            let answer = std::mem::take(&mut self.input);
+            self.cursor = 0;
+            self.scroll = 0;
+            let failed = self.pty.as_mut().and_then(|run| {
+                run.send_line(&answer)
+                    .err()
+                    .map(|e| format!("cannot send to {}: {e}", run.label))
+            });
+            if let Some(msg) = failed {
+                self.push(LineKind::Error, msg);
+            }
+            return None;
+        }
         let typed = self.input.trim().to_string();
         self.input.clear();
         self.cursor = 0;
@@ -246,30 +261,69 @@ impl Console {
             return None;
         }
 
-        if let Some(r) = &self.running {
-            self.push(
-                LineKind::Warn,
-                format!("`{}` is still running (Ctrl-C to stop it)", r.label),
-            );
-            return None;
-        }
-        match spawn_piped(&line, cwd, tx.clone()) {
-            Ok(pid) => {
-                self.running = Some(Running {
-                    pid,
-                    label: program,
-                })
-            }
-            Err(e) => self.push(LineKind::Error, format!("cannot run: {e}")),
+        match PtyRun::spawn(pty_command(&line, exe.as_deref()), &program, cwd, self.cols, tx.clone()) {
+            Ok(run) => self.pty = Some(run),
+            Err(e) => self.push(LineKind::Error, format!("cannot run {program}: {e}")),
         }
         None
     }
 
-    pub fn kill_running(&mut self) {
-        if let Some(r) = &self.running {
-            kill_tree(r.pid);
-            let label = r.label.clone();
-            self.push(LineKind::Warn, format!("stopping {label}…"));
+    /// Ctrl-C: interrupt the running program; a second Ctrl-C within 2 s kills it.
+    pub fn interrupt(&mut self) {
+        let Some(run) = self.pty.as_mut() else {
+            return;
+        };
+        let label = run.label.clone();
+        let msg = if run.interrupt() {
+            format!("killed {label}")
+        } else {
+            format!("Ctrl-C sent to {label} (again within 2 s to kill it)")
+        };
+        self.push(LineKind::Warn, msg);
+    }
+
+    /// Stops the running program right away (quitting the app).
+    pub fn kill(&mut self) {
+        if let Some(run) = &mut self.pty {
+            run.interrupt();
+            run.interrupt();
+        }
+    }
+
+    /// The program exited: keep its output as text in the log.
+    pub fn finish_run(&mut self) {
+        if let Some(run) = self.pty.take() {
+            for line in run.transcript() {
+                self.push(LineKind::Out, line);
+            }
+        }
+    }
+}
+
+/// `cmd /C <line>` for shell builtins and scripts; executables run directly.
+fn pty_command(line: &str, exe: Option<&Path>) -> CommandBuilder {
+    let rest = line.splitn(2, char::is_whitespace).nth(1).unwrap_or_default();
+    match exe {
+        Some(p)
+            if p
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("exe") || e.eq_ignore_ascii_case("com")) =>
+        {
+            let mut c = CommandBuilder::new(p);
+            c.args(split_args(rest));
+            c
+        }
+        _ if cfg!(windows) => {
+            let mut c = CommandBuilder::new("cmd.exe");
+            c.arg("/C");
+            c.args(split_args(line));
+            c
+        }
+        _ => {
+            let mut c = CommandBuilder::new("sh");
+            c.arg("-c");
+            c.arg(line);
+            c
         }
     }
 }
@@ -278,14 +332,6 @@ impl Console {
 mod sys {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    pub fn shell(line: &str) -> Command {
-        let mut c = Command::new("cmd");
-        c.raw_arg("/C").raw_arg(line).creation_flags(CREATE_NO_WINDOW);
-        c
-    }
 
     /// GUI programs open their own window; a console program forced into
     /// `external_window` gets a console window of its own instead of ours.
@@ -297,64 +343,15 @@ mod sys {
         }
         c
     }
-
-    pub fn kill_tree(pid: u32) {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .status();
-    }
 }
 
 #[cfg(not(windows))]
 mod sys {
     use std::process::Command;
 
-    pub fn shell(line: &str) -> Command {
-        let mut c = Command::new("sh");
-        c.arg("-c").arg(line);
-        c
-    }
-
     pub fn detached(exe: &std::path::Path, _gui: bool) -> Command {
         Command::new(exe)
     }
-
-    pub fn kill_tree(pid: u32) {
-        let _ = Command::new("kill").arg(pid.to_string()).status();
-    }
-}
-
-fn kill_tree(pid: u32) {
-    sys::kill_tree(pid);
-}
-
-fn spawn_piped(line: &str, cwd: &Path, tx: Sender<AppEvent>) -> std::io::Result<u32> {
-    let mut child = sys::shell(line)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let pid = child.id();
-    let out = child.stdout.take().map(|s| pump(s, LineKind::Out, tx.clone()));
-    let err = child.stderr.take().map(|s| pump(s, LineKind::Err, tx.clone()));
-    let label = line.split_whitespace().next().unwrap_or_default().to_string();
-    thread::spawn(move || {
-        let code = child.wait().ok().and_then(|s| s.code());
-        for h in [out, err].into_iter().flatten() {
-            let _ = h.join();
-        }
-        let _ = tx.send(AppEvent::Console(ConsoleEvent::Exited {
-            label,
-            code,
-            external: false,
-        }));
-    });
-    Ok(pid)
 }
 
 fn spawn_detached(
@@ -488,25 +485,6 @@ pub fn is_gui_exe(path: &Path) -> bool {
         && u16::from_le_bytes([head[sub], head[sub + 1]]) == 2
 }
 
-fn pump(stream: impl Read + Send + 'static, kind: LineKind, tx: Sender<AppEvent>) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let reader = BufReader::new(stream);
-        for chunk in reader.split(b'\n').map_while(Result::ok) {
-            let text = String::from_utf8_lossy(&chunk);
-            // Progress lines overwrite themselves with '\r': keep the last state.
-            let text = text
-                .trim_end_matches('\r')
-                .rsplit('\r')
-                .next()
-                .unwrap_or_default()
-                .to_string();
-            if tx.send(AppEvent::Console(ConsoleEvent::Line(kind, text))).is_err() {
-                break;
-            }
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,26 +505,59 @@ mod tests {
         assert_eq!(c.input, "hext");
     }
 
-    #[test]
-    fn runs_a_command_and_reports_exit() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut c = Console::default();
-        c.input = "echo hello".into();
-        assert!(c.submit(&std::env::temp_dir(), None, |_| false, &tx).is_none());
-        let mut got_line = false;
-        loop {
-            match rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap() {
-                AppEvent::Console(ConsoleEvent::Line(LineKind::Out, t)) => {
-                    got_line |= t.trim() == "hello"
-                }
-                AppEvent::Console(ConsoleEvent::Exited { code, .. }) => {
-                    assert_eq!(code, Some(0));
-                    break;
-                }
-                _ => {}
+    /// Pumps console events until the running program exits (or `timeout`).
+    fn wait_exit(c: &mut Console, rx: &std::sync::mpsc::Receiver<AppEvent>, timeout: u64) -> Option<i32> {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+        while std::time::Instant::now() < end {
+            if let Ok(AppEvent::Console(ConsoleEvent::Exited { code, .. })) =
+                rx.recv_timeout(std::time::Duration::from_millis(200))
+            {
+                c.finish_run();
+                return code;
             }
         }
-        assert!(got_line);
+        None
+    }
+
+    fn screen_text(c: &Console) -> String {
+        c.pty
+            .as_ref()
+            .map(|r| r.parser.lock().unwrap().screen().contents())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn runs_a_command_in_the_terminal() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut c = Console {
+            cols: 100,
+            ..Console::default()
+        };
+        c.input = "echo hello".into();
+        assert!(c.submit(&std::env::temp_dir(), None, |_| false, &tx).is_none());
+        assert_eq!(wait_exit(&mut c, &rx, 20), Some(0));
+        assert!(c.lines.iter().any(|l| l.text.trim() == "hello"), "{:?}", c.lines);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn answers_reach_an_interactive_program() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut c = Console {
+            cols: 100,
+            ..Console::default()
+        };
+        c.input = "cmd /V:ON /C set /p X=Name? & echo got !X!".into();
+        c.submit(&std::env::temp_dir(), None, |_| false, &tx);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !screen_text(&c).contains("Name?") && std::time::Instant::now() < end {
+            let _ = rx.recv_timeout(std::time::Duration::from_millis(100));
+        }
+        assert!(screen_text(&c).contains("Name?"), "prompt shown before input");
+        c.input = "abc".into();
+        c.submit(&std::env::temp_dir(), None, |_| false, &tx);
+        assert_eq!(wait_exit(&mut c, &rx, 20), Some(0));
+        assert!(c.lines.iter().any(|l| l.text.contains("got abc")), "{:?}", c.lines);
     }
 
     #[test]

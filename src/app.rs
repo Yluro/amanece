@@ -11,7 +11,11 @@ use crate::model::{RemoteFile, SampleInfo, Solve, human_bytes, now_secs};
 use crate::notify;
 use crate::remote::session::HostKey;
 use crate::remote::{DownloadEvent, DownloadJob, RemoteCmd, RemoteEvent, RemoteHandle};
-use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::{Position, Rect};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
@@ -116,6 +120,42 @@ pub enum StatsRow {
     Frames { run: usize },
 }
 
+/// Where a list was drawn, so mouse clicks can be mapped to rows.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ListHit {
+    pub area: Rect,
+    /// First row of items on screen.
+    pub rows: Rect,
+    pub offset: usize,
+}
+
+impl ListHit {
+    pub fn row_at(&self, p: Position) -> Option<usize> {
+        self.rows
+            .contains(p)
+            .then(|| self.offset + usize::from(p.y - self.rows.y))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Badge {
+    Conn,
+    Poll,
+    Sound,
+    Logs,
+}
+
+/// Screen layout from the last frame (written by `ui::draw`).
+#[derive(Debug, Clone, Default)]
+pub struct Hit {
+    pub local: ListHit,
+    pub alba: ListHit,
+    pub stats: ListHit,
+    pub console: Rect,
+    pub console_cols: u16,
+    pub badges: Vec<(Rect, Badge)>,
+}
+
 pub struct Active {
     pub id: u64,
     pub label: String,
@@ -175,6 +215,8 @@ pub struct App {
     /// Proposal folder on the server for this session.
     pub remote_root: Option<String>,
     experiments_listed: bool,
+    pub hit: RefCell<Hit>,
+    last_click: Option<(Instant, u16, u16)>,
     pub quit: bool,
 }
 
@@ -224,6 +266,8 @@ impl App {
             alba_note: None,
             remote_root: None,
             experiments_listed: false,
+            hit: RefCell::new(Hit::default()),
+            last_click: None,
             quit: false,
             cfg,
         };
@@ -390,6 +434,7 @@ impl App {
     pub fn handle(&mut self, ev: AppEvent) {
         match ev {
             AppEvent::Input(Event::Key(k)) => self.on_key(k),
+            AppEvent::Input(Event::Mouse(m)) => self.on_mouse(m),
             AppEvent::Input(_) => {}
             AppEvent::Remote(e) => {
                 let trace: String = format!("{e:?}").chars().take(300).collect();
@@ -419,6 +464,17 @@ impl App {
         }
     }
 
+    /// Applies what the last frame measured (terminal width for the console program).
+    pub fn sync_layout(&mut self) {
+        let cols = self.hit.borrow().console_cols;
+        if cols > 0 && cols != self.console.cols {
+            self.console.cols = cols;
+            if let Some(run) = &mut self.console.pty {
+                run.resize(cols);
+            }
+        }
+    }
+
     pub fn save_cache(&mut self) {
         if let Err(e) = self.cache.save(&self.base) {
             self.console
@@ -430,7 +486,7 @@ impl App {
 
     pub fn shutdown(&mut self) {
         self.save_cache();
-        self.console.kill_running();
+        self.console.kill();
         self.remote.send(RemoteCmd::Shutdown);
     }
 
@@ -726,10 +782,10 @@ impl App {
 
     fn on_console(&mut self, e: ConsoleEvent) {
         match e {
-            ConsoleEvent::Line(kind, text) => self.console.push(kind, text),
+            ConsoleEvent::Output => {}
             ConsoleEvent::Exited { label, code, external } => {
                 if !external {
-                    self.console.running = None;
+                    self.console.finish_run();
                 }
                 let kind = if code == Some(0) { LineKind::Info } else { LineKind::Warn };
                 let code = code.map(|c| c.to_string()).unwrap_or_else(|| "?".into());
@@ -761,16 +817,8 @@ impl App {
             KeyCode::Char('?') => self.dialog = Some(Dialog::Help),
             KeyCode::Char(':') => self.set_focus(Focus::Console),
             KeyCode::Char('p') => self.cycle_poll(),
-            KeyCode::Char('n') => {
-                self.sound = !self.sound;
-                let s = if self.sound { "on" } else { "off" };
-                self.say(LineKind::Info, format!("new-sample sound {s}"));
-            }
-            KeyCode::Char('L') => {
-                self.include_logs = !self.include_logs;
-                let s = if self.include_logs { "with" } else { "without" };
-                self.say(LineKind::Info, format!("downloads now {s} logs"));
-            }
+            KeyCode::Char('n') => self.toggle_sound(),
+            KeyCode::Char('L') => self.toggle_logs(),
             KeyCode::Char('t') => {
                 self.show_test = !self.show_test;
                 let s = if self.show_test { "shown" } else { "hidden" };
@@ -801,6 +849,117 @@ impl App {
         }
     }
 
+    fn toggle_sound(&mut self) {
+        self.sound = !self.sound;
+        let s = if self.sound { "on" } else { "off" };
+        self.say(LineKind::Info, format!("new-sample sound {s}"));
+    }
+
+    fn toggle_logs(&mut self) {
+        self.include_logs = !self.include_logs;
+        let s = if self.include_logs { "with" } else { "without" };
+        self.say(LineKind::Info, format!("downloads now {s} logs"));
+    }
+
+    // ---------------------------------------------------------------- mouse
+
+    /// Click: focus a panel and select the row; double-click: open (like Enter);
+    /// a click in the Stats checkbox column marks; wheel: scroll; status-bar badges toggle.
+    fn on_mouse(&mut self, m: MouseEvent) {
+        if self.dialog.is_some() {
+            return;
+        }
+        let hit = self.hit.borrow().clone();
+        let p = Position::new(m.column, m.row);
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let double = self.is_double_click(p);
+                if let Some((_, b)) = hit.badges.iter().find(|(r, _)| r.contains(p)) {
+                    match b {
+                        Badge::Poll => self.cycle_poll(),
+                        Badge::Sound => self.toggle_sound(),
+                        Badge::Logs => self.toggle_logs(),
+                        Badge::Conn => {
+                            if !self.connected() && self.login_attempts < MAX_LOGIN_ATTEMPTS {
+                                self.open_login(String::new());
+                            }
+                        }
+                    }
+                } else if hit.local.area.contains(p) {
+                    self.set_focus(Focus::Local);
+                    if let Some(i) = hit.local.row_at(p).filter(|i| *i < self.local.entries.len()) {
+                        self.local.selected = i;
+                        if double {
+                            self.local.enter();
+                            if let Some(e) = self.local.error.take() {
+                                self.say(LineKind::Error, e);
+                            }
+                        }
+                    }
+                } else if hit.alba.area.contains(p) {
+                    self.set_focus(Focus::Alba);
+                    if let Some(i) = hit.alba.row_at(p).filter(|i| *i < self.alba_rows().len()) {
+                        if i != self.alba_sel {
+                            self.alba_sel = i;
+                            self.stats_sel = 0;
+                            self.sel_changed = Some(Instant::now());
+                        }
+                        if double {
+                            self.alba_activate();
+                        }
+                    }
+                } else if hit.stats.area.contains(p) {
+                    self.set_focus(Focus::Stats);
+                    if let Some(i) = hit.stats.row_at(p).filter(|i| *i < self.stats_len()) {
+                        self.stats_sel = i;
+                        if double || p.x < hit.stats.rows.x + 3 {
+                            self.toggle_stats_row(false);
+                        }
+                    }
+                } else if hit.console.contains(p) {
+                    self.set_focus(Focus::Console);
+                }
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let up = m.kind == MouseEventKind::ScrollUp;
+                if hit.local.area.contains(p) {
+                    self.local.move_by(if up { -3 } else { 3 });
+                } else if hit.alba.area.contains(p) {
+                    self.move_alba(if up { -3 } else { 3 });
+                } else if hit.stats.area.contains(p) {
+                    let n = self.stats_len();
+                    self.stats_sel = if up {
+                        self.stats_sel.saturating_sub(1)
+                    } else {
+                        (self.stats_sel + 1).min(n.saturating_sub(1))
+                    };
+                } else if hit.console.contains(p) {
+                    if up {
+                        self.console.scroll_up(3);
+                    } else {
+                        self.console.scroll_down(3);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn is_double_click(&mut self, p: Position) -> bool {
+        let now = Instant::now();
+        let double = self.last_click.is_some_and(|(t, x, y)| {
+            now.duration_since(t) < Duration::from_millis(450) && y == p.y && x.abs_diff(p.x) <= 2
+        });
+        self.last_click = if double { None } else { Some((now, p.x, p.y)) };
+        double
+    }
+
+    fn stats_len(&self) -> usize {
+        self.selected_sample()
+            .and_then(|(d, s)| self.info(&d, &s).map(|i| Self::stats_rows(i).len()))
+            .unwrap_or(0)
+    }
+
     fn set_focus(&mut self, f: Focus) {
         if f == Focus::Console && self.focus != Focus::Console {
             self.prev_focus = self.focus;
@@ -816,7 +975,7 @@ impl App {
                 self.downloads.queued
             ));
         }
-        if let Some(r) = &self.console.running {
+        if let Some(r) = &self.console.pty {
             lines.push(format!("`{}` is still running in the console and will be stopped.", r.label));
         }
         lines.push("Quit alba_watch? (y/n)".into());
@@ -987,8 +1146,8 @@ impl App {
             KeyCode::Tab | KeyCode::BackTab => return false,
             KeyCode::Esc => self.focus = self.prev_focus,
             KeyCode::Char('c') if ctrl => {
-                if self.console.running.is_some() {
-                    self.console.kill_running();
+                if self.console.pty.is_some() {
+                    self.console.interrupt();
                 } else {
                     self.console.input.clear();
                     self.console.home();
@@ -1104,22 +1263,27 @@ impl App {
             KeyCode::PageDown => self.move_alba(10),
             KeyCode::Home | KeyCode::Char('g') => self.move_alba(-(self.alba_sel as isize)),
             KeyCode::End | KeyCode::Char('G') => self.move_alba(isize::MAX / 2),
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => match self.selected_row() {
-                Some(AlbaRow::Date(d)) => self.open_date(&d),
-                Some(AlbaRow::Up) => self.close_date(),
-                Some(AlbaRow::Sample { date, name }) => {
-                    if self.info(&date, &name).is_none() {
-                        self.request_scan(&date, &name, false);
-                    }
-                    self.focus = Focus::Stats;
-                }
-                None => {}
-            },
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.alba_activate(),
             KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => self.close_date(),
             KeyCode::Char('s') => self.rescan_selected(),
             KeyCode::Char('S') => self.fetch_all(),
             KeyCode::Char('r') => self.refresh_remote(),
             _ => {}
+        }
+    }
+
+    /// Enter / double-click on an ALBA row.
+    fn alba_activate(&mut self) {
+        match self.selected_row() {
+            Some(AlbaRow::Date(d)) => self.open_date(&d),
+            Some(AlbaRow::Up) => self.close_date(),
+            Some(AlbaRow::Sample { date, name }) => {
+                if self.info(&date, &name).is_none() {
+                    self.request_scan(&date, &name, false);
+                }
+                self.focus = Focus::Stats;
+            }
+            None => {}
         }
     }
 
@@ -1232,22 +1396,7 @@ impl App {
             }
             KeyCode::Home | KeyCode::Char('g') => self.stats_sel = 0,
             KeyCode::End | KeyCode::Char('G') => self.stats_sel = rows.len().saturating_sub(1),
-            KeyCode::Char(' ') => match rows.get(self.stats_sel) {
-                Some(StatsRow::Solve { run, solve }) => {
-                    let k = info.runs[*run].solves[*solve].key();
-                    if !self.marks.remove(&k) {
-                        self.marks.insert(k);
-                    }
-                    self.stats_sel = (self.stats_sel + 1).min(rows.len().saturating_sub(1));
-                }
-                Some(StatsRow::Frames { run }) => {
-                    let r = &info.runs[*run];
-                    let now = self.frames_marked(&date, &sample, r);
-                    self.frame_marks
-                        .insert(Self::frame_key(&date, &sample, &r.key()), !now);
-                }
-                None => {}
-            },
+            KeyCode::Char(' ') => self.toggle_stats_row(true),
             KeyCode::Char('a') => {
                 let keys: Vec<String> = info
                     .solves()
@@ -1267,6 +1416,35 @@ impl App {
             KeyCode::Char('s') => self.rescan_selected(),
             KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::Alba,
             _ => {}
+        }
+    }
+
+    /// Marks/unmarks the highlighted solve or frames run; `advance` moves down after a solve.
+    fn toggle_stats_row(&mut self, advance: bool) {
+        let Some((date, sample)) = self.selected_sample() else {
+            return;
+        };
+        let Some(info) = self.info(&date, &sample).cloned() else {
+            return;
+        };
+        let rows = Self::stats_rows(&info);
+        match rows.get(self.stats_sel) {
+            Some(StatsRow::Solve { run, solve }) => {
+                let k = info.runs[*run].solves[*solve].key();
+                if !self.marks.remove(&k) {
+                    self.marks.insert(k);
+                }
+                if advance {
+                    self.stats_sel = (self.stats_sel + 1).min(rows.len().saturating_sub(1));
+                }
+            }
+            Some(StatsRow::Frames { run }) => {
+                let r = &info.runs[*run];
+                let now = self.frames_marked(&date, &sample, r);
+                self.frame_marks
+                    .insert(Self::frame_key(&date, &sample, &r.key()), !now);
+            }
+            None => {}
         }
     }
 
@@ -1313,7 +1491,7 @@ impl App {
                 continue;
             }
             let tag = download::solve_tag(solve, run, multi);
-            let dir = download::solve_dir(&cwd, &tag, date, &info.name);
+            let dir = download::solve_dir(&download::sample_dir(&cwd, &info.name), &tag, date, &info.name);
             let what = solve.kind.label().to_string();
             let Some(mut batch) = self.plan_folder(&dir, &files, date, &info.name, &what, run.run) else {
                 continue;
@@ -1436,7 +1614,11 @@ impl App {
             }
         }
         lines.push(String::new());
-        lines.push(format!("into {}{}frames_r…", self.local.cwd.display(), std::path::MAIN_SEPARATOR));
+        lines.push(format!(
+            "into {}{sep}frames_r…",
+            download::sample_dir(&self.local.cwd, &sample).display(),
+            sep = std::path::MAIN_SEPARATOR
+        ));
         lines.push(String::new());
         lines.push("Download? (y/n)".into());
         self.dialog = Some(Dialog::Confirm {
@@ -1464,7 +1646,7 @@ impl App {
             if mine.is_empty() {
                 continue;
             }
-            let dir = download::solve_dir(&cwd, &download::frames_tag(r, multi), date, sample);
+            let dir = download::solve_dir(&download::sample_dir(&cwd, sample), &download::frames_tag(r, multi), date, sample);
             let Some(mut batch) = self.plan_folder(&dir, &mine, date, sample, "frames", r.run) else {
                 continue;
             };

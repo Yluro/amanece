@@ -8,6 +8,7 @@ description = "TUI to browse ALBA BL13-XALOC autoprocessing results over SFTP an
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 directories = "6.0.0"
+portable-pty = "0.9.0"
 ratatui = "0.30.2"
 regex = "1.13.1"
 roxmltree = "0.21.1"
@@ -18,6 +19,7 @@ serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["full"] }
 toml = "1.1.8"
 trash = "5.2.9"
+vt100 = "0.18.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_System_Diagnostics_Debug"] }

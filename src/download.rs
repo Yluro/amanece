@@ -1,8 +1,8 @@
-//! Downloads land in one folder per solve inside the Local panel's current folder
-//! (`xia2chem_r3/`, `autoproc_noanom_r3/`, `frames_r3/` …), keeping the server's file
-//! names. A small `.alba_source.json` in each of those folders records where each file
-//! came from, so a second download of the same file is recognised and unrelated files
-//! are never overwritten.
+//! Downloads land in `<sample>/<program>/` inside the Local panel's current folder,
+//! like the old notebook (`JSG285b/xia2chem_r3/shelxt.hkl`, `JSG285b/frames_r3/…`),
+//! keeping the server's file names. A small `.alba_source.json` in each program folder
+//! records where each file came from, so a second download of the same file is
+//! recognised and unrelated files are never overwritten.
 
 use crate::local::SOURCE_FILE;
 use crate::model::{Run, Solve};
@@ -85,10 +85,24 @@ pub fn frames_tag(run: &Run, multi_prefix: bool) -> String {
     }
 }
 
-/// Folder for one solve inside `cwd`: `<tag>`, unless that folder already holds
-/// another sample's (or someone else's) files; then `<tag>_<sample>`,
-/// `<tag>_<sample>_<date>`, then numbered.
-pub fn solve_dir(cwd: &Path, tag: &str, date: &str, sample: &str) -> std::path::PathBuf {
+/// The sample's folder: `cwd/<sample>`, or `cwd` itself when you are already in a
+/// folder of that name.
+pub fn sample_dir(cwd: &Path, sample: &str) -> std::path::PathBuf {
+    let name = sanitize(sample);
+    if cwd
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&name))
+    {
+        cwd.to_path_buf()
+    } else {
+        cwd.join(name)
+    }
+}
+
+/// Folder for one solve inside the sample folder: `<tag>`, unless that folder already
+/// holds files from another beamtime or sample (or someone else's); then
+/// `<tag>_<date>`, then numbered.
+pub fn solve_dir(parent: &Path, tag: &str, date: &str, sample: &str) -> std::path::PathBuf {
     let usable = |dir: &Path| -> bool {
         if !dir.exists() {
             return true;
@@ -99,11 +113,10 @@ pub fn solve_dir(cwd: &Path, tag: &str, date: &str, sample: &str) -> std::path::
             || (!src.files.is_empty()
                 && src.files.values().all(|s| s.date == date && s.sample == sample))
     };
-    let s = sanitize(sample);
-    [tag.to_string(), format!("{tag}_{s}"), format!("{tag}_{s}_{date}")]
+    [tag.to_string(), format!("{tag}_{date}")]
         .into_iter()
-        .chain((2..).map(|i| format!("{tag}_{s}_{i}")))
-        .map(|name| cwd.join(name))
+        .chain((2..).map(|i| format!("{tag}_{date}_{i}")))
+        .map(|name| parent.join(name))
         .find(|d| usable(d))
         .expect("some numbered folder is usable")
 }
@@ -211,15 +224,18 @@ mod tests {
         write_sources(&first, &s).unwrap();
         // same sample again: same folder
         assert_eq!(solve_dir(&cwd, "xia2chem_r3", "20251211", "JSG285b"), first);
-        // another sample with the same run number: its own folder
+        // same sample name from another beamtime: dated folder
         assert_eq!(
-            solve_dir(&cwd, "xia2chem_r3", "20260307", "JSG300kappa0"),
-            cwd.join("xia2chem_r3_JSG300kappa0")
+            solve_dir(&cwd, "xia2chem_r3", "20260307", "JSG285b"),
+            cwd.join("xia2chem_r3_20260307")
         );
         // a folder of the user's with that name (not ours, not empty): left alone
         std::fs::create_dir_all(cwd.join("ednaproc_r1")).unwrap();
         std::fs::write(cwd.join("ednaproc_r1").join("notes.txt"), b"mine").unwrap();
-        assert_eq!(solve_dir(&cwd, "ednaproc_r1", "d", "S"), cwd.join("ednaproc_r1_S"));
+        assert_eq!(solve_dir(&cwd, "ednaproc_r1", "d", "S"), cwd.join("ednaproc_r1_d"));
+        // sample folder: created inside cwd, not nested when already inside it
+        assert_eq!(sample_dir(&cwd, "JSG285b"), cwd.join("JSG285b"));
+        assert_eq!(sample_dir(&cwd.join("JSG285b"), "JSG285b"), cwd.join("JSG285b"));
         assert_eq!(frames_tag(&run("p", 3), false), "frames_r3");
         std::fs::remove_dir_all(&cwd).ok();
     }

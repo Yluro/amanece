@@ -1,6 +1,6 @@
 //! Rendering. Reads `App`, never mutates it.
 
-use crate::app::{AlbaRow, App, Conn, Dialog, Focus, StatsRow};
+use crate::app::{AlbaRow, App, Badge, Conn, Dialog, Focus, ListHit, StatsRow};
 use crate::config::PollMode;
 use crate::console::LineKind;
 use crate::model::{SampleInfo, Shell, Solve, Status, human_bytes};
@@ -18,11 +18,11 @@ const STATS_WIDTH: u16 = 76;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
-    // Compact console; it grows while you type in it.
+    // The console grows while you type in it.
     let console_h = if app.focus == Focus::Console {
-        (area.height / 3).clamp(8, 16)
+        (area.height * 2 / 5).clamp(12, 24)
     } else {
-        7
+        (area.height / 4).clamp(9, 13)
     }
     .min(area.height.saturating_sub(10).max(4));
     let [main, console, status] = Layout::vertical([
@@ -162,11 +162,17 @@ fn draw_local(f: &mut Frame, app: &App, area: Rect) {
             }
         })
         .collect();
+    let rows = block.inner(area);
     let list = List::new(items)
         .block(block)
         .highlight_style(highlight(focused));
     let mut state = ListState::default().with_selected(Some(app.local.selected));
     f.render_stateful_widget(list, area, &mut state);
+    app.hit.borrow_mut().local = ListHit {
+        area,
+        rows,
+        offset: state.offset(),
+    };
 }
 
 fn highlight(focused: bool) -> Style {
@@ -200,6 +206,10 @@ fn status_glyph(s: Status) -> Span<'static> {
 
 fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Alba;
+    app.hit.borrow_mut().alba = ListHit {
+        area,
+        ..ListHit::default()
+    };
     let mut t = title("ALBA", focused);
     t.spans.push(conn_label(app));
     t.spans.push(Span::raw(" "));
@@ -255,11 +265,17 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     if listing {
         items.push(ListItem::new(Line::from("  listing…").fg(Color::DarkGray)));
     }
+    let rows = block.inner(area);
     let list = List::new(items)
         .block(block)
         .highlight_style(highlight(focused));
     let mut state = ListState::default().with_selected(Some(app.alba_sel));
     f.render_stateful_widget(list, area, &mut state);
+    app.hit.borrow_mut().alba = ListHit {
+        area,
+        rows,
+        offset: state.offset(),
+    };
 }
 
 fn sample_item(app: &App, date: &str, name: &str, width: usize) -> ListItem<'static> {
@@ -323,6 +339,10 @@ fn cc(v: Option<f64>) -> String {
 
 fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Stats;
+    app.hit.borrow_mut().stats = ListHit {
+        area,
+        ..ListHit::default()
+    };
     let selected = app.selected_row();
     let Some(AlbaRow::Sample { date, name }) = selected.clone() else {
         let block = panel(title("Stats", focused), focused, &[]);
@@ -413,6 +433,16 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         .row_highlight_style(highlight(focused));
     let mut state = TableState::default().with_selected(Some(app.stats_sel.min(rows.len() - 1)));
     f.render_stateful_widget(table, table_a, &mut state);
+    app.hit.borrow_mut().stats = ListHit {
+        area,
+        // rows start below the header line
+        rows: Rect {
+            y: table_a.y + 1,
+            height: table_a.height.saturating_sub(1),
+            ..table_a
+        },
+        offset: state.offset(),
+    };
 
     let lines = match rows.get(app.stats_sel) {
         Some(StatsRow::Solve { run, solve }) => solve_details(app, info, *run, *solve),
@@ -617,7 +647,6 @@ fn line_style(k: LineKind) -> Style {
     match k {
         LineKind::Cmd => Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         LineKind::Out => Style::new(),
-        LineKind::Err => Style::new().fg(Color::LightRed),
         LineKind::Info => Style::new().fg(Color::DarkGray),
         LineKind::Good => Style::new().fg(Color::Green),
         LineKind::Warn => Style::new().fg(Color::Yellow),
@@ -625,16 +654,75 @@ fn line_style(k: LineKind) -> Style {
     }
 }
 
+fn vt_color(c: vt100::Color) -> Option<Color> {
+    match c {
+        vt100::Color::Default => None,
+        vt100::Color::Idx(i) => Some(Color::Indexed(i)),
+        vt100::Color::Rgb(r, g, b) => Some(Color::Rgb(r, g, b)),
+    }
+}
+
+/// The running program's screen, row by row, with its colours.
+fn screen_lines(screen: &vt100::Screen) -> Vec<Line<'static>> {
+    let cols = screen.size().1.get();
+    (0..=crate::pty::last_used_row(screen))
+        .map(|r| {
+            let mut spans: Vec<Span> = Vec::new();
+            let mut text = String::new();
+            let mut style = Style::new();
+            for c in 0..cols {
+                let Some(cell) = screen.cell(r, c) else {
+                    continue;
+                };
+                if cell.is_wide_continuation() {
+                    continue;
+                }
+                let mut st = Style::new();
+                if let Some(fg) = vt_color(cell.fgcolor()) {
+                    st = st.fg(fg);
+                }
+                if let Some(bg) = vt_color(cell.bgcolor()) {
+                    st = st.bg(bg);
+                }
+                if cell.bold() {
+                    st = st.add_modifier(Modifier::BOLD);
+                }
+                if cell.underline() {
+                    st = st.add_modifier(Modifier::UNDERLINED);
+                }
+                if cell.inverse() {
+                    st = st.add_modifier(Modifier::REVERSED);
+                }
+                if st != style && !text.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut text), style));
+                }
+                style = st;
+                text.push_str(if cell.has_contents() { cell.contents() } else { " " });
+            }
+            let tail = if style == Style::new() {
+                text.trim_end().to_string()
+            } else {
+                text
+            };
+            if !tail.is_empty() {
+                spans.push(Span::styled(tail, style));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
 fn draw_console(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Console;
     let c = &app.console;
     let cwd = app.local.cwd.display().to_string();
     let mut t = title(
-        format!("Console  {}", shorten(&cwd, area.width.saturating_sub(30) as usize)),
+        format!("Console  {}", shorten(&cwd, area.width.saturating_sub(40) as usize)),
         focused,
     );
-    if let Some(r) = &c.running {
-        t.spans.push(Span::raw(format!("[running {}] ", r.label)).yellow());
+    if let Some(r) = &c.pty {
+        t.spans.push(Span::raw(format!(" {} running: type the answer, Enter sends it ", r.label)).black().on_yellow());
+        t.spans.push(Span::raw(" "));
     }
     if c.scroll > 0 {
         t.spans.push(Span::raw(format!("[↑{}] ", c.scroll)).fg(Color::DarkGray));
@@ -643,34 +731,54 @@ fn draw_console(f: &mut Frame, app: &App, area: Rect) {
         t.spans.push(Span::raw("file: ").fg(Color::DarkGray));
         t.spans.push(Span::raw(format!("{file} ")).fg(Color::Gray));
     }
-    let keys: &[(&str, &str)] = if focused {
-        &[("⏎", "run"), ("^C", "stop"), ("Esc", "leave")]
-    } else {
-        &[(":", "type a command")]
+    let keys: &[(&str, &str)] = match (focused, c.pty.is_some()) {
+        (true, true) => &[("⏎", "send answer"), ("^C", "interrupt"), ("Esc", "leave")],
+        (true, false) => &[("⏎", "run"), ("↑↓", "history"), ("Esc", "leave")],
+        (false, _) => &[(":", "type a command")],
     };
     let block = panel(t, focused, keys);
     let inner = block.inner(area);
     f.render_widget(block, area);
+    {
+        let mut hit = app.hit.borrow_mut();
+        hit.console = area;
+        hit.console_cols = inner.width;
+    }
     if inner.height == 0 {
         return;
     }
     let [log_a, input_a] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
     let h = log_a.height as usize;
-    let end = c.lines.len().saturating_sub(c.scroll);
-    let start = end.saturating_sub(h);
-    let lines: Vec<Line> = c
+
+    // the log, followed by the running program's live screen
+    let live: Vec<Line> = c
+        .pty
+        .as_ref()
+        .and_then(|r| r.parser.lock().ok().map(|p| screen_lines(p.screen())))
+        .unwrap_or_default();
+    let need = h + c.scroll;
+    let from_log = need.saturating_sub(live.len()).min(c.lines.len());
+    let mut all: Vec<Line> = c
         .lines
         .iter()
-        .skip(start)
-        .take(end - start)
+        .skip(c.lines.len() - from_log)
         .map(|l| Line::styled(l.text.clone(), line_style(l.kind)))
         .collect();
-    f.render_widget(Paragraph::new(lines), log_a);
+    all.extend(live);
+    let end = all.len().saturating_sub(c.scroll);
+    let start = end.saturating_sub(h);
+    f.render_widget(Paragraph::new(all[start..end].to_vec()), log_a);
 
-    let prompt = Span::raw("> ").fg(if focused { ACCENT } else { Color::DarkGray });
-    let hint = Span::raw(c.input.clone());
-    f.render_widget(Paragraph::new(Line::from(vec![prompt, hint])), input_a);
+    let prompt = if c.pty.is_some() {
+        Span::raw("» ").yellow().bold()
+    } else {
+        Span::raw("> ").fg(if focused { ACCENT } else { Color::DarkGray })
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![prompt, Span::raw(c.input.clone())])),
+        input_a,
+    );
     if focused && app.dialog.is_none() {
         let before: usize = c.input.chars().take(c.cursor).count();
         f.set_cursor_position((input_a.x + 2 + before as u16, input_a.y));
@@ -711,6 +819,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         right.push(badge(s, Color::Black, ACCENT));
         right.push(Span::raw(" "));
     }
+    let mut tags: Vec<(usize, Badge)> = Vec::new();
+    tags.push((right.len(), Badge::Conn));
     right.push(match &app.conn {
         Conn::Connected(u) => badge(format!("● {u}"), Color::Black, Color::Green),
         Conn::Connecting => badge("◌ connecting".into(), Color::Black, Color::Yellow),
@@ -720,6 +830,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         Conn::Lost(_) => badge("✗ disconnected".into(), Color::White, Color::Red),
     });
     right.push(Span::raw(" "));
+    tags.push((right.len(), Badge::Poll));
     right.push(match (app.poll_mode, app.next_poll) {
         (PollMode::Manual, _) => badge("poll manual".into(), OFF_FG, OFF_BG),
         (m, Some(at)) => {
@@ -730,12 +841,14 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         (m, None) => badge(format!("poll {}", format!("{m:?}").to_lowercase()), Color::Black, Color::LightBlue),
     });
     right.push(Span::raw(" "));
+    tags.push((right.len(), Badge::Sound));
     right.push(if app.sound {
         badge("♪ sound on".into(), Color::Black, Color::LightMagenta)
     } else {
         badge("♪ sound off".into(), OFF_FG, OFF_BG)
     });
     right.push(Span::raw(" "));
+    tags.push((right.len(), Badge::Logs));
     right.push(if app.include_logs {
         badge("logs on".into(), Color::Black, Color::LightYellow)
     } else {
@@ -783,6 +896,17 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
             msg_a,
         );
     }
+    // badge positions, for clicks
+    let mut x = right_a.x + right_a.width.saturating_sub(right.width() as u16);
+    let mut badges = Vec::new();
+    for (i, span) in right.spans.iter().enumerate() {
+        let w = span.width() as u16;
+        if let Some((_, b)) = tags.iter().find(|(j, _)| *j == i) {
+            badges.push((Rect::new(x, area.y, w, 1), *b));
+        }
+        x += w;
+    }
+    app.hit.borrow_mut().badges = badges;
     f.render_widget(Paragraph::new(right).alignment(ratatui::layout::Alignment::Right), right_a);
 }
 
@@ -888,7 +1012,7 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
             f.render_widget(Paragraph::new(lines).block(dialog_block(title)), r);
         }
         Dialog::Help => {
-            let r = centered(80, 36, area);
+            let r = centered(80, 41, area);
             f.render_widget(Clear, r);
             f.render_widget(
                 Paragraph::new(help_lines()).block(dialog_block("Keys (any key closes)")),
@@ -929,11 +1053,15 @@ fn help_lines() -> Vec<Line<'static>> {
         row("a", "mark all solves with HKL files     ★ marks the best solve"),
         row("d", "download marked solves into xia2chem_r3/, ednaproc_r3/ … in the Local folder"),
         row("F", "download ticked raw-frame runs (asks first)"),
-        sec("Console (runs in the Local panel's folder)"),
+        sec("Console (a terminal in the Local panel's folder)"),
         row("Enter", "run; a bare program name gets the selected file"),
+        row("", "while a program runs (SADABS…), Enter sends your answer"),
         row("", "xprep → xprep XDS_ASCII.HKL, shelxt → shelxt <name>"),
         row("↑ / ↓", "history        PgUp / PgDn  scroll"),
-        row("Ctrl-C", "stop running command    Esc  leave console"),
+        row("Ctrl-C", "interrupt (twice: kill)    Esc  leave console"),
+        sec("Mouse"),
+        row("click", "focus a panel, select a row; double-click opens"),
+        row("", "click a Stats checkbox to mark; wheel scrolls; click status badges"),
         row("cd <dir>", "change folder   clear  wipe the log"),
         Line::from("  Windows GUI programs (xprep, shelxle, olex2…) start directly in their own window.")
             .fg(Color::DarkGray),
@@ -1021,6 +1149,92 @@ mod tests {
             .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn click(app: &mut App, x: u16, y: u16) {
+        use ratatui::crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        app.handle(crate::event::AppEvent::Input(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        })));
+    }
+
+    /// Screen position of the first occurrence of `needle`.
+    fn find(screen: &str, needle: &str) -> (u16, u16) {
+        for (y, line) in screen.lines().enumerate() {
+            if let Some(i) = line.find(needle) {
+                return (line[..i].chars().count() as u16, y as u16);
+            }
+        }
+        panic!("{needle} not on screen");
+    }
+
+    #[test]
+    fn mouse_selects_marks_and_toggles() {
+        let base = std::env::temp_dir().join(format!("alba_watch_mouse_{}", std::process::id()));
+        std::fs::create_dir_all(base.join("JSG285b")).unwrap();
+        let mut app = demo_app(&base);
+        let screen = render(&app, 170, 42);
+
+        // click a sample row in the ALBA panel
+        let (x, y) = find(&screen, "JSG285-2");
+        click(&mut app, x, y);
+        assert_eq!(app.focus, Focus::Alba);
+        assert_eq!(app.selected_sample().map(|s| s.1).as_deref(), Some("JSG285-2"));
+
+        // back to JSG285b, then click its xia2chem checkbox in the Stats panel
+        let (x, y) = find(&screen, "JSG285b    ");
+        click(&mut app, x, y);
+        let screen = render(&app, 170, 42);
+        let (_, y) = find(&screen, "★ xia2chem");
+        let (cx, _) = find(&screen, "[ ] ★");
+        click(&mut app, cx + 1, y);
+        assert_eq!(app.focus, Focus::Stats);
+        assert!(app.marks.iter().any(|k| k.ends_with("#xia2chem")));
+
+        // double-click a folder in the Local panel opens it
+        let (x, y) = find(&screen, "JSG285b/");
+        click(&mut app, x, y);
+        click(&mut app, x, y);
+        assert!(app.local.cwd.ends_with("JSG285b"));
+
+        // status-bar badge
+        let screen = render(&app, 170, 42);
+        let (x, y) = find(&screen, "sound on");
+        click(&mut app, x, y);
+        assert!(!app.sound);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn console_shows_a_running_programs_prompt() {
+        let base = std::env::temp_dir().join(format!("alba_watch_term_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        let _ = render(&app, 170, 42);
+        app.sync_layout();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        // `^` keeps the typed command from matching the prompt the program prints
+        app.console.input = "cmd /C set /p X=Exp^ert mode (Y or N) [N]:".into();
+        app.console.submit(&base, None, |_| false, &tx);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut screen = String::new();
+        while std::time::Instant::now() < end {
+            screen = render(&app, 170, 42);
+            if screen.contains("Expert mode (Y or N) [N]:") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        println!("{}", screen.lines().skip(screen.lines().count().saturating_sub(15)).collect::<Vec<_>>().join("
+"));
+        assert!(screen.contains("Expert mode (Y or N) [N]:"), "{screen}");
+        assert!(screen.contains("running: type the answer"));
+        app.console.kill();
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
