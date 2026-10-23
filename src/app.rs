@@ -1,7 +1,7 @@
 //! Application state and event handling. Rendering lives in `ui.rs`.
 
 use crate::cache::Cache;
-use crate::config::{Config, PollMode};
+use crate::config::{Config, HEAVY_POLL_GAP, PollMode, interval_label};
 use crate::console::{Builtin, Console, ConsoleEvent, LineKind};
 use crate::download::{self, Source};
 use crate::event::AppEvent;
@@ -200,6 +200,10 @@ pub struct App {
     pub downloads: Downloads,
     next_job: u64,
     pub poll_mode: PollMode,
+    /// Last time a poll listed the beamtimes (rate-limited for fast polling).
+    last_heavy_poll: Option<Instant>,
+    /// Last poll-triggered rescan per sample (at most one a minute each).
+    last_rescan: HashMap<(String, String), Instant>,
     pub next_poll: Option<Instant>,
     pub show_test: bool,
     pub sound: bool,
@@ -258,6 +262,8 @@ impl App {
             downloads: Downloads::default(),
             next_job: 1,
             next_poll: None,
+            last_heavy_poll: None,
+            last_rescan: HashMap::new(),
             pending_notify: HashSet::new(),
             listed_this_session: HashSet::new(),
             scanning: HashSet::new(),
@@ -490,8 +496,13 @@ impl App {
         self.remote.send(RemoteCmd::Shutdown);
     }
 
+    /// One poll: re-list the newest (and the open) beamtime; the beamtime list itself
+    /// at most once a minute, so 5 s polling stays at one or two small requests.
     fn poll_now(&mut self) {
-        self.remote.send(RemoteCmd::ListExperiments);
+        if self.last_heavy_poll.is_none_or(|t| t.elapsed() >= HEAVY_POLL_GAP) {
+            self.last_heavy_poll = Some(Instant::now());
+            self.remote.send(RemoteCmd::ListExperiments);
+        }
         let newest = self.cache.dates.first().cloned();
         if let Some(d) = &newest {
             self.list_samples(d, true);
@@ -690,8 +701,17 @@ impl App {
                     }
                     rescan.sort();
                     rescan.dedup();
+                    // however fast the polling, each sample is rescanned at most once a minute
                     for n in rescan {
-                        self.request_scan(&date, &n, true);
+                        let key = (date.clone(), n.clone());
+                        if self
+                            .last_rescan
+                            .get(&key)
+                            .is_none_or(|t| t.elapsed() >= HEAVY_POLL_GAP)
+                        {
+                            self.last_rescan.insert(key, Instant::now());
+                            self.request_scan(&date, &n, true);
+                        }
                     }
                 }
                 self.clamp_alba();
@@ -991,12 +1011,11 @@ impl App {
         self.reschedule_poll();
         let text = match self.cfg.poll_interval(self.poll_mode) {
             None => "polling: manual (press r to refresh)".to_string(),
-            Some(d) => format!(
-                "polling: {:?} — newest beamtime every {} min",
-                self.poll_mode,
-                (d.as_secs_f64() / 60.0).round()
-            )
-            .to_lowercase(),
+            Some(d) if d < HEAVY_POLL_GAP => format!(
+                "polling every {}: open beamtime re-listed each time, sample rescans at most once a minute",
+                interval_label(d)
+            ),
+            Some(d) => format!("polling every {}: newest beamtime", interval_label(d)),
         };
         self.say(LineKind::Info, text);
     }
@@ -1852,6 +1871,69 @@ mod trash_check {
         for l in app.console.lines.iter().rev().take(1) {
             println!("console: {}", l.text);
         }
+        std::fs::remove_dir_all(&base).ok();
+    }
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use super::*;
+    use crate::model::{Run, SolveKind};
+
+    #[test]
+    fn fast_polls_stay_light() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let remote = crate::remote::spawn(
+            &rt,
+            crate::remote::Settings {
+                host: "h".into(),
+                port: 1,
+                rate: 1.0,
+                burst: 1,
+                known_hosts: None,
+                beamline: "bl13".into(),
+                remote_root: None,
+            },
+            tx.clone(),
+        );
+        let base = std::env::temp_dir().join(format!("alba_watch_poll_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = App::new(Config::default(), None, base.clone(), remote, tx, None, true);
+        app.conn = Conn::Connected("u".into());
+
+        // the beamtime list is asked for at most once a minute
+        app.poll_now();
+        let first = app.last_heavy_poll;
+        assert!(first.is_some());
+        app.poll_now();
+        assert_eq!(app.last_heavy_poll, first);
+
+        // a sample with a running solve is rescanned at most once a minute
+        let info = SampleInfo {
+            name: "S".into(),
+            scanned_at: 0,
+            runs: vec![Run {
+                prefix: "p".into(),
+                run: 1,
+                characterisation: false,
+                solves: vec![Solve::new(SolveKind::Xia2Chem, "/d", 1)],
+            }],
+        };
+        app.cache.experiment_mut("D").infos.insert("S".into(), info);
+        app.listed_this_session.insert("D".into());
+        let poll = || RemoteEvent::Samples {
+            date: "D".into(),
+            names: vec!["S".into()],
+            flat: false,
+            from_poll: true,
+        };
+        let key = ("D".to_string(), "S".to_string());
+        app.on_remote(poll());
+        assert!(app.scanning.contains(&key));
+        app.scanning.clear();
+        app.on_remote(poll());
+        assert!(!app.scanning.contains(&key));
         std::fs::remove_dir_all(&base).ok();
     }
 }

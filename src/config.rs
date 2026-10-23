@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Polls never run more often than this, whatever the config says.
-pub const MIN_POLL: Duration = Duration::from_secs(60);
+pub const MIN_POLL: Duration = Duration::from_secs(5);
+/// Below this interval a poll only re-lists the open/newest beamtime; the beamtime
+/// list and sample rescans happen at most this often (see `App::poll_now`).
+pub const HEAVY_POLL_GAP: Duration = Duration::from_secs(60);
 /// Upper bound for the SFTP request rate, whatever the config says.
 pub const MAX_REQUESTS_PER_SECOND: f64 = 5.0;
 
@@ -14,8 +17,16 @@ pub const MAX_REQUESTS_PER_SECOND: f64 = 5.0;
 #[serde(rename_all = "lowercase")]
 pub enum PollMode {
     Manual,
+    /// `slow_poll_minutes` (10 min)
     Slow,
+    /// `fast_poll_minutes` (2 min)
     Fast,
+    /// every 30 s
+    #[serde(rename = "30s")]
+    Every30s,
+    /// every 5 s
+    #[serde(rename = "5s")]
+    Every5s,
 }
 
 impl PollMode {
@@ -23,8 +34,20 @@ impl PollMode {
         match self {
             PollMode::Manual => PollMode::Slow,
             PollMode::Slow => PollMode::Fast,
-            PollMode::Fast => PollMode::Manual,
+            PollMode::Fast => PollMode::Every30s,
+            PollMode::Every30s => PollMode::Every5s,
+            PollMode::Every5s => PollMode::Manual,
         }
+    }
+}
+
+/// "10 min", "30 s" …
+pub fn interval_label(d: Duration) -> String {
+    let s = d.as_secs();
+    if s >= 60 && s % 60 == 0 {
+        format!("{} min", s / 60)
+    } else {
+        format!("{s} s")
     }
 }
 
@@ -74,10 +97,12 @@ const TEMPLATE: &str = r#"# alba_watch configuration. Credentials are never stor
 host = "userdata.cells.es"
 port = 443
 
-# "manual", "slow" or "fast" at startup (cycle with `p` in the app)
+# "manual", "slow", "fast", "30s" or "5s" at startup (cycle with `p` in the app).
+# At 30 s / 5 s a poll only re-lists the open beamtime; the beamtime list and
+# sample rescans still happen at most once a minute.
 poll_mode = "manual"
 slow_poll_minutes = 10.0
-fast_poll_minutes = 2.0   # never below 1 minute
+fast_poll_minutes = 2.0
 
 # beep when a new named sample gets processing results
 sound = true
@@ -130,6 +155,8 @@ impl Config {
             PollMode::Manual => return None,
             PollMode::Slow => self.slow_poll_minutes,
             PollMode::Fast => self.fast_poll_minutes,
+            PollMode::Every30s => 0.5,
+            PollMode::Every5s => 5.0 / 60.0,
         };
         let d = Duration::from_secs_f64((minutes * 60.0).max(0.0));
         Some(d.max(MIN_POLL))
@@ -163,11 +190,25 @@ mod tests {
     #[test]
     fn poll_floor_and_rate_cap() {
         let cfg = Config {
-            fast_poll_minutes: 0.1,
+            fast_poll_minutes: 0.01,
             max_requests_per_second: 50.0,
             ..Config::default()
         };
         assert_eq!(cfg.poll_interval(PollMode::Fast), Some(MIN_POLL));
+        assert_eq!(cfg.poll_interval(PollMode::Every30s), Some(Duration::from_secs(30)));
+        assert_eq!(cfg.poll_interval(PollMode::Every5s), Some(Duration::from_secs(5)));
+        assert_eq!(interval_label(Duration::from_secs(600)), "10 min");
+        assert_eq!(interval_label(Duration::from_secs(5)), "5 s");
+        let mut m = PollMode::Manual;
+        let mut seen = vec![];
+        for _ in 0..5 {
+            m = m.next();
+            seen.push(m);
+        }
+        assert_eq!(seen.last(), Some(&PollMode::Manual));
+        assert!(seen.contains(&PollMode::Every5s));
+        let parsed: Config = toml::from_str("poll_mode = \"5s\"").unwrap();
+        assert_eq!(parsed.poll_mode, PollMode::Every5s);
         assert_eq!(cfg.poll_interval(PollMode::Manual), None);
         assert_eq!(cfg.request_rate(), MAX_REQUESTS_PER_SECOND);
     }

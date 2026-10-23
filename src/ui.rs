@@ -831,14 +831,18 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     });
     right.push(Span::raw(" "));
     tags.push((right.len(), Badge::Poll));
+    let every = app
+        .cfg
+        .poll_interval(app.poll_mode)
+        .map(crate::config::interval_label)
+        .unwrap_or_default();
     right.push(match (app.poll_mode, app.next_poll) {
         (PollMode::Manual, _) => badge("poll manual".into(), OFF_FG, OFF_BG),
-        (m, Some(at)) => {
+        (_, Some(at)) => {
             let left = at.saturating_duration_since(Instant::now()).as_secs();
-            let mode = format!("{m:?}").to_lowercase();
-            badge(format!("poll {mode} {}:{:02}", left / 60, left % 60), Color::Black, Color::LightBlue)
+            badge(format!("poll {every} · {}:{:02}", left / 60, left % 60), Color::Black, Color::LightBlue)
         }
-        (m, None) => badge(format!("poll {}", format!("{m:?}").to_lowercase()), Color::Black, Color::LightBlue),
+        (_, None) => badge(format!("poll {every}"), Color::Black, Color::LightBlue),
     });
     right.push(Span::raw(" "));
     tags.push((right.len(), Badge::Sound));
@@ -1032,7 +1036,7 @@ fn help_lines() -> Vec<Line<'static>> {
         row("Tab / Shift-Tab", "next / previous panel"),
         row(":", "type in the console"),
         row("C", "log in (when offline)"),
-        row("p", "poll mode: manual → slow → fast"),
+        row("p", "polling: manual → 10 min → 2 min → 30 s → 5 s"),
         row("n", "new-sample sound on/off"),
         row("L", "include logs in downloads on/off"),
         row("t", "show/hide test and characterisation-only samples"),

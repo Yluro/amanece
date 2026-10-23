@@ -33,7 +33,9 @@ Each panel shows its keys on its bottom border; `?` lists them all. In short:
   scroll, click the status badges (poll / sound / logs) to toggle. Shift+drag still selects text
   in Windows Terminal.
 
-`Tab` cycles panels, `p` cycles polling, `n` toggles the new-sample sound, `q` quits (asks first).
+`Tab` cycles panels, `p` cycles polling (manual → 10 min → 2 min → 30 s → 5 s; the fast rates only
+re-list the open beamtime, sample rescans stay at most once a minute), `n` toggles the new-sample
+sound, `q` quits (asks first).
 
 ## Files it writes locally
 
