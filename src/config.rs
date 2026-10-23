@@ -39,7 +39,8 @@ pub struct Config {
     pub sound: bool,
     pub include_logs: bool,
     pub show_test: bool,
-    /// Programs that open in their own console window instead of the console panel.
+    /// Programs always started detached in their own window. Windows GUI programs
+    /// (xprep, shelxle, olex2, …) are detected automatically and need no entry.
     pub external_window: Vec<String>,
     pub max_requests_per_second: f64,
     pub burst: u32,
@@ -85,7 +86,8 @@ include_logs = false
 # show samples named "test..." and characterisation-only samples
 show_test = false
 
-# programs that open in their own console window (interactive)
+# programs always started in their own window instead of the console panel.
+# Windows GUI programs (xprep, shelxle, olex2, ...) are detected automatically.
 external_window = ["xprep"]
 
 # SFTP politeness: sustained requests per second (max 5) and burst size

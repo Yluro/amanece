@@ -4,6 +4,7 @@ use crate::app::{AlbaRow, App, Conn, Dialog, Focus, StatsRow};
 use crate::config::PollMode;
 use crate::console::LineKind;
 use crate::model::{SampleInfo, Shell, Solve, Status, human_bytes};
+use crate::rank;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -15,7 +16,13 @@ const ACCENT: Color = Color::Cyan;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
-    let console_h = (area.height / 3).clamp(6, 16);
+    // Compact console; it grows while you type in it.
+    let console_h = if app.focus == Focus::Console {
+        (area.height / 3).clamp(8, 16)
+    } else {
+        7
+    }
+    .min(area.height.saturating_sub(10).max(4));
     let [main, console, status] = Layout::vertical([
         Constraint::Min(8),
         Constraint::Length(console_h),
@@ -49,16 +56,36 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-fn panel(title: Line<'static>, focused: bool) -> Block<'static> {
+fn panel(title: Line<'static>, focused: bool, keys: &[(&str, &str)]) -> Block<'static> {
     let style = if focused {
         Style::new().fg(ACCENT)
     } else {
         Style::new().fg(Color::DarkGray)
     };
-    Block::bordered()
+    let block = Block::bordered()
         .border_type(if focused { BorderType::Thick } else { BorderType::Plain })
         .border_style(style)
-        .title(title)
+        .title(title);
+    if keys.is_empty() {
+        block
+    } else {
+        block.title_bottom(hints(keys, focused))
+    }
+}
+
+/// `⏎ open  ⌫ up …` for a panel's bottom border.
+fn hints(keys: &[(&str, &str)], focused: bool) -> Line<'static> {
+    let (k, d) = if focused {
+        (Style::new().fg(ACCENT).add_modifier(Modifier::BOLD), Style::new().fg(Color::Gray))
+    } else {
+        (Style::new().fg(Color::DarkGray), Style::new().fg(Color::DarkGray))
+    };
+    let mut spans = vec![Span::raw(" ")];
+    for (key, desc) in keys {
+        spans.push(Span::styled(key.to_string(), k));
+        spans.push(Span::styled(format!(" {desc}  "), d));
+    }
+    Line::from(spans)
 }
 
 fn title(text: impl Into<String>, focused: bool) -> Line<'static> {
@@ -99,6 +126,7 @@ fn draw_local(f: &mut Frame, app: &App, area: Rect) {
             focused,
         ),
         focused,
+        &[("⏎", "open"), ("⌫", "up"), ("N", "new folder"), ("o", "open file"), ("r", "refresh")],
     );
     let inner_w = area.width.saturating_sub(4) as usize;
     let items: Vec<ListItem> = app
@@ -169,13 +197,19 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     let mut t = title("ALBA", focused);
     t.spans.push(conn_label(app));
     t.spans.push(Span::raw(" "));
-    if let Some(root) = &app.remote_root
-        && root != "/"
-    {
-        let room = area.width.saturating_sub(30) as usize;
-        t.spans.push(Span::raw(format!("{} ", shorten(root, room))).fg(Color::DarkGray));
-    }
-    let block = panel(t, focused);
+    let root = app.remote_root.clone().unwrap_or_else(|| "/".into());
+    let path = match &app.alba_date {
+        Some(d) => format!("{}/{d}", root.trim_end_matches('/')),
+        None => root,
+    };
+    let room = area.width.saturating_sub(28) as usize;
+    t.spans.push(Span::raw(format!("{} ", shorten(&path, room))).fg(Color::Gray));
+    let keys: &[(&str, &str)] = if app.alba_date.is_some() {
+        &[("⏎", "stats"), ("⌫", "back"), ("s", "rescan"), ("S", "scan all"), ("t", "tests")]
+    } else {
+        &[("⏎", "open beamtime"), ("S", "scan all"), ("r", "refresh")]
+    };
+    let block = panel(t, focused, keys);
     let rows = app.alba_rows();
     if rows.is_empty() {
         let text = match (&app.conn, &app.alba_note) {
@@ -188,25 +222,33 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let inner_w = area.width.saturating_sub(4) as usize;
-    let items: Vec<ListItem> = rows
+    let listing = app
+        .alba_date
+        .as_ref()
+        .is_some_and(|d| app.cache.experiments.get(d).is_some_and(|e| e.samples.is_none()));
+    let mut items: Vec<ListItem> = rows
         .iter()
         .map(|r| match r {
+            AlbaRow::Up => ListItem::new(Line::from("  ../").fg(Color::LightBlue)),
             AlbaRow::Date(d) => {
-                let open = app.expanded.contains(d);
-                let exp = app.cache.experiments.get(d);
-                let count = exp
+                let count = app
+                    .cache
+                    .experiments
+                    .get(d)
                     .and_then(|e| e.samples.as_ref())
-                    .map(|s| format!("  {}", s.len()))
+                    .map(|s| format!("  {} samples", s.len()))
                     .unwrap_or_default();
-                let arrow = if open { "▾" } else { "▸" };
                 ListItem::new(Line::from(vec![
-                    Span::raw(format!("{arrow} {d}")).bold(),
+                    Span::raw(format!("  {d}/")).fg(Color::LightBlue).bold(),
                     Span::raw(count).fg(Color::DarkGray),
                 ]))
             }
             AlbaRow::Sample { date, name } => sample_item(app, date, name, inner_w),
         })
         .collect();
+    if listing {
+        items.push(ListItem::new(Line::from("  listing…").fg(Color::DarkGray)));
+    }
     let list = List::new(items)
         .block(block)
         .highlight_style(highlight(focused));
@@ -215,7 +257,8 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn sample_item(app: &App, date: &str, name: &str, width: usize) -> ListItem<'static> {
-    let local = app.base.join(name).is_dir();
+    // ◆: a folder with this sample's name exists in the Local panel's folder.
+    let local = app.local.entries.iter().any(|e| e.is_dir && e.name == name);
     let mut spans = vec![
         Span::raw("  "),
         if local {
@@ -276,7 +319,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Stats;
     let selected = app.selected_row();
     let Some(AlbaRow::Sample { date, name }) = selected.clone() else {
-        let block = panel(title("Stats", focused), focused);
+        let block = panel(title("Stats", focused), focused, &[]);
         let text = match selected {
             Some(AlbaRow::Date(d)) => date_summary(app, &d),
             _ => vec![Line::from("Select a sample in the ALBA panel.").fg(Color::DarkGray)],
@@ -284,7 +327,11 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), area);
         return;
     };
-    let block = panel(title(format!("{name} · {date}"), focused), focused);
+    let block = panel(
+        title(format!("{name} · {date}"), focused),
+        focused,
+        &[("␣", "mark"), ("a", "all"), ("d", "download here"), ("F", "frames"), ("L", "logs"), ("s", "rescan")],
+    );
     let Some(info) = app.info(&date, &name) else {
         let scanning = app.scanning.contains(&(date.clone(), name.clone()));
         let msg = if scanning {
@@ -316,12 +363,13 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
             .map(|h| Cell::from(h).bold()),
     )
     .fg(Color::Gray);
+    let best = rank::best(info).map(|(k, _)| k);
     let table_rows: Vec<Row> = rows
         .iter()
         .map(|r| match *r {
             StatsRow::Solve { run, solve } => {
                 let s = &info.runs[run].solves[solve];
-                solve_row(app, s, info.runs[run].run)
+                solve_row(app, s, info.runs[run].run, best.as_deref() == Some(&s.key()))
             }
             StatsRow::Frames { run } => {
                 let r = &info.runs[run];
@@ -342,15 +390,15 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         .collect();
     let widths = [
         Constraint::Length(3),
-        Constraint::Length(15),
+        Constraint::Length(17),
         Constraint::Length(3),
         Constraint::Length(1),
-        Constraint::Length(10),
+        Constraint::Length(9),
         Constraint::Length(5),
-        Constraint::Length(5),
+        Constraint::Length(6),
         Constraint::Length(4),
         Constraint::Length(5),
-        Constraint::Length(5),
+        Constraint::Length(4),
         Constraint::Length(4),
     ];
     let table = Table::new(table_rows, widths)
@@ -386,7 +434,16 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn solve_row(app: &App, s: &Solve, run: u32) -> Row<'static> {
+/// Overall Rmerge, or Rmeas marked with `*` when the pipeline reports no Rmerge.
+fn r_cell(o: Option<&Shell>) -> String {
+    match o {
+        Some(o) if o.rmerge_pct.is_some() => f1(o.rmerge_pct),
+        Some(o) if o.rmeas_pct.is_some() => format!("{}*", f1(o.rmeas_pct)),
+        _ => "–".into(),
+    }
+}
+
+fn solve_row(app: &App, s: &Solve, run: u32, best: bool) -> Row<'static> {
     let mark = if s.hkl.is_empty() {
         " - ".to_string()
     } else if app.marks.contains(&s.key()) {
@@ -399,20 +456,27 @@ fn solve_row(app: &App, s: &Solve, run: u32) -> Row<'static> {
     let sg = st
         .and_then(|st| st.space_group.clone())
         .unwrap_or_else(|| "–".into());
+    let label = if best {
+        format!("★ {}", s.kind.label())
+    } else {
+        format!("  {}", s.kind.label())
+    };
     let mut row = Row::new(vec![
         Cell::from(mark),
-        Cell::from(s.kind.label()),
+        Cell::from(label),
         Cell::from(run.to_string()),
         Cell::from(status_glyph(s.status)),
         Cell::from(sg),
         Cell::from(f2(o.and_then(|o| o.d_high))),
-        Cell::from(f1(o.and_then(|o| o.rmerge_pct))),
+        Cell::from(r_cell(o)),
         Cell::from(cc(o.and_then(|o| o.cc_half))),
         Cell::from(f1(o.and_then(|o| o.completeness))),
         Cell::from(f1(o.and_then(|o| o.i_sig))),
         Cell::from(f1(o.and_then(|o| o.multiplicity))),
     ]);
-    if s.status == Status::Failed {
+    if best {
+        row = row.fg(Color::LightGreen).add_modifier(Modifier::BOLD);
+    } else if s.status == Status::Failed {
         row = row.fg(Color::DarkGray);
     }
     row
@@ -443,10 +507,19 @@ fn solve_details(app: &App, info: &SampleInfo, run: usize, solve: usize) -> Vec<
         Status::Running => Span::raw("running").yellow(),
         Status::Failed => Span::raw("failed").red(),
     };
-    let mut lines = vec![Line::from(vec![
+    let mut head = vec![
         Span::raw(format!("{} · run {} · ", s.kind.label(), r.run)).bold(),
         status,
-    ])];
+    ];
+    let best = rank::best(info);
+    match (rank::score(s), &best) {
+        (Some(v), Some((k, _))) if *k == s.key() => {
+            head.push(Span::raw(format!("  ★ best solve (score {v:.2})")).light_green().bold());
+        }
+        (Some(v), Some((_, b))) => head.push(Span::raw(format!("  score {v:.2} (best {b:.2})")).fg(Color::Gray)),
+        _ => {}
+    }
+    let mut lines = vec![Line::from(head)];
     if let Some(st) = &s.stats {
         let cell = st
             .cell
@@ -498,6 +571,18 @@ fn solve_details(app: &App, info: &SampleInfo, run: usize, solve: usize) -> Vec<
     if let Some(n) = &s.note {
         lines.push(Line::from(n.clone()).fg(Color::Yellow));
     }
+    let rmeas_only = s
+        .stats
+        .as_ref()
+        .and_then(|st| st.overall.as_ref())
+        .is_some_and(|o| o.rmerge_pct.is_none() && o.rmeas_pct.is_some());
+    if rmeas_only {
+        lines.push(Line::from("* no Rmerge reported: the R column shows Rmeas").fg(Color::DarkGray));
+    }
+    lines.push(
+        Line::from("★ best: completeness, CC½, inner-shell R, resolution (solves with HKL only)")
+            .fg(Color::DarkGray),
+    );
     lines
 }
 
@@ -508,10 +593,10 @@ fn date_summary(app: &App, date: &str) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(format!("Beamtime {date}")).bold()];
     match total {
         Some(t) => {
-            lines.push(Line::from(format!("{t} sample folders in RESULTS, {scanned} scanned")));
+            lines.push(Line::from(format!("{t} sample folders, {scanned} scanned")));
             lines.push(Line::from(""));
             lines.push(
-                Line::from("Enter expands/collapses. S fetches stats for every sample (one every 3 s).")
+                Line::from("Enter opens the beamtime. S fetches stats for every sample (one every 3 s).")
                     .fg(Color::DarkGray),
             );
         }
@@ -548,7 +633,16 @@ fn draw_console(f: &mut Frame, app: &App, area: Rect) {
     if c.scroll > 0 {
         t.spans.push(Span::raw(format!("[↑{}] ", c.scroll)).fg(Color::DarkGray));
     }
-    let block = panel(t, focused);
+    if let Some(file) = app.local.selected_file() {
+        t.spans.push(Span::raw("file: ").fg(Color::DarkGray));
+        t.spans.push(Span::raw(format!("{file} ")).fg(Color::Gray));
+    }
+    let keys: &[(&str, &str)] = if focused {
+        &[("⏎", "run"), ("↑↓", "history"), ("PgUp/Dn", "scroll"), ("^C", "stop"), ("Esc", "leave")]
+    } else {
+        &[(":", "type a command")]
+    };
+    let block = panel(t, focused, keys);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height == 0 {
@@ -569,10 +663,11 @@ fn draw_console(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), log_a);
 
     let prompt = Span::raw("> ").fg(if focused { ACCENT } else { Color::DarkGray });
-    let hint = if !focused && c.input.is_empty() {
-        Span::raw("press : to type a command (shelxt, xprep, dir, cd …)").fg(Color::DarkGray)
-    } else {
-        Span::raw(c.input.clone())
+    let hint = match (c.input.is_empty(), app.local.selected_file()) {
+        (true, Some(file)) => Span::raw(format!("a bare program name gets the selected file: xprep → xprep {file}"))
+            .fg(Color::DarkGray),
+        (true, None) if !focused => Span::raw("press : to type a command (shelxt, xprep, dir, cd …)").fg(Color::DarkGray),
+        _ => Span::raw(c.input.clone()),
     };
     f.render_widget(Paragraph::new(Line::from(vec![prompt, hint])), input_a);
     if focused && app.dialog.is_none() {
@@ -618,7 +713,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(msg.to_string(), line_style(kind)));
     } else {
-        spans.push(Span::raw("  ? help").fg(Color::DarkGray));
+        spans.push(Span::raw("  Tab panels · p poll · n sound · ? help · q quit").fg(Color::DarkGray));
     }
     f.render_widget(Paragraph::new(Line::from(spans)).bg(Color::Rgb(25, 25, 25)), area);
 }
@@ -690,6 +785,25 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                 f.set_cursor_position((r.x + 1 + 12 + 1 + len as u16, y));
             }
         }
+        Dialog::Input { title, value, .. } => {
+            let w = (title.chars().count() as u16 + 6).clamp(48, 90);
+            let r = centered(w, 6, area);
+            f.render_widget(Clear, r);
+            let lines = vec![
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw("  Name "),
+                    Span::styled(
+                        format!(" {value:<width$}", width = (w as usize).saturating_sub(12)),
+                        Style::new().fg(Color::White).bg(Color::Rgb(40, 60, 80)),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from("  Enter create · Esc cancel").fg(Color::DarkGray),
+            ];
+            f.render_widget(Paragraph::new(lines).block(dialog_block(title)), r);
+            f.set_cursor_position((r.x + 1 + 8 + value.chars().count() as u16, r.y + 2));
+        }
         Dialog::Confirm { title, lines, .. } => {
             let h = lines.len() as u16 + 2;
             let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(20) as u16 + 6;
@@ -706,7 +820,7 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
             f.render_widget(Paragraph::new(lines).block(dialog_block(title)), r);
         }
         Dialog::Help => {
-            let r = centered(78, 34, area);
+            let r = centered(80, 36, area);
             f.render_widget(Clear, r);
             f.render_widget(
                 Paragraph::new(help_lines()).block(dialog_block("Keys (any key closes)")),
@@ -734,22 +848,25 @@ fn help_lines() -> Vec<Line<'static>> {
         row("q", "quit"),
         sec("Local (left)"),
         row("Enter / →", "open folder        Backspace / ←  parent"),
-        row("o", "open with default program    b  back to base dir    r  refresh"),
-        sec("ALBA (samples)"),
-        row("Enter / →", "expand beamtime, or go to the sample's stats"),
+        row("N / F7", "new folder here    o  open with default program"),
+        row("b", "back to the launch folder    r  refresh"),
+        sec("ALBA (beamtimes and samples, like folders)"),
+        row("Enter / →", "open a beamtime (hides the others) / go to a sample's stats"),
+        row("Backspace / ←", "back to the beamtime list"),
         row("s", "rescan sample      S  fetch stats for the whole beamtime"),
         row("r", "refresh listing"),
         sec("Stats"),
         row("Space", "mark solve for download / tick a frames run"),
-        row("a", "mark all solves with HKL files"),
-        row("d", "download marked solves (or the highlighted one)"),
+        row("a", "mark all solves with HKL files     ★ marks the best solve"),
+        row("d", "download marked solves into the Local panel's folder"),
         row("F", "download ticked raw-frame runs (asks first)"),
-        sec("Console"),
-        row("Enter", "run (in the Local panel's folder)"),
+        sec("Console (runs in the Local panel's folder)"),
+        row("Enter", "run; a bare program name gets the selected file"),
+        row("", "xprep → xprep XDS_ASCII.HKL, shelxt → shelxt <name>"),
         row("↑ / ↓", "history        PgUp / PgDn  scroll"),
         row("Ctrl-C", "stop running command    Esc  leave console"),
         row("cd <dir>", "change folder   clear  wipe the log"),
-        Line::from("  xprep opens in its own window; set others in config `external_window`.")
+        Line::from("  Windows GUI programs (xprep, shelxle, olex2…) start directly in their own window.")
             .fg(Color::DarkGray),
     ]
 }
@@ -816,7 +933,7 @@ mod tests {
         exp.infos.insert("JSG285b".into(), info);
         app.cache.set_dates(vec!["20251211".into(), "20251106".into()]);
         app.cache.experiments.insert("20251211".into(), exp);
-        app.expanded.insert("20251211".into());
+        app.alba_date = Some("20251211".into());
         app.alba_sel = app
             .alba_rows()
             .iter()
@@ -847,8 +964,14 @@ mod tests {
         println!("{wide}\n\n{narrow}");
         assert!(wide.contains("xia2chem") && wide.contains("P 4") && wide.contains("8.5"));
         assert!(narrow.contains("JSG285b"));
+        // the best solve is starred
+        assert!(wide.contains("★ xia2chem"));
         // test samples are hidden by default
         assert!(!wide.contains("KS347test"));
+        // an opened beamtime hides the other beamtimes
+        assert!(!wide.contains("20251106"));
+        // key hints on the borders
+        assert!(wide.contains("new folder") && wide.contains("download here"));
         std::fs::remove_dir_all(&base).ok();
     }
 }

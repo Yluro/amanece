@@ -12,7 +12,7 @@ use crate::notify;
 use crate::remote::session::HostKey;
 use crate::remote::{DownloadEvent, DownloadJob, RemoteCmd, RemoteEvent, RemoteHandle};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -76,8 +76,17 @@ pub enum Pending {
     Quit,
 }
 
+pub enum InputAction {
+    NewFolder,
+}
+
 pub enum Dialog {
     Login(Login),
+    Input {
+        title: String,
+        value: String,
+        action: InputAction,
+    },
     Confirm {
         title: String,
         lines: Vec<String>,
@@ -93,6 +102,8 @@ pub enum Dialog {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlbaRow {
+    /// `..` back to the beamtime list.
+    Up,
     Date(String),
     Sample { date: String, name: String },
 }
@@ -133,7 +144,8 @@ pub struct App {
     pub cache: Cache,
     cache_dirty: bool,
     cache_saved: Instant,
-    pub expanded: BTreeSet<String>,
+    /// Beamtime opened in the ALBA panel; `None` shows the beamtime list.
+    pub alba_date: Option<String>,
     pub alba_sel: usize,
     pub stats_sel: usize,
     /// Marked solves, by `Solve::key()` (contains the full remote path).
@@ -175,10 +187,6 @@ impl App {
         offline: bool,
     ) -> App {
         let cache = Cache::load(&base, &cfg.host);
-        let mut expanded = BTreeSet::new();
-        if let Some(d) = cache.dates.first() {
-            expanded.insert(d.clone());
-        }
         let mut app = App {
             poll_mode: cfg.poll_mode,
             show_test: cfg.show_test,
@@ -195,7 +203,7 @@ impl App {
             cache,
             cache_dirty: false,
             cache_saved: Instant::now(),
-            expanded,
+            alba_date: None,
             alba_sel: 0,
             stats_sel: 0,
             marks: HashSet::new(),
@@ -279,21 +287,20 @@ impl App {
                 .is_some_and(|i| !i.has_data() && i.runs.iter().any(|r| r.characterisation))
     }
 
+    /// Rows of the ALBA panel, like a folder listing: the beamtimes, or the samples
+    /// of the opened beamtime behind a `..` row.
     pub fn alba_rows(&self) -> Vec<AlbaRow> {
-        let mut rows = Vec::new();
-        for date in &self.cache.dates {
-            rows.push(AlbaRow::Date(date.clone()));
-            if !self.expanded.contains(date) {
-                continue;
-            }
-            if let Some(names) = self.cache.experiments.get(date).and_then(|e| e.samples.as_ref()) {
-                for n in names {
-                    if self.show_test || !self.is_test_sample(date, n) {
-                        rows.push(AlbaRow::Sample {
-                            date: date.clone(),
-                            name: n.clone(),
-                        });
-                    }
+        let Some(date) = &self.alba_date else {
+            return self.cache.dates.iter().cloned().map(AlbaRow::Date).collect();
+        };
+        let mut rows = vec![AlbaRow::Up];
+        if let Some(names) = self.cache.experiments.get(date).and_then(|e| e.samples.as_ref()) {
+            for n in names {
+                if self.show_test || !self.is_test_sample(date, n) {
+                    rows.push(AlbaRow::Sample {
+                        date: date.clone(),
+                        name: n.clone(),
+                    });
                 }
             }
         }
@@ -307,7 +314,7 @@ impl App {
     pub fn selected_sample(&self) -> Option<(String, String)> {
         match self.selected_row()? {
             AlbaRow::Sample { date, name } => Some((date, name)),
-            AlbaRow::Date(_) => None,
+            AlbaRow::Date(_) | AlbaRow::Up => None,
         }
     }
 
@@ -427,8 +434,14 @@ impl App {
 
     fn poll_now(&mut self) {
         self.remote.send(RemoteCmd::ListExperiments);
-        if let Some(d) = self.cache.dates.first().cloned() {
-            self.list_samples(&d, true);
+        let newest = self.cache.dates.first().cloned();
+        if let Some(d) = &newest {
+            self.list_samples(d, true);
+        }
+        if let Some(open) = self.alba_date.clone()
+            && Some(&open) != newest.as_ref()
+        {
+            self.list_samples(&open, true);
         }
     }
 
@@ -548,11 +561,16 @@ impl App {
                         LineKind::Info,
                         format!("{} beamtimes: {}", self.cache.dates.len(), self.cache.dates.join(" ")),
                     );
-                    let dates = self.cache.dates.clone();
-                    self.expanded.retain(|d| dates.contains(d));
-                    if let Some(d) = dates.first() {
-                        self.expanded.insert(d.clone());
-                        self.list_samples(d, false);
+                    if self
+                        .alba_date
+                        .as_ref()
+                        .is_some_and(|d| !self.cache.dates.contains(d))
+                    {
+                        self.alba_date = None;
+                    }
+                    // List the newest beamtime once, as the baseline for new-sample alerts.
+                    if let Some(d) = self.cache.dates.first().cloned() {
+                        self.list_samples(&d, false);
                     }
                 } else {
                     let new: Vec<String> = self
@@ -564,7 +582,6 @@ impl App {
                         .collect();
                     for d in new {
                         self.say(LineKind::Good, format!("new beamtime folder on ALBA: {d}"));
-                        self.expanded.insert(d.clone());
                         self.list_samples(&d, false);
                     }
                 }
@@ -870,6 +887,31 @@ impl App {
                 }
                 self.dialog = Some(Dialog::Login(l));
             }
+            Dialog::Input {
+                title,
+                mut value,
+                action,
+            } => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => match action {
+                    InputAction::NewFolder => match self.local.make_dir(&value) {
+                        Ok(()) => self.say(LineKind::Good, format!("created folder {}", value.trim())),
+                        Err(e) => {
+                            self.say(LineKind::Error, e);
+                            self.dialog = Some(Dialog::Input { title, value, action });
+                        }
+                    },
+                },
+                KeyCode::Backspace => {
+                    value.pop();
+                    self.dialog = Some(Dialog::Input { title, value, action });
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    value.push(c);
+                    self.dialog = Some(Dialog::Input { title, value, action });
+                }
+                _ => self.dialog = Some(Dialog::Input { title, value, action }),
+            },
             Dialog::Confirm { title, lines, action } => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => match action {
                     Pending::Quit => self.quit = true,
@@ -906,7 +948,11 @@ impl App {
             KeyCode::Enter => {
                 let cwd = self.local.cwd.clone();
                 let cfg = self.cfg.clone();
-                match self.console.submit(&cwd, |p| cfg.is_external(p), &self.tx) {
+                let selected = self.local.selected_file().map(str::to_string);
+                match self
+                    .console
+                    .submit(&cwd, selected.as_deref(), |p| cfg.is_external(p), &self.tx)
+                {
                     Some(Builtin::Cd(dir)) => {
                         let target = if dir.is_empty() {
                             self.base.clone()
@@ -952,6 +998,13 @@ impl App {
             KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => self.local.up(),
             KeyCode::Char('r') => self.local.refresh(),
             KeyCode::Char('b') | KeyCode::Char('~') => self.local.cd(self.base.clone()),
+            KeyCode::Char('N') | KeyCode::F(7) => {
+                self.dialog = Some(Dialog::Input {
+                    title: format!("New folder in {}", self.local.cwd.display()),
+                    value: String::new(),
+                    action: InputAction::NewFolder,
+                });
+            }
             KeyCode::Char('o') => {
                 if let Some(p) = self.local.selected_path() {
                     open_with_default_app(&p);
@@ -1000,7 +1053,8 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.move_alba(-(self.alba_sel as isize)),
             KeyCode::End | KeyCode::Char('G') => self.move_alba(isize::MAX / 2),
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => match self.selected_row() {
-                Some(AlbaRow::Date(d)) => self.toggle_date(&d),
+                Some(AlbaRow::Date(d)) => self.open_date(&d),
+                Some(AlbaRow::Up) => self.close_date(),
                 Some(AlbaRow::Sample { date, name }) => {
                     if self.info(&date, &name).is_none() {
                         self.request_scan(&date, &name, false);
@@ -1009,23 +1063,7 @@ impl App {
                 }
                 None => {}
             },
-            KeyCode::Left | KeyCode::Char('h') => match self.selected_row() {
-                Some(AlbaRow::Date(d)) => {
-                    if self.expanded.remove(&d) {
-                        self.clamp_alba();
-                    }
-                }
-                Some(AlbaRow::Sample { date, .. }) => {
-                    if let Some(i) = self
-                        .alba_rows()
-                        .iter()
-                        .position(|r| *r == AlbaRow::Date(date.clone()))
-                    {
-                        self.alba_sel = i;
-                    }
-                }
-                None => {}
-            },
+            KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => self.close_date(),
             KeyCode::Char('s') => self.rescan_selected(),
             KeyCode::Char('S') => self.fetch_all(),
             KeyCode::Char('r') => self.refresh_remote(),
@@ -1033,23 +1071,41 @@ impl App {
         }
     }
 
-    fn toggle_date(&mut self, date: &str) {
-        if !self.expanded.remove(date) {
-            self.expanded.insert(date.to_string());
-            let listed = self
-                .cache
-                .experiments
-                .get(date)
-                .is_some_and(|e| e.samples.is_some());
-            if !listed {
-                if self.connected() {
-                    self.list_samples(date, false);
-                } else {
-                    self.say(LineKind::Warn, "offline: this beamtime was never listed");
-                }
+    /// Opens a beamtime like a folder: only its samples are shown.
+    fn open_date(&mut self, date: &str) {
+        self.alba_date = Some(date.to_string());
+        let listed = self
+            .cache
+            .experiments
+            .get(date)
+            .is_some_and(|e| e.samples.is_some());
+        if !listed {
+            if self.connected() {
+                self.list_samples(date, false);
+            } else {
+                self.say(LineKind::Warn, "offline: this beamtime was never listed");
             }
         }
-        self.clamp_alba();
+        self.alba_sel = if self.alba_rows().len() > 1 { 1 } else { 0 };
+        self.stats_sel = 0;
+        self.sel_changed = Some(Instant::now());
+    }
+
+    /// Back to the beamtime list, with the beamtime we came from selected.
+    fn close_date(&mut self) {
+        let Some(date) = self.alba_date.take() else {
+            return;
+        };
+        self.alba_sel = self.cache.dates.iter().position(|d| *d == date).unwrap_or(0);
+        self.stats_sel = 0;
+    }
+
+    /// The beamtime the ALBA panel is in, or the highlighted one in the list.
+    fn current_date(&self) -> Option<String> {
+        self.alba_date.clone().or_else(|| match self.selected_row()? {
+            AlbaRow::Date(d) => Some(d),
+            _ => None,
+        })
     }
 
     fn rescan_selected(&mut self) {
@@ -1068,9 +1124,8 @@ impl App {
             self.say(LineKind::Warn, "offline: press C to connect");
             return;
         }
-        let date = match self.selected_row() {
-            Some(AlbaRow::Date(d)) | Some(AlbaRow::Sample { date: d, .. }) => d,
-            None => return,
+        let Some(date) = self.current_date() else {
+            return;
         };
         let todo: Vec<String> = self
             .alba_rows()
@@ -1101,11 +1156,7 @@ impl App {
             return;
         }
         self.remote.send(RemoteCmd::ListExperiments);
-        let date = match self.selected_row() {
-            Some(AlbaRow::Date(d)) | Some(AlbaRow::Sample { date: d, .. }) => Some(d),
-            None => self.cache.dates.first().cloned(),
-        };
-        if let Some(d) = date {
+        if let Some(d) = self.current_date().or_else(|| self.cache.dates.first().cloned()) {
             self.list_samples(&d, true);
             self.say(LineKind::Info, format!("refreshing {d}"));
         }
@@ -1191,6 +1242,9 @@ impl App {
             return;
         }
         let multi = info.distinct_prefixes() > 1;
+        let dir = self.local.cwd.clone();
+        let mut sources = download::read_sources(&dir);
+        let mut taken = HashSet::new();
         let mut jobs = Vec::new();
         let mut total: u64 = 0;
         for (ri, solve) in picked {
@@ -1204,31 +1258,35 @@ impl App {
                 self.console
                     .push(LineKind::Warn, format!("{} run {}: {why}", solve.kind.label(), run.run));
             }
-            if files.is_empty() {
-                continue;
-            }
-            let folder = download::solve_folder(solve, run, multi);
-            let dir = download::target_dir(&self.base, &info.name, &folder, date);
-            let src = Source {
-                date: date.to_string(),
-                sample: info.name.clone(),
-                remote_dir: solve.dir.clone(),
-                what: solve.kind.label().to_string(),
-                run: run.run,
-                downloaded_at: now_secs(),
-            };
-            if let Err(e) = download::write_source(&dir, &src) {
-                self.say(LineKind::Error, format!("cannot create {}: {e}", dir.display()));
-                continue;
-            }
-            let rel = dir.strip_prefix(&self.base).unwrap_or(&dir).display().to_string();
+            let tag = download::solve_tag(solve, run, multi);
             for f in files {
+                let name = download::local_name(&dir, &sources, &taken, &f.path, &tag);
+                taken.insert(name.clone());
+                sources.files.insert(
+                    name.clone(),
+                    Source {
+                        date: date.to_string(),
+                        sample: info.name.clone(),
+                        remote: f.path.clone(),
+                        what: solve.kind.label().to_string(),
+                        run: run.run,
+                        downloaded_at: now_secs(),
+                    },
+                );
                 total += f.size.unwrap_or(0);
-                jobs.push(self.job(&f, dir.join(f.name()), format!("{rel}/{}", f.name())));
+                let label = format!("{} → {name}", solve.kind.label());
+                jobs.push(self.job(&f, dir.join(&name), label));
             }
             self.marks.remove(&solve.key());
         }
-        self.enqueue(jobs, total);
+        if jobs.is_empty() {
+            return;
+        }
+        if let Err(e) = download::write_sources(&dir, &sources) {
+            self.say(LineKind::Error, format!("cannot write in {}: {e}", dir.display()));
+            return;
+        }
+        self.enqueue(jobs, total, &dir);
     }
 
     fn job(&mut self, f: &RemoteFile, local: PathBuf, label: String) -> DownloadJob {
@@ -1243,7 +1301,7 @@ impl App {
         }
     }
 
-    fn enqueue(&mut self, jobs: Vec<DownloadJob>, total: u64) {
+    fn enqueue(&mut self, jobs: Vec<DownloadJob>, total: u64, dir: &std::path::Path) {
         if jobs.is_empty() {
             return;
         }
@@ -1255,7 +1313,10 @@ impl App {
         } else {
             String::new()
         };
-        self.say(LineKind::Info, format!("queued {n} file(s){size}"));
+        self.say(
+            LineKind::Info,
+            format!("queued {n} file(s){size} into {}", dir.display()),
+        );
     }
 
     fn request_frames(&mut self, date: &str, info: &SampleInfo) {
@@ -1301,7 +1362,8 @@ impl App {
             }
         }
         lines.push(String::new());
-        lines.push(format!("into {}/{}/frames_r…/", self.base.display(), sample));
+        lines.push(format!("into {}", self.local.cwd.display()));
+        lines.push("(Esc, then N in the Local panel to make a folder for them first)".into());
         lines.push(String::new());
         lines.push("Download? (y/n)".into());
         self.dialog = Some(Dialog::Confirm {
@@ -1315,38 +1377,41 @@ impl App {
         let Some(info) = self.info(date, sample).cloned() else {
             return;
         };
-        let multi = info.distinct_prefixes() > 1;
+        let dir = self.local.cwd.clone();
+        let mut sources = download::read_sources(&dir);
+        let mut taken = HashSet::new();
         let mut jobs = Vec::new();
         let mut total = 0;
         for r in &info.runs {
-            let mine: Vec<&RemoteFile> = files
+            for f in files
                 .iter()
                 .filter(|f| layout::is_frame_of(f.name(), &r.prefix, r.run))
-                .collect();
-            if mine.is_empty() {
-                continue;
-            }
-            let folder = download::frames_folder(r, multi);
-            let dir = download::target_dir(&self.base, sample, &folder, date);
-            let src = Source {
-                date: date.to_string(),
-                sample: sample.to_string(),
-                remote_dir: mine[0].path.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default(),
-                what: "frames".into(),
-                run: r.run,
-                downloaded_at: now_secs(),
-            };
-            if let Err(e) = download::write_source(&dir, &src) {
-                self.say(LineKind::Error, format!("cannot create {}: {e}", dir.display()));
-                continue;
-            }
-            let rel = dir.strip_prefix(&self.base).unwrap_or(&dir).display().to_string();
-            for f in mine {
+            {
+                let name = download::local_name(&dir, &sources, &taken, &f.path, &format!("r{}", r.run));
+                taken.insert(name.clone());
+                sources.files.insert(
+                    name.clone(),
+                    Source {
+                        date: date.to_string(),
+                        sample: sample.to_string(),
+                        remote: f.path.clone(),
+                        what: "frames".into(),
+                        run: r.run,
+                        downloaded_at: now_secs(),
+                    },
+                );
                 total += f.size.unwrap_or(0);
-                jobs.push(self.job(f, dir.join(f.name()), format!("{rel}/{}", f.name())));
+                jobs.push(self.job(f, dir.join(&name), name.clone()));
             }
         }
-        self.enqueue(jobs, total);
+        if jobs.is_empty() {
+            return;
+        }
+        if let Err(e) = download::write_sources(&dir, &sources) {
+            self.say(LineKind::Error, format!("cannot write in {}: {e}", dir.display()));
+            return;
+        }
+        self.enqueue(jobs, total, &dir);
     }
 
     pub fn cancel_downloads(&mut self) {
@@ -1433,6 +1498,52 @@ mod live {
             }
         }
         println!("conn: {:?}\ndates: {:?}\nrows: {}", app.conn, app.cache.dates, app.alba_rows().len());
+
+        // Optional: open a beamtime, scan one sample, download its best solve into the temp folder.
+        if let (Ok(date), Ok(sample)) = (std::env::var("ALBA_DATE"), std::env::var("ALBA_SAMPLE")) {
+            app.open_date(&date);
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(30)
+                && app.cache.experiments.get(&date).is_none_or(|e| e.samples.is_none())
+            {
+                if let Ok(ev) = rx.recv_timeout(Duration::from_millis(200)) {
+                    app.handle(ev);
+                }
+            }
+            println!("opened {date}: {} rows, first {:?}", app.alba_rows().len(), app.alba_rows().get(1));
+            let row = app
+                .alba_rows()
+                .iter()
+                .position(|r| matches!(r, AlbaRow::Sample { name, .. } if *name == sample))
+                .expect("sample row");
+            app.alba_sel = row;
+            app.request_scan(&date, &sample, false);
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(60) && app.scanning.contains(&(date.clone(), sample.clone())) {
+                if let Ok(ev) = rx.recv_timeout(Duration::from_millis(200)) {
+                    app.handle(ev);
+                }
+            }
+            let info = app.info(&date, &sample).cloned().expect("scanned");
+            let best = crate::rank::best(&info);
+            println!("best: {best:?}");
+            if std::env::var("ALBA_DOWNLOAD").is_ok()
+                && let Some((key, _)) = best
+            {
+                app.marks.insert(key);
+                app.download_solves(&date, &info);
+                let t = Instant::now();
+                while t.elapsed() < Duration::from_secs(120) && app.downloads.queued > 0 {
+                    if let Ok(ev) = rx.recv_timeout(Duration::from_millis(200)) {
+                        app.handle(ev);
+                    }
+                }
+                for e in std::fs::read_dir(&base).unwrap().flatten() {
+                    println!("local: {} {} bytes", e.file_name().to_string_lossy(), e.metadata().unwrap().len());
+                }
+                println!("{}", std::fs::read_to_string(base.join(crate::local::SOURCE_FILE)).unwrap_or_default());
+            }
+        }
         for l in &app.console.lines {
             println!("console: {}", l.text);
         }

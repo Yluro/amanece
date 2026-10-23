@@ -15,14 +15,21 @@ cd <folder where the data should go>
 alba_watch                    # or: alba_watch --user u2025xxxxxxx
 ```
 
-Press `?` inside the app for all keys. In short: `Tab` cycles panels, `Space` marks a solve,
-`d` downloads, `F` downloads raw frames (asks first), `:` types in the console, `p` cycles
-polling, `q` quits.
+Each panel shows its keys on its bottom border; `?` lists them all. In short:
 
-Downloads land in `<sample>/<pipeline>_r<run>/` (e.g. `JSG285b/xia2chem_r3/shelxt.hkl`).
+- **Local** (left): browse folders, `N` makes a new folder. Downloads land in the folder open here.
+- **ALBA**: beamtimes like folders; `Enter` opens one (the others are hidden), `Backspace` goes back.
+- **Stats**: every solve with its statistics, ★ on the best one. `Space` marks, `d` downloads,
+  `F` downloads raw frames (asks first).
+- **Console**: `:` to type. Commands run in the Local folder and a bare program name gets the
+  selected file: with `XDS_ASCII.HKL` selected, `xprep` runs `xprep XDS_ASCII.HKL`. XPREP and other
+  Windows GUI programs open in their own window.
+
+`Tab` cycles panels, `p` cycles polling, `n` toggles the new-sample sound, `q` quits.
 
 ## Files it writes locally
 
+- `.alba_source.json` in each download folder – which server file each download came from
 - `<launch folder>/.alba_watch/cache.json` – listings and stats already fetched
 - `<launch folder>/.alba_watch/alba_watch.log` – console log (useful for bug reports)
 - `%APPDATA%\alba_watch\config\config.toml` – settings (poll intervals, sound, `remote_root`, …)

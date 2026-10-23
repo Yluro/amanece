@@ -9,6 +9,7 @@ mod layout;
 mod local;
 mod model;
 mod notify;
+mod rank;
 mod remote;
 mod ui;
 

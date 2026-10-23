@@ -117,6 +117,21 @@ Gotchas:
   A solve folder without `proc_<id>` and without result files counts as failed once its job output exists
   or nothing changed for 3 h.
 
+### 2.6 May 2026 notes
+
+- Same RESULTS layout as March 2026, but many 20260513 samples failed server-side: autoPROC leaves
+  `ISPyBStoreAutoProcv1_4_{anom,noanom}_failed/`, xia2 leaves `xia2-error.txt`, ednaproc's `results/` has no
+  `ep_XDS_ASCII.HKL`. The app shows these as failed with that reason.
+- xia2chem's ISPyB XML no longer reports `rMerge`, only `rMeasAllIPlusIMinus`; the table shows Rmeas with a `*`
+  and the ranking uses it.
+
+### 2.7 UI decisions (2026-10-23)
+
+- The ALBA panel is a folder browser: beamtimes, and inside one beamtime only its samples behind `../`.
+- ★ marks the best solve of a sample: score = 0.3·completeness + 0.3·CC½ + 0.2·(1 − inner-shell R/20 %)
+  + 0.2·resolution (1 at ≤ 0.80 Å, 0 at ≥ 1.20 Å), only finished solves with HKL files; see `src/rank.rs`.
+- Every panel shows its useful keys on its bottom border; the console is compact and grows while focused.
+
 ## 3. Gentle-scraping rules (hard requirements)
 
 1. **Read-only by construction.** The SFTP wrapper type exposes only `read_dir`, `stat` and `open_read`.
@@ -138,8 +153,8 @@ Gotchas:
 |---|---|
 | Login | Dialog asks username + password at every launch. **Nothing is stored.** Try to connect; on failure show the error and re-prompt (max 3). `--user` flag may prefill the username. |
 | What to download | The stats panel lists **every solve** with its statistics; the user marks which to download. HKL files: xia2chem `shelxt.hkl`+`.ins`, ednaproc `ep_XDS_ASCII.HKL`, autoPROC `XDS_ASCII.HKL` (anom/noanom). Logs are an optional toggle. |
-| Local layout | `<base>/<sample>/<pipeline>[_anom\|_noanom]_r<run>/` with original filenames. Frames: `<base>/<sample>/frames_r<run>/`. |
-| Console | Simple command runner (no PTY): output streams into the panel. **XPREP opens in its own console window** while the TUI keeps running. |
+| Local layout | *(changed 2026-10-23)* Downloads go into the folder open in the Local panel, with the server's file names. A clash (e.g. autoPROC anom and noanom both `XDS_ASCII.HKL`) or an unrelated local file of the same name gets `<stem>_<pipeline>_r<run>.<ext>`; nothing is overwritten. `.alba_source.json` in that folder records each file's origin. `N` makes a new folder first. Frames follow the same rule. |
+| Console | Simple command runner (no PTY), run in the Local panel's folder. A bare program name gets the selected file (`xprep` → `xprep XDS_ASCII.HKL`; SHELX programs get the name without extension). *(changed 2026-10-23)* Windows GUI programs (detected from the .exe header, e.g. XPREP) are started directly and open their own window; console programs stream into the panel. |
 | Polling | Three modes: manual, slow (10 min), fast (2 min). Hard floor 60 s. One `RESULTS/` listing per poll. |
 | Notification | Optional sound each time a new **named** (non-test) sample appears. |
 | Test samples | Names containing `test`, or samples with only characterisation runs, are hidden; one key shows them. Never trigger the sound. |

@@ -373,6 +373,11 @@ async fn scan_autoproc(sftp: &ReadOnlySftp, dir: &str, n: u32, dir_mtime: u64) -
             }
         }
         settle(&mut solve, ended, latest);
+        if find(&top, &format!("ISPyBStoreAutoProcv1_4_{suffix}_failed")).is_some() && solve.stats.is_none() {
+            solve.status = Status::Failed;
+            solve.note = Some("autoPROC reported a failure".into());
+            solve.hkl.clear();
+        }
         out.push(solve);
     }
     if out.is_empty() {
@@ -433,6 +438,9 @@ async fn scan_ednaproc(sftp: &ReadOnlySftp, dir: &str, n: u32, dir_mtime: u64) -
             }
         }
     }
+    if ended && solve.hkl.is_empty() {
+        solve.note = Some("ednaproc produced no HKL (see its CORRECT.LP / logs)".into());
+    }
     if solve.stats.is_none()
         && let Some((sg, cell)) = marker
     {
@@ -475,10 +483,13 @@ async fn scan_xia2(sftp: &ReadOnlySftp, dir: &str, n: u32, dir_mtime: u64, chem:
         if find(&files, "ispyb.xml").is_some() {
             solve.stats = read_stats(sftp, &format!("{xd}/ispyb.xml"), kind).await;
         }
-        for name in ["xia2.txt", "xia2-summary.dat", "xia2.html", "ispyb.xml"] {
+        for name in ["xia2.txt", "xia2-summary.dat", "xia2.html", "ispyb.xml", "xia2-error.txt"] {
             if let Some(f) = file(&files, &xd, name) {
                 solve.logs.push(f);
             }
+        }
+        if solve.stats.is_none() && find(&files, "xia2-error.txt").is_some() {
+            solve.note = Some("xia2 failed (xia2-error.txt is in the logs)".into());
         }
         if chem && find(&files, "DataFiles").is_some() {
             let df = format!("{xd}/DataFiles");

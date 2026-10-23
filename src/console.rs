@@ -196,42 +196,51 @@ impl Console {
         self.scroll = self.scroll.saturating_sub(n);
     }
 
-    /// Run the input line. Returns a builtin for the app to handle.
+    /// Run the input line in `cwd`. A bare program name gets the file selected in the
+    /// Local panel as its argument (`xprep` → `xprep XDS_ASCII.HKL`; SHELX programs get
+    /// the name without extension). Windows GUI programs such as XPREP are started
+    /// directly and keep their own window; console programs stream into the panel.
+    /// Returns a builtin for the app to handle.
     pub fn submit(
         &mut self,
         cwd: &Path,
-        is_external: impl Fn(&str) -> bool,
+        selected: Option<&str>,
+        force_detached: impl Fn(&str) -> bool,
         tx: &Sender<AppEvent>,
     ) -> Option<Builtin> {
-        let line = self.input.trim().to_string();
+        let typed = self.input.trim().to_string();
         self.input.clear();
         self.cursor = 0;
         self.hist_pos = None;
         self.scroll = 0;
-        if line.is_empty() {
+        if typed.is_empty() {
             return None;
         }
-        if self.history.last() != Some(&line) {
-            self.history.push(line.clone());
+        if self.history.last() != Some(&typed) {
+            self.history.push(typed.clone());
         }
-        self.push(LineKind::Cmd, format!("> {line}"));
 
-        let mut parts = line.splitn(2, char::is_whitespace);
+        let mut parts = typed.splitn(2, char::is_whitespace);
         let program = parts.next().unwrap_or_default().to_string();
-        let rest = parts.next().unwrap_or_default().trim().to_string();
         match program.to_ascii_lowercase().as_str() {
-            "cd" => return Some(Builtin::Cd(rest)),
+            "cd" => {
+                self.push(LineKind::Cmd, format!("> {typed}"));
+                return Some(Builtin::Cd(parts.next().unwrap_or_default().trim().to_string()));
+            }
             "clear" | "cls" => return Some(Builtin::Clear),
             "help" => return Some(Builtin::Help),
             _ => {}
         }
+        let line = with_selected(&typed, selected);
+        self.push(LineKind::Cmd, format!("> {line}"));
 
-        if is_external(&program) {
-            match spawn_external(&line, &program, cwd, tx.clone()) {
-                Ok(()) => self.push(
-                    LineKind::Info,
-                    format!("{program} opened in its own window"),
-                ),
+        let exe = resolve_program(&program, cwd);
+        let gui = exe.as_deref().is_some_and(is_gui_exe);
+        if gui || force_detached(&program) {
+            let args = split_args(line.splitn(2, char::is_whitespace).nth(1).unwrap_or_default());
+            let target = exe.unwrap_or_else(|| program.clone().into());
+            match spawn_detached(&target, &args, &program, cwd, gui, tx.clone()) {
+                Ok(()) => self.push(LineKind::Info, format!("{program} started in its own window")),
                 Err(e) => self.push(LineKind::Error, format!("cannot start {program}: {e}")),
             }
             return None;
@@ -278,12 +287,14 @@ mod sys {
         c
     }
 
-    /// `start` gives the program a real console window of its own; `/WAIT` lets us
-    /// report its exit code.
-    pub fn external(line: &str, title: &str) -> Command {
-        let mut c = Command::new("cmd");
-        c.raw_arg(format!("/C start \"{title}\" /WAIT cmd /C {line}"))
-            .creation_flags(CREATE_NO_WINDOW);
+    /// GUI programs open their own window; a console program forced into
+    /// `external_window` gets a console window of its own instead of ours.
+    pub fn detached(exe: &std::path::Path, gui: bool) -> Command {
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        let mut c = Command::new(exe);
+        if !gui {
+            c.creation_flags(CREATE_NEW_CONSOLE);
+        }
         c
     }
 
@@ -308,10 +319,8 @@ mod sys {
         c
     }
 
-    pub fn external(line: &str, _title: &str) -> Command {
-        let mut c = Command::new("x-terminal-emulator");
-        c.arg("-e").arg("sh").arg("-c").arg(line);
-        c
+    pub fn detached(exe: &std::path::Path, _gui: bool) -> Command {
+        Command::new(exe)
     }
 
     pub fn kill_tree(pid: u32) {
@@ -348,14 +357,22 @@ fn spawn_piped(line: &str, cwd: &Path, tx: Sender<AppEvent>) -> std::io::Result<
     Ok(pid)
 }
 
-fn spawn_external(line: &str, program: &str, cwd: &Path, tx: Sender<AppEvent>) -> std::io::Result<()> {
-    let mut child = sys::external(line, program)
+fn spawn_detached(
+    exe: &Path,
+    args: &[String],
+    label: &str,
+    cwd: &Path,
+    gui: bool,
+    tx: Sender<AppEvent>,
+) -> std::io::Result<()> {
+    let mut child = sys::detached(exe, gui)
+        .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    let label = program.to_string();
+    let label = label.to_string();
     thread::spawn(move || {
         let code = child.wait().ok().and_then(|s| s.code());
         let _ = tx.send(AppEvent::Console(ConsoleEvent::Exited {
@@ -365,6 +382,110 @@ fn spawn_external(line: &str, program: &str, cwd: &Path, tx: Sender<AppEvent>) -
         }));
     });
     Ok(())
+}
+
+const SHELX: [&str; 6] = ["shelxt", "shelxl", "shelxs", "shelxd", "shelxe", "shelxc"];
+
+/// Appends the selected file to a bare program name. SHELX programs take the
+/// job name, so they get the file name without its extension.
+pub fn with_selected(line: &str, selected: Option<&str>) -> String {
+    let line = line.trim();
+    let Some(file) = selected else {
+        return line.to_string();
+    };
+    if line.contains(char::is_whitespace) {
+        return line.to_string();
+    }
+    let program = line.to_ascii_lowercase();
+    let program = program.trim_end_matches(".exe");
+    let arg = if SHELX.contains(&program) {
+        match file.rfind('.') {
+            Some(i) if i > 0 => &file[..i],
+            _ => file,
+        }
+    } else {
+        file
+    };
+    if arg.contains(char::is_whitespace) {
+        format!("{line} \"{arg}\"")
+    } else {
+        format!("{line} {arg}")
+    }
+}
+
+/// Splits arguments on whitespace, keeping "quoted parts" together.
+pub fn split_args(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut any = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                any = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if any {
+                    out.push(std::mem::take(&mut cur));
+                    any = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                any = true;
+            }
+        }
+    }
+    if any {
+        out.push(cur);
+    }
+    out
+}
+
+/// Finds a program the way the shell would: the folder itself, then PATH.
+pub fn resolve_program(program: &str, cwd: &Path) -> Option<std::path::PathBuf> {
+    let has_ext = Path::new(program).extension().is_some();
+    let names: Vec<String> = if has_ext || !cfg!(windows) {
+        vec![program.to_string()]
+    } else {
+        [".exe", ".com", ".bat", ".cmd"]
+            .iter()
+            .map(|e| format!("{program}{e}"))
+            .collect()
+    };
+    let mut dirs = vec![cwd.to_path_buf()];
+    if !program.contains(['/', '\\']) {
+        dirs.extend(std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default());
+    }
+    dirs.iter()
+        .flat_map(|d| names.iter().map(move |n| d.join(n)))
+        .find(|p| p.is_file())
+}
+
+/// True for Windows executables built for the GUI subsystem (they open their own window).
+pub fn is_gui_exe(path: &Path) -> bool {
+    use std::io::Read;
+    let is_exe = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("exe"));
+    if !is_exe {
+        return false;
+    }
+    let mut head = [0u8; 1024];
+    let Ok(n) = std::fs::File::open(path).and_then(|mut f| f.read(&mut head)) else {
+        return false;
+    };
+    let head = &head[..n];
+    if head.len() < 0x40 || &head[..2] != b"MZ" {
+        return false;
+    }
+    let pe = u32::from_le_bytes([head[0x3C], head[0x3D], head[0x3E], head[0x3F]]) as usize;
+    // PE signature, 20-byte COFF header, then the subsystem at offset 68 of the optional header
+    let sub = pe + 4 + 20 + 68;
+    head.len() >= sub + 2
+        && &head[pe..pe + 4] == b"PE\0\0"
+        && u16::from_le_bytes([head[sub], head[sub + 1]]) == 2
 }
 
 fn pump(stream: impl Read + Send + 'static, kind: LineKind, tx: Sender<AppEvent>) -> thread::JoinHandle<()> {
@@ -411,7 +532,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut c = Console::default();
         c.input = "echo hello".into();
-        assert!(c.submit(&std::env::temp_dir(), |_| false, &tx).is_none());
+        assert!(c.submit(&std::env::temp_dir(), None, |_| false, &tx).is_none());
         let mut got_line = false;
         loop {
             match rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap() {
@@ -429,12 +550,43 @@ mod tests {
     }
 
     #[test]
+    fn selected_file_is_passed() {
+        assert_eq!(with_selected("xprep", Some("XDS_ASCII.HKL")), "xprep XDS_ASCII.HKL");
+        assert_eq!(with_selected("shelxt", Some("shelxt.hkl")), "shelxt shelxt");
+        assert_eq!(with_selected("SHELXL.exe", Some("JSG300.ins")), "SHELXL.exe JSG300");
+        assert_eq!(with_selected("xprep", Some("my data.hkl")), "xprep \"my data.hkl\"");
+        // typed arguments win; nothing selected: unchanged
+        assert_eq!(with_selected("xprep other.hkl", Some("XDS_ASCII.HKL")), "xprep other.hkl");
+        assert_eq!(with_selected("dir", None), "dir");
+    }
+
+    #[test]
+    fn splits_quoted_args() {
+        assert_eq!(split_args(r#"a "b c"  d"#), vec!["a", "b c", "d"]);
+        assert!(split_args("   ").is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detects_gui_programs() {
+        let xprep = std::path::Path::new(r"C:\Program Files\ShelX\xprep.exe");
+        if xprep.exists() {
+            assert!(is_gui_exe(xprep));
+            assert!(!is_gui_exe(std::path::Path::new(r"C:\Program Files\ShelX\shelxt.exe")));
+        }
+        let cmd = resolve_program("cmd", Path::new(".")).expect("cmd on PATH");
+        assert!(!is_gui_exe(&cmd));
+        let notepad = resolve_program("notepad", Path::new(".")).expect("notepad on PATH");
+        assert!(is_gui_exe(&notepad));
+    }
+
+    #[test]
     fn builtins() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut c = Console::default();
         c.input = "cd JSG285b".into();
         assert!(matches!(
-            c.submit(Path::new("."), |_| false, &tx),
+            c.submit(Path::new("."), Some("x.hkl"), |_| false, &tx),
             Some(Builtin::Cd(d)) if d == "JSG285b"
         ));
     }

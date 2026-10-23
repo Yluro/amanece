@@ -44,6 +44,7 @@ impl LocalPanel {
                 downloaded: false,
             });
         }
+        let sources = crate::download::read_sources(&self.cwd);
         match std::fs::read_dir(&self.cwd) {
             Ok(rd) => {
                 let mut items: Vec<LocalEntry> = rd
@@ -55,7 +56,11 @@ impl LocalPanel {
                         }
                         let md = e.metadata().ok()?;
                         let is_dir = md.is_dir();
-                        let downloaded = is_dir && holds_download(&e.path());
+                        let downloaded = if is_dir {
+                            holds_download(&e.path())
+                        } else {
+                            sources.files.contains_key(&name)
+                        };
                         Some(LocalEntry {
                             name,
                             is_dir,
@@ -93,6 +98,38 @@ impl LocalPanel {
         }
         let max = self.entries.len() as isize - 1;
         self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
+    }
+
+    pub fn select_name(&mut self, name: &str) {
+        if let Some(i) = self.entries.iter().position(|e| e.name == name) {
+            self.selected = i;
+        }
+    }
+
+    /// The selected entry's name when it is a file (what console commands receive).
+    pub fn selected_file(&self) -> Option<&str> {
+        self.selected_entry()
+            .filter(|e| !e.is_dir)
+            .map(|e| e.name.as_str())
+    }
+
+    /// Creates `name` inside the current folder and selects it.
+    pub fn make_dir(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() || name == "." || name == ".." {
+            return Err("empty folder name".into());
+        }
+        if name.chars().any(|c| matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')) {
+            return Err(format!("not a valid folder name: {name}"));
+        }
+        let path = self.cwd.join(name);
+        if path.exists() {
+            return Err(format!("{name} already exists"));
+        }
+        std::fs::create_dir(&path).map_err(|e| format!("cannot create {name}: {e}"))?;
+        self.refresh();
+        self.select_name(name);
+        Ok(())
     }
 
     pub fn select_last(&mut self) {
@@ -159,5 +196,29 @@ pub fn strip_verbatim(p: PathBuf) -> PathBuf {
     match s.strip_prefix(r"\\?\") {
         Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
         _ => p,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn make_dir_creates_and_selects() {
+        let base = std::env::temp_dir().join(format!("alba_watch_local_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut p = LocalPanel::new(base.clone());
+        p.make_dir("JSG300").unwrap();
+        assert!(base.join("JSG300").is_dir());
+        assert_eq!(p.selected_entry().unwrap().name, "JSG300");
+        assert!(p.make_dir("JSG300").is_err());
+        assert!(p.make_dir("a/b").is_err());
+        std::fs::write(base.join("XDS_ASCII.HKL"), b"x").unwrap();
+        p.refresh();
+        p.select_name("XDS_ASCII.HKL");
+        assert_eq!(p.selected_file(), Some("XDS_ASCII.HKL"));
+        p.select_name("JSG300");
+        assert_eq!(p.selected_file(), None);
+        std::fs::remove_dir_all(&base).ok();
     }
 }

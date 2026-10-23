@@ -1,19 +1,43 @@
-//! Where downloads go locally: `<base>/<sample>/<pipeline>_r<run>/` (DESIGN.md §4).
+//! Downloads land in the Local panel's current folder, keeping the server's file
+//! names. A small `.alba_source.json` in that folder records where each file came
+//! from, so a second download of the same file is recognised and unrelated files
+//! are never overwritten.
 
 use crate::local::SOURCE_FILE;
 use crate::model::{Run, Solve};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
 
-/// Written next to downloaded files so we know where they came from.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Source {
     pub date: String,
     pub sample: String,
-    pub remote_dir: String,
+    pub remote: String,
     pub what: String,
     pub run: u32,
     pub downloaded_at: u64,
+}
+
+/// File name → origin, for the files alba_watch downloaded into one folder.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Sources {
+    pub files: BTreeMap<String, Source>,
+}
+
+pub fn read_sources(dir: &Path) -> Sources {
+    std::fs::read_to_string(dir.join(SOURCE_FILE))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+pub fn write_sources(dir: &Path, s: &Sources) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(
+        dir.join(SOURCE_FILE),
+        serde_json::to_vec_pretty(s).unwrap_or_default(),
+    )
 }
 
 pub fn sanitize(name: &str) -> String {
@@ -26,7 +50,8 @@ pub fn sanitize(name: &str) -> String {
         .collect()
 }
 
-pub fn solve_folder(solve: &Solve, run: &Run, multi_prefix: bool) -> String {
+/// Short tag naming a solve, e.g. `autoproc_anom_r3`; used to rename clashing files.
+pub fn solve_tag(solve: &Solve, run: &Run, multi_prefix: bool) -> String {
     let mut s = if multi_prefix {
         format!("{}_{}_r{}", solve.kind.folder(), sanitize(&run.prefix), run.run)
     } else {
@@ -38,35 +63,32 @@ pub fn solve_folder(solve: &Solve, run: &Run, multi_prefix: bool) -> String {
     s
 }
 
-pub fn frames_folder(run: &Run, multi_prefix: bool) -> String {
-    if multi_prefix {
-        format!("frames_{}_r{}", sanitize(&run.prefix), run.run)
-    } else {
-        format!("frames_r{}", run.run)
+/// Local name for `remote` in `dir`: the server's file name when it's free (or
+/// already holds this very file), otherwise `<stem>_<tag>.<ext>`, then numbered.
+pub fn local_name(dir: &Path, sources: &Sources, taken: &HashSet<String>, remote: &str, tag: &str) -> String {
+    let file = sanitize(remote.rsplit('/').next().unwrap_or(remote));
+    let free = |name: &str| {
+        !taken.contains(name)
+            && match sources.files.get(name) {
+                Some(src) => src.remote == remote,
+                None => !dir.join(name).exists(),
+            }
+    };
+    if free(&file) {
+        return file;
     }
-}
-
-/// `<base>/<sample>/<folder>`, or `<folder>_<date>` when that folder already holds
-/// data from another beamtime with the same sample name.
-pub fn target_dir(base: &Path, sample: &str, folder: &str, date: &str) -> PathBuf {
-    let dir = base.join(sanitize(sample)).join(folder);
-    match read_source(&dir) {
-        Some(src) if src.date != date => base.join(sanitize(sample)).join(format!("{folder}_{date}")),
-        _ => dir,
+    let (stem, ext) = match file.rfind('.') {
+        Some(i) if i > 0 => (&file[..i], &file[i..]),
+        _ => (file.as_str(), ""),
+    };
+    let tagged = format!("{stem}_{tag}{ext}");
+    if free(&tagged) {
+        return tagged;
     }
-}
-
-pub fn read_source(dir: &Path) -> Option<Source> {
-    let text = std::fs::read_to_string(dir.join(SOURCE_FILE)).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-pub fn write_source(dir: &Path, src: &Source) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    std::fs::write(
-        dir.join(SOURCE_FILE),
-        serde_json::to_vec_pretty(src).unwrap_or_default(),
-    )
+    (2..)
+        .map(|i| format!("{stem}_{tag}_{i}{ext}"))
+        .find(|n| free(n))
+        .expect("some numbered name is free")
 }
 
 #[cfg(test)]
@@ -83,42 +105,61 @@ mod tests {
         }
     }
 
-    #[test]
-    fn folder_names() {
-        let s = Solve::new(SolveKind::AutoProcNoAnom, "/x", 1);
-        assert_eq!(solve_folder(&s, &run("manually-mounted", 3), false), "autoproc_noanom_r3");
-        assert_eq!(
-            solve_folder(&s, &run("manually-mounted", 3), true),
-            "autoproc_noanom_manually-mounted_r3"
-        );
-        let s2 = Solve::new(SolveKind::Xia2Chem, "/x", 2);
-        assert_eq!(solve_folder(&s2, &run("p", 1), false), "xia2chem_r1_n2");
-        assert_eq!(frames_folder(&run("p", 3), false), "frames_r3");
+    fn src(remote: &str) -> Source {
+        Source {
+            date: "20260307".into(),
+            sample: "S".into(),
+            remote: remote.into(),
+            what: "x".into(),
+            run: 1,
+            downloaded_at: 0,
+        }
     }
 
     #[test]
-    fn date_collision_gets_suffix() {
-        let base = std::env::temp_dir().join(format!("alba_watch_dl_{}", std::process::id()));
-        let dir = target_dir(&base, "MR8", "xia2chem_r1", "20251106");
-        assert_eq!(dir, base.join("MR8").join("xia2chem_r1"));
-        write_source(
-            &dir,
-            &Source {
-                date: "20251106".into(),
-                sample: "MR8".into(),
-                remote_dir: "/x".into(),
-                what: "xia2chem".into(),
-                run: 1,
-                downloaded_at: 0,
-            },
-        )
-        .unwrap();
-        assert_eq!(target_dir(&base, "MR8", "xia2chem_r1", "20251106"), dir);
-        assert_eq!(
-            target_dir(&base, "MR8", "xia2chem_r1", "20251211"),
-            base.join("MR8").join("xia2chem_r1_20251211")
-        );
-        std::fs::remove_dir_all(&base).ok();
+    fn tags() {
+        let s = Solve::new(SolveKind::AutoProcAnom, "/x", 1);
+        assert_eq!(solve_tag(&s, &run("manually-mounted", 3), false), "autoproc_anom_r3");
+        assert_eq!(solve_tag(&s, &run("mm", 3), true), "autoproc_anom_mm_r3");
+        let s2 = Solve::new(SolveKind::Xia2Chem, "/x", 2);
+        assert_eq!(solve_tag(&s2, &run("p", 1), false), "xia2chem_r1_n2");
+    }
+
+    #[test]
+    fn names_never_overwrite_unrelated_files() {
+        let dir = std::env::temp_dir().join(format!("alba_watch_names_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut sources = Sources::default();
+        let mut taken = HashSet::new();
+
+        // free name: keep the server's name
+        let a = local_name(&dir, &sources, &taken, "/r/autoproc/noanom/1/XDS_ASCII.HKL", "autoproc_noanom_r1");
+        assert_eq!(a, "XDS_ASCII.HKL");
+        taken.insert(a);
+        // same name in the same batch: tagged
+        let b = local_name(&dir, &sources, &taken, "/r/autoproc/anom/1/XDS_ASCII.HKL", "autoproc_anom_r1");
+        assert_eq!(b, "XDS_ASCII_autoproc_anom_r1.HKL");
+
+        // an unrelated local file with that name: tagged, not overwritten
+        std::fs::write(dir.join("shelxt.hkl"), b"mine").unwrap();
+        let c = local_name(&dir, &sources, &HashSet::new(), "/r/xia2chem/shelxt.hkl", "xia2chem_r1");
+        assert_eq!(c, "shelxt_xia2chem_r1.hkl");
+
+        // the same remote file downloaded before: same name again (the worker skips it)
+        sources.files.insert("shelxt.hkl".into(), src("/r/xia2chem/shelxt.hkl"));
+        let d = local_name(&dir, &sources, &HashSet::new(), "/r/xia2chem/shelxt.hkl", "xia2chem_r1");
+        assert_eq!(d, "shelxt.hkl");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sources_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("alba_watch_src_{}", std::process::id()));
+        let mut s = Sources::default();
+        s.files.insert("a.hkl".into(), src("/r/a.hkl"));
+        write_sources(&dir, &s).unwrap();
+        assert_eq!(read_sources(&dir).files.get("a.hkl"), Some(&src("/r/a.hkl")));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

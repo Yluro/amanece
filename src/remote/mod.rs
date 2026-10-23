@@ -41,14 +41,29 @@ mod live {
         let date = std::env::var("ALBA_DATE").unwrap_or_else(|_| "20251211".into());
         let (samples, flat) = scan::list_samples(&sftp, &date).await.unwrap();
         println!("{date}: {} samples, first {:?}", samples.len(), &samples[..3.min(samples.len())]);
-        if let Ok(sample) = std::env::var("ALBA_SAMPLE") {
-            let info = scan::scan_sample(&sftp, &date, &sample, flat, None, |_| {}).await.unwrap();
-            println!("flat={flat}");
+        if let Ok(list) = std::env::var("ALBA_SAMPLE") {
+          println!("flat={flat}");
+          for sample in list.split(',') {
+            let info = scan::scan_sample(&sftp, &date, sample, flat, None, |_| {}).await.unwrap();
+            println!("{sample}:");
             for r in &info.runs {
                 for s in &r.solves {
-                    println!("  run {} {:<16} {:?} {:?}", r.run, s.kind.label(), s.status, s.note);
+                    let o = s.stats.as_ref().and_then(|st| st.overall.clone()).unwrap_or_default();
+                    println!(
+                        "  run {} {:<16} {:?} sg={:?} d={:?} rmerge%={:?} hkl={:?} logs={} {:?}",
+                        r.run,
+                        s.kind.label(),
+                        s.status,
+                        s.stats.as_ref().and_then(|st| st.space_group.clone()),
+                        o.d_high,
+                        o.rmerge_pct,
+                        s.hkl.iter().map(|f| (f.name().to_string(), f.size)).collect::<Vec<_>>(),
+                        s.logs.len(),
+                        s.note
+                    );
                 }
             }
+          }
             println!("total requests: {}", count.load(Ordering::Relaxed));
             conn.close().await;
             return;
