@@ -272,3 +272,15 @@ struct Shell      { d_low: f64, d_high: f64, completeness: f64, multiplicity: f6
 Not yet verified on the server: RAW_DATA layout for old (≤ 2025-07) beamtimes; what a *failed* pipeline leaves
 behind; the meaning of ednaproc's second `ISPyBStoreAutoProcv1_4-00000003` dir; which of password /
 keyboard-interactive the server actually accepted.
+
+## 10. TODO
+
+- **Portable .exe (static C runtime).** The release build imports `VCRUNTIME140.dll` (Visual C++
+  Redistributable), so it won't start on a PC without it ("VCRUNTIME140.dll was not found"). Build with
+  the CRT linked in: `.cargo/config.toml` with
+  `[target.x86_64-pc-windows-msvc] rustflags = ["-C", "target-feature=+crt-static"]`, then check that the
+  only imports left are Windows' own DLLs (`api-ms-win-crt-*` / UCRT ship with Windows 10+). After that a
+  colleague can just run the single `alba_watch.exe`.
+- When handing the .exe to colleagues, tell them: Windows 10 1809+ or 11, 64-bit; unsigned, so SmartScreen asks
+  once (*More info → Run anyway*); best in Windows Terminal (old console may show boxes for ★ ✓ ⏎); SHELX /
+  XPREP / SADABS on PATH only for the console; their own ALBA login. Consider a zipped GitHub release.
