@@ -112,7 +112,8 @@ pub struct Target<'a> {
     pub port: u16,
     pub known_hosts: Option<PathBuf>,
     pub limiter: Arc<Limiter>,
-    pub beamline: &'a str,
+    /// Beamline folders to look in (`bl13`, `bl06` …) on beamline-tree accounts.
+    pub beamlines: &'a [String],
     /// Config override for the proposal folder.
     pub remote_root: Option<&'a str>,
 }
@@ -196,7 +197,7 @@ pub async fn connect(t: &Target<'_>, user: &str, password: &str) -> Result<(Conn
         .await
         .map_err(|e| other(&e))?;
     let mut sftp = ReadOnlySftp::new(sftp, t.limiter.clone());
-    sftp.locate_root(user, t.beamline, t.remote_root)
+    sftp.locate_proposals(user, t.beamlines, t.remote_root)
         .await
         .map_err(|e| ConnectError::Other(format!("cannot find the proposal folder: {e:#}")))?;
     Ok((

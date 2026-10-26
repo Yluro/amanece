@@ -24,12 +24,13 @@ mod live {
         };
         let count = Arc::new(AtomicU64::new(0));
         let kh = std::env::temp_dir().join("alba_watch_live_known_hosts");
+        let beamlines = vec!["bl13".to_string(), "bl06".to_string()];
         let target = Target {
             host: "userdata.cells.es",
             port: 443,
             known_hosts: Some(kh),
             limiter: Arc::new(Limiter::new(3.0, 6, count.clone())),
-            beamline: "bl13",
+            beamlines: &beamlines,
             remote_root: None,
         };
         let (conn, hk) = session::connect(&target, &user, &pass).await.expect("connect");
@@ -37,7 +38,7 @@ mod live {
         let sftp = conn.sftp.clone();
 
         let dates = scan::list_experiments(&sftp).await.unwrap();
-        println!("root: {}  dates: {:?}", sftp.root(), dates.ids);
+        println!("proposals: {}\ndates: {:?}", sftp.describe(), dates.ids);
         let date = std::env::var("ALBA_DATE").unwrap_or_else(|_| "20251211".into());
         let (samples, flat) = scan::list_samples(&sftp, &date).await.unwrap();
         println!("{date}: {} samples, first {:?}", samples.len(), &samples[..3.min(samples.len())]);

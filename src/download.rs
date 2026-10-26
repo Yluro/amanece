@@ -113,9 +113,10 @@ pub fn solve_dir(parent: &Path, tag: &str, date: &str, sample: &str) -> std::pat
             || (!src.files.is_empty()
                 && src.files.values().all(|s| s.date == date && s.sample == sample))
     };
-    [tag.to_string(), format!("{tag}_{date}")]
+    let day = crate::layout::beamtime_date(date);
+    [tag.to_string(), format!("{tag}_{day}")]
         .into_iter()
-        .chain((2..).map(|i| format!("{tag}_{date}_{i}")))
+        .chain((2..).map(|i| format!("{tag}_{day}_{i}")))
         .map(|name| parent.join(name))
         .find(|d| usable(d))
         .expect("some numbered folder is usable")

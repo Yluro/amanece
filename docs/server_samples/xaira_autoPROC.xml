@@ -1,0 +1,146 @@
+<?xml version="1.0"?>
+<AutoProcContainer>
+  <AutoProcProgramContainer>
+    <AutoProcProgram>
+      <processingCommandLine>/opt/autoPROC/20260424/autoPROC/bin/linux64/process -B -xml -M ReportingInlined autoPROC_HIGHLIGHT=no -ANO -Id BSample-19X01_w1_01,/beamlines/bl06/projects/cycle2026-I/2025000000-pi/20260711/RAW_DATA/Sample-19-01/BSample-19X01_w1_01,BSample-19X01_w1_01__master.h5,1,720 -d /beamlines/bl06/projects/cycle2026-I/2025000000-pi/20260711/PROCESSED_DATA/Sample-19-01/BSample-19X01_w1_01_autoproc_noanom_run1/all_files</processingCommandLine>
+      <processingPrograms>autoPROC 20260424 (see: http://www.globalphasing.com/autoproc/)</processingPrograms>
+      <processingStatus>1</processingStatus>
+      <processingMessage></processingMessage>
+      <processingStartTime>Sat Jul 11 15:01:43 CEST 2026</processingStartTime>
+      <processingEndTime>Sat Jul 11 15:05:36 CEST 2026</processingEndTime>
+      <processingEnvironment>
+  Host      : hpcnode038
+  OS        : PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"|VERSION_CODENAME=bookworm|x86_64|5.14.0-570.17.1.el9_6.x86_64
+  User      : opbl06 (group = XAIRA)
+  Directory : /beamlines/bl06/projects/cycle2026-I/2025000000-pi/20260711/PROCESSED_DATA/Sample-19-01/BSample-19X01_w1_01_autoproc_noanom_run1
+  Date      : Sat Jul 11 15:01:43 CEST 2026
+  autoPROC  : /opt/autoPROC/20260424
+      </processingEnvironment>
+    </AutoProcProgram>
+    <AutoProcProgramAttachment>
+      <fileType>Log</fileType>
+      <fileName>summary_inlined.html</fileName>
+      <filePath>/beamlines/bl06/projects/cycle2026-I/2025000000-pi/20260711/PROCESSED_DATA/Sample-19-01/BSample-19X01_w1_01_autoproc_noanom_run1/all_files</filePath>
+    </AutoProcProgramAttachment>
+    <AutoProcProgramAttachment>
+      <fileType>Log</fileType>
+      <fileName>summary.tar.gz</fileName>
+      <filePath>/beamlines/bl06/projects/cycle2026-I/2025000000-pi/20260711/PROCESSED_DATA/Sample-19-01/BSample-19X01_w1_01_autoproc_noanom_run1/all_files</filePath>
+    </AutoProcProgramAttachment>
+    <AutoProcProgramAttachment>
+      <fileType>Result</fileType>
+      <fileName>truncate-unique.mtz</fileName>
+      <filePath>/beamlines/bl06/projects/cycle2026-I/2025000000-pi/20260711/PROCESSED_DATA/Sample-19-01/BSample-19X01_w1_01_autoproc_noanom_run1/all_files</filePath>
+    </AutoProcProgramAttachment>
+    <AutoProcProgramAttachment>
+      <fileType>Result</fileType>
+      <fileName>truncate-unique.table1</fileName>
+      <filePath>/beamlines/bl06/projects/cycle2026-I/2025000000-pi/20260711/PROCESSED_DATA/Sample-19-01/BSample-19X01_w1_01_autoproc_noanom_run1/all_files</filePath>
+    </AutoProcProgramAttachment>
+    <AutoProcProgramAttachment>
+      <fileType>Result</fileType>
+      <fileName>truncate-unique.stats</fileName>
+      <filePath>/beamlines/bl06/projects/cycle2026-I/2025000000-pi/20260711/PROCESSED_DATA/Sample-19-01/BSample-19X01_w1_01_autoproc_noanom_run1/all_files</filePath>
+    </AutoProcProgramAttachment>
+  </AutoProcProgramContainer>
+  <AutoProc>
+    <spaceGroup>P 21 3</spaceGroup>
+    <wavelength>.88591</wavelength>
+    <refinedCell_a>21.751</refinedCell_a>
+    <refinedCell_b>21.751</refinedCell_b>
+    <refinedCell_c>21.751</refinedCell_c>
+    <refinedCell_alpha>90.000</refinedCell_alpha>
+    <refinedCell_beta>90.000</refinedCell_beta>
+    <refinedCell_gamma>90.000</refinedCell_gamma>
+  </AutoProc>
+  <AutoProcScalingContainer>
+    <AutoProcScaling>
+      <recordTimeStamp>2026-07-11 15:04:22</recordTimeStamp>
+    </AutoProcScaling>
+    <AutoProcScalingStatistics>
+      <scalingStatisticsType>overall</scalingStatisticsType>
+      <resolutionLimitLow>15.380</resolutionLimitLow>
+      <resolutionLimitHigh>.807</resolutionLimitHigh>
+      <rMerge>.115</rMerge>
+      <rMeasWithinIPlusIMinus>.115</rMeasWithinIPlusIMinus>
+      <rMeasAllIPlusIMinus>.117</rMeasAllIPlusIMinus>
+      <rPimWithinIPlusIMinus>.030</rPimWithinIPlusIMinus>
+      <rPimAllIPlusIMinus>.022</rPimAllIPlusIMinus>
+      <nTotalObservations>90710</nTotalObservations>
+      <nTotalUniqueObservations>3691</nTotalUniqueObservations>
+      <meanIOverSigI>17.5</meanIOverSigI>
+      <completeness>99.5</completeness>
+      <multiplicity>24.6</multiplicity>
+      <ccHalf>0.998</ccHalf>
+      <anomalousCompleteness>97.8</anomalousCompleteness>
+      <anomalousMultiplicity>13.4</anomalousMultiplicity>
+      <ccAnomalous>0.759</ccAnomalous>
+      <DanoOverSigDano>1.217</DanoOverSigDano>
+    </AutoProcScalingStatistics>
+    <AutoProcScalingStatistics>
+      <scalingStatisticsType>innerShell</scalingStatisticsType>
+      <resolutionLimitLow>15.380</resolutionLimitLow>
+      <resolutionLimitHigh>2.189</resolutionLimitHigh>
+      <rMerge>.068</rMerge>
+      <rMeasWithinIPlusIMinus>.062</rMeasWithinIPlusIMinus>
+      <rMeasAllIPlusIMinus>.069</rMeasAllIPlusIMinus>
+      <rPimWithinIPlusIMinus>.015</rPimWithinIPlusIMinus>
+      <rPimAllIPlusIMinus>.013</rPimAllIPlusIMinus>
+      <nTotalObservations>5857</nTotalObservations>
+      <nTotalUniqueObservations>203</nTotalUniqueObservations>
+      <meanIOverSigI>46.0</meanIOverSigI>
+      <completeness>98.1</completeness>
+      <multiplicity>28.9</multiplicity>
+      <ccHalf>0.997</ccHalf>
+      <anomalousCompleteness>95.6</anomalousCompleteness>
+      <anomalousMultiplicity>17.6</anomalousMultiplicity>
+      <ccAnomalous>0.843</ccAnomalous>
+      <DanoOverSigDano>2.697</DanoOverSigDano>
+    </AutoProcScalingStatistics>
+    <AutoProcScalingStatistics>
+      <scalingStatisticsType>outerShell</scalingStatisticsType>
+      <resolutionLimitLow>.821</resolutionLimitLow>
+      <resolutionLimitHigh>.807</resolutionLimitHigh>
+      <rMerge>1.554</rMerge>
+      <rMeasWithinIPlusIMinus>1.953</rMeasWithinIPlusIMinus>
+      <rMeasAllIPlusIMinus>1.801</rMeasAllIPlusIMinus>
+      <rPimWithinIPlusIMinus>1.131</rPimWithinIPlusIMinus>
+      <rPimAllIPlusIMinus>.881</rPimAllIPlusIMinus>
+      <nTotalObservations>677</nTotalObservations>
+      <nTotalUniqueObservations>170</nTotalUniqueObservations>
+      <meanIOverSigI>1.1</meanIOverSigI>
+      <completeness>96.0</completeness>
+      <multiplicity>4.0</multiplicity>
+      <ccHalf>0.394</ccHalf>
+      <anomalousCompleteness>72.5</anomalousCompleteness>
+      <anomalousMultiplicity>2.3</anomalousMultiplicity>
+      <ccAnomalous>-0.016</ccAnomalous>
+      <DanoOverSigDano>.433</DanoOverSigDano>
+    </AutoProcScalingStatistics>
+    <AutoProcIntegrationContainer>
+      <Image>
+        <fileName>BSample-19X01_w1_01__master.h5</fileName>
+        <fileLocation>/beamlines/bl06/projects/cycle2026-I/2025000000-pi/20260711/RAW_DATA/Sample-19-01/BSample-19X01_w1_01</fileLocation>
+      </Image>
+      <AutoProcIntegration>
+        <cell_a>21.7558</cell_a>
+        <cell_b>21.7558</cell_b>
+        <cell_c>21.7558</cell_c>
+        <cell_alpha>90.000</cell_alpha>
+        <cell_beta>90.000</cell_beta>
+        <cell_gamma>90.000</cell_gamma>
+        <startImageNumber>1</startImageNumber>
+        <endImageNumber>635</endImageNumber>
+        <refinedDetectorDistance>69.899368</refinedDetectorDistance>
+        <refinedXBeam>107.598</refinedXBeam>
+        <refinedYBeam>114.844</refinedYBeam>
+        <rotationAxisX>0.000234</rotationAxisX>
+        <rotationAxisY>0.999961</rotationAxisY>
+        <rotationAxisZ>-0.008824</rotationAxisZ>
+        <beamVectorX>0.000698</beamVectorX>
+        <beamVectorY>0.009543</beamVectorY>
+        <beamVectorZ>1.128742</beamVectorZ>
+      </AutoProcIntegration>
+    </AutoProcIntegrationContainer>
+  </AutoProcScalingContainer>
+</AutoProcContainer>

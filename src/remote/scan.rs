@@ -1,4 +1,5 @@
-//! Walks one sample's RESULTS folder and fills in its solves (DESIGN.md §2.2–2.4).
+//! Walks one sample's results and fills in its solves: XALOC's EDNA layout
+//! (DESIGN.md §2.2–2.4) and XAIRA's EDNA2 folders with STATUS + all_files (§2.9).
 
 use super::sftp::{Entry, ReadOnlySftp};
 use crate::ispyb;
@@ -12,23 +13,26 @@ const MAX_XML: u64 = 512 * 1024;
 const STALE_SECS: u64 = 3 * 3600;
 
 pub struct Experiments {
-    /// Beamtime folder names (`20251211`).
+    /// Beamtime ids: `20251211`, or `<proposal folder>/20260711` (see `layout::beamtime_date`).
     pub ids: Vec<String>,
     /// What the root contains (for the "nothing found" message).
     pub top: Vec<String>,
 }
 
 pub async fn list_experiments(sftp: &ReadOnlySftp) -> Result<Experiments> {
-    let top = sftp.list("/").await?;
-    let ids = top
-        .iter()
-        .filter(|e| e.is_dir && layout::is_date_dir(&e.name))
-        .map(|e| e.name.clone())
-        .collect();
-    Ok(Experiments {
-        ids,
-        top: top.into_iter().map(|e| e.name).collect(),
-    })
+    let mut ids = Vec::new();
+    let mut top_names = Vec::new();
+    for p in sftp.proposals().to_vec() {
+        let dir = if p.is_empty() { "/".to_string() } else { format!("/{p}") };
+        let top = sftp.list(&dir).await?;
+        ids.extend(
+            top.iter()
+                .filter(|e| e.is_dir && layout::is_date_dir(&e.name))
+                .map(|e| if p.is_empty() { e.name.clone() } else { format!("{p}/{}", e.name) }),
+        );
+        top_names.extend(top.into_iter().map(|e| e.name));
+    }
+    Ok(Experiments { ids, top: top_names })
 }
 
 /// Sample folders of a beamtime, and whether it uses the flat 2026 layout.
@@ -70,8 +74,9 @@ pub async fn list_frames(
     let mut out = Vec::new();
     for (dir, entries) in dirs {
         for e in entries.iter().filter(|e| !e.is_dir) {
-            if runs.iter().any(|(p, r)| layout::is_frame_of(&e.name, p, *r)) {
-                out.push(RemoteFile::new(format!("{dir}/{}", e.name), e.size));
+            let path = format!("{dir}/{}", e.name);
+            if runs.iter().any(|(p, r)| layout::frame_belongs(&path, p, *r)) {
+                out.push(RemoteFile::new(path, e.size));
             }
         }
     }
@@ -80,9 +85,17 @@ pub async fn list_frames(
     Ok(out)
 }
 
+#[derive(Clone, Copy)]
+enum Style {
+    /// XALOC/EDNA: `proc_<id>/` inside, one or two solves per folder.
+    Classic(Pipeline),
+    /// XAIRA/EDNA2: one solve per folder, `STATUS` and `all_files/`.
+    Processed(SolveKind),
+}
+
 struct SolveDir {
     path: String,
-    pipeline: Pipeline,
+    style: Style,
     prefix: String,
     run: u32,
     n: u32,
@@ -102,10 +115,18 @@ impl Found {
         match layout::classify_dir(&e.name) {
             DirKind::Solve { pipeline, prefix, run, n } => self.solve_dirs.push(SolveDir {
                 path: format!("{parent}/{}", e.name),
-                pipeline,
+                style: Style::Classic(pipeline),
                 prefix,
                 run,
                 n,
+                mtime: e.mtime.map(u64::from).unwrap_or(0),
+            }),
+            DirKind::Processed { kind, prefix, run } => self.solve_dirs.push(SolveDir {
+                path: format!("{parent}/{}", e.name),
+                style: Style::Processed(kind),
+                prefix,
+                run,
+                n: 1,
                 mtime: e.mtime.map(u64::from).unwrap_or(0),
             }),
             DirKind::Characterisation { prefix, run } => self.char_runs.push((prefix, run)),
@@ -158,7 +179,7 @@ pub async fn scan_sample(
         if !known_here.is_empty() && known_here.iter().all(|s| s.status != Status::Running) {
             run.solves.extend(known_here);
         } else {
-            for kind in kinds_of(d.pipeline) {
+            for kind in kinds_of(d.style) {
                 run.solves.push(Solve::new(kind, d.path.clone(), d.n));
             }
         }
@@ -177,11 +198,12 @@ pub async fn scan_sample(
         if !needs_scan {
             continue;
         }
-        let fresh = match d.pipeline {
-            Pipeline::AutoProc => scan_autoproc(sftp, &d.path, d.n, d.mtime).await?,
-            Pipeline::EdnaProc => vec![scan_ednaproc(sftp, &d.path, d.n, d.mtime).await?],
-            Pipeline::Xia2 => vec![scan_xia2(sftp, &d.path, d.n, d.mtime, false).await?],
-            Pipeline::Xia2Chem => vec![scan_xia2(sftp, &d.path, d.n, d.mtime, true).await?],
+        let fresh = match d.style {
+            Style::Classic(Pipeline::AutoProc) => scan_autoproc(sftp, &d.path, d.n, d.mtime).await?,
+            Style::Classic(Pipeline::EdnaProc) => vec![scan_ednaproc(sftp, &d.path, d.n, d.mtime).await?],
+            Style::Classic(Pipeline::Xia2) => vec![scan_xia2(sftp, &d.path, d.n, d.mtime, false).await?],
+            Style::Classic(Pipeline::Xia2Chem) => vec![scan_xia2(sftp, &d.path, d.n, d.mtime, true).await?],
+            Style::Processed(kind) => vec![scan_processed(sftp, &d.path, kind, d.mtime).await],
         };
         let run = run_mut(&mut info, &d.prefix, d.run);
         run.solves.retain(|s| s.dir != d.path);
@@ -192,13 +214,70 @@ pub async fn scan_sample(
     Ok(info)
 }
 
-fn kinds_of(p: Pipeline) -> Vec<SolveKind> {
-    match p {
-        Pipeline::AutoProc => vec![SolveKind::AutoProcNoAnom, SolveKind::AutoProcAnom],
-        Pipeline::EdnaProc => vec![SolveKind::EdnaProc],
-        Pipeline::Xia2 => vec![SolveKind::Xia2],
-        Pipeline::Xia2Chem => vec![SolveKind::Xia2Chem],
+fn kinds_of(style: Style) -> Vec<SolveKind> {
+    match style {
+        Style::Classic(Pipeline::AutoProc) => vec![SolveKind::AutoProcNoAnom, SolveKind::AutoProcAnom],
+        Style::Classic(Pipeline::EdnaProc) => vec![SolveKind::EdnaProc],
+        Style::Classic(Pipeline::Xia2) => vec![SolveKind::Xia2],
+        Style::Classic(Pipeline::Xia2Chem) => vec![SolveKind::Xia2Chem],
+        Style::Processed(kind) => vec![kind],
     }
+}
+
+/// Files in a XAIRA solve's `all_files/`: (stats XML, HKL files, logs). Addressed by name
+/// because autoPROC's `all_files/` holds ~800 files and is never listed.
+fn processed_files(kind: SolveKind) -> (Option<&'static str>, &'static [&'static str], &'static [&'static str]) {
+    match kind {
+        SolveKind::AutoProcNoAnom | SolveKind::AutoProcAnom => {
+            (Some("autoPROC.xml"), &["XDS_ASCII.HKL"], &["autoPROC.xml", "aimless.log"])
+        }
+        SolveKind::FastDp => (
+            Some("fast_dp.xml"),
+            &["XDS_ASCII.HKL"],
+            &["fast_dp.xml", "fast_dp.log", "CORRECT.LP", "aimless.log"],
+        ),
+        // not seen succeed on XAIRA yet: status only
+        SolveKind::Xia2 | SolveKind::Xia2Chem | SolveKind::EdnaProc => (None, &[], &[]),
+    }
+}
+
+/// XAIRA solve: `STATUS` says SUCCESS / FAIL (absent while running); results in `all_files/`.
+/// Two small reads: STATUS and the stats XML.
+async fn scan_processed(sftp: &ReadOnlySftp, dir: &str, kind: SolveKind, dir_mtime: u64) -> Solve {
+    let mut solve = Solve::new(kind, dir, 1);
+    let status = sftp
+        .read_small(&format!("{dir}/STATUS"), 256)
+        .await
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).trim().to_ascii_uppercase());
+    match status.as_deref() {
+        Some(s) if s.starts_with("SUCCESS") => {
+            let all = format!("{dir}/all_files");
+            let (stats, hkl, logs) = processed_files(kind);
+            if let Some(name) = stats {
+                solve.stats = read_stats(sftp, &format!("{all}/{name}"), true).await;
+            }
+            solve.hkl = hkl.iter().map(|n| RemoteFile::new(format!("{all}/{n}"), None)).collect();
+            solve.logs = logs.iter().map(|n| RemoteFile::new(format!("{all}/{n}"), None)).collect();
+            solve.status = Status::Done;
+            if hkl.is_empty() {
+                solve.note = Some("finished; this pipeline's XAIRA output isn't read yet".into());
+            } else if solve.stats.is_none() {
+                solve.note = Some("finished, but its statistics file could not be read".into());
+            }
+        }
+        Some(s) if s.starts_with("FAIL") => {
+            solve.status = Status::Failed;
+            solve.note = Some("the pipeline reported FAIL".into());
+        }
+        _ => {
+            if dir_mtime > 0 && now_secs().saturating_sub(dir_mtime) > STALE_SECS {
+                solve.status = Status::Failed;
+                solve.note = Some("no result after 3 h".into());
+            }
+        }
+    }
+    solve
 }
 
 fn run_mut<'a>(info: &'a mut SampleInfo, prefix: &str, run: u32) -> &'a mut Run {
@@ -277,7 +356,7 @@ async fn flat_solve(
     }
     for name in ["ispyb.xml", "ISPyBStoreAutoProcv1_4_dataInput.xml"] {
         if find(entries, name).is_some() {
-            solve.stats = read_stats(sftp, &format!("{dir}/{name}"), kind).await;
+            solve.stats = read_stats(sftp, &format!("{dir}/{name}"), name == "ispyb.xml").await;
             break;
         }
     }
@@ -317,9 +396,10 @@ fn settle(solve: &mut Solve, ended: bool, latest: u64) {
     }
 }
 
-async fn read_stats(sftp: &ReadOnlySftp, path: &str, kind: SolveKind) -> Option<Stats> {
+/// `r_fraction`: see `ispyb::parse` (EDNA's ISPyB files use percent, the rest fractions).
+async fn read_stats(sftp: &ReadOnlySftp, path: &str, r_fraction: bool) -> Option<Stats> {
     let bytes = sftp.read_small(path, MAX_XML).await.ok()?;
-    ispyb::parse(&String::from_utf8_lossy(&bytes), kind).ok()
+    ispyb::parse(&String::from_utf8_lossy(&bytes), r_fraction).ok()
 }
 
 async fn scan_autoproc(sftp: &ReadOnlySftp, dir: &str, n: u32, dir_mtime: u64) -> Result<Vec<Solve>> {
@@ -352,7 +432,7 @@ async fn scan_autoproc(sftp: &ReadOnlySftp, dir: &str, n: u32, dir_mtime: u64) -
             let files = sftp.list(&isp).await?;
             if find(&files, "ISPyBStoreAutoProcv1_4_dataInput.xml").is_some() {
                 solve.stats =
-                    read_stats(sftp, &format!("{isp}/ISPyBStoreAutoProcv1_4_dataInput.xml"), kind).await;
+                    read_stats(sftp, &format!("{isp}/ISPyBStoreAutoProcv1_4_dataInput.xml"), false).await;
             }
         }
         if find(&top, &ap_name).is_some() {
@@ -428,7 +508,7 @@ async fn scan_ednaproc(sftp: &ReadOnlySftp, dir: &str, n: u32, dir_mtime: u64) -
     isp.sort_by(|a, b| a.name.cmp(&b.name));
     for e in isp.into_iter().take(2) {
         let path = format!("{proc}/{}/ISPyBStoreAutoProcv1_4_dataInput.xml", e.name);
-        if let Some(st) = read_stats(sftp, &path, SolveKind::EdnaProc).await {
+        if let Some(st) = read_stats(sftp, &path, false).await {
             let noanom = st.anomalous == Some(false);
             if solve.stats.is_none() || noanom {
                 solve.stats = Some(st);
@@ -481,7 +561,7 @@ async fn scan_xia2(sftp: &ReadOnlySftp, dir: &str, n: u32, dir_mtime: u64, chem:
     if let Some(xd) = xd {
         let files = sftp.list(&xd).await?;
         if find(&files, "ispyb.xml").is_some() {
-            solve.stats = read_stats(sftp, &format!("{xd}/ispyb.xml"), kind).await;
+            solve.stats = read_stats(sftp, &format!("{xd}/ispyb.xml"), true).await;
         }
         for name in ["xia2.txt", "xia2-summary.dat", "xia2.html", "ispyb.xml", "xia2-error.txt"] {
             if let Some(f) = file(&files, &xd, name) {

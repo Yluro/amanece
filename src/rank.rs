@@ -67,7 +67,8 @@ mod tests {
         .unwrap();
         let mut s = Solve::new(kind, format!("/r/{}", kind.folder()), 1);
         s.status = Status::Done;
-        s.stats = Some(crate::ispyb::parse(&xml, kind).unwrap());
+        let fraction = matches!(kind, SolveKind::Xia2 | SolveKind::Xia2Chem);
+        s.stats = Some(crate::ispyb::parse(&xml, fraction).unwrap());
         s.hkl = vec![RemoteFile::new("/r/x.hkl", Some(1))];
         s
     }

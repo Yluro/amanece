@@ -54,7 +54,8 @@ impl Cache {
     /// Replace the date list from a fresh root listing; forget experiments that vanished
     /// (e.g. after logging in with another proposal account in the same folder).
     pub fn set_dates(&mut self, mut dates: Vec<String>) {
-        dates.sort_by(|a, b| b.cmp(a));
+        let day = |s: &String| crate::layout::beamtime_date(s).to_string();
+        dates.sort_by(|a, b| day(b).cmp(&day(a)).then(b.cmp(a)));
         self.experiments.retain(|d, _| dates.contains(d));
         for d in &dates {
             self.experiments.entry(d.clone()).or_insert_with(|| Experiment {

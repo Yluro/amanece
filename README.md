@@ -21,7 +21,8 @@ Each panel shows its keys on its bottom border; `?` lists them all. In short:
   to the Recycle Bin (asks first). Downloads land in `<sample>/<program>/` inside the folder open
   here, like the old notebook: `JSG285b/xia2chem_r3/shelxt.hkl`, `JSG285b/autoproc_noanom_r3/…`,
   `JSG285b/frames_r3/…`.
-- **ALBA**: beamtimes like folders; `Enter` opens one (the others are hidden), `Backspace` goes back.
+- **ALBA**: beamtimes like folders, from XALOC (BL13) and XAIRA (BL06) together, newest first;
+  `Enter` opens one (the others are hidden), `Backspace` goes back.
 - **Stats**: every solve with its statistics, ★ on the best one. `Space` marks, `d` downloads,
   `F` downloads raw frames (asks first).
 - **Console**: a terminal (Windows ConPTY). `:` to type. Commands run in the Local folder and a

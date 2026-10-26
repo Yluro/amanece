@@ -551,7 +551,7 @@ impl App {
                     format!("connected as {user} to {}:{}", self.cfg.host, self.cfg.port),
                 );
                 self.console
-                    .push(LineKind::Info, format!("proposal folder: {root}"));
+                    .push(LineKind::Info, format!("proposal folders: {root}"));
                 self.remote_root = Some(root);
                 self.remote.send(RemoteCmd::ListExperiments);
                 if first {
@@ -628,7 +628,16 @@ impl App {
                     self.experiments_listed = true;
                     self.console.push(
                         LineKind::Info,
-                        format!("{} beamtimes: {}", self.cache.dates.len(), self.cache.dates.join(" ")),
+                        format!(
+                            "{} beamtimes: {}",
+                            self.cache.dates.len(),
+                            self.cache
+                                .dates
+                                .iter()
+                                .map(|d| layout::beamtime_label(d))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
                     );
                     if self
                         .alba_date
@@ -650,7 +659,10 @@ impl App {
                         .cloned()
                         .collect();
                     for d in new {
-                        self.say(LineKind::Good, format!("new beamtime folder on ALBA: {d}"));
+                        self.say(
+                            LineKind::Good,
+                            format!("new beamtime folder on ALBA: {}", layout::beamtime_label(&d)),
+                        );
                         self.list_samples(&d, false);
                     }
                 }
@@ -1624,7 +1636,7 @@ impl App {
             for r in &info.runs {
                 let n = files
                     .iter()
-                    .filter(|f| layout::is_frame_of(f.name(), &r.prefix, r.run))
+                    .filter(|f| layout::frame_belongs(&f.path, &r.prefix, r.run))
                     .count();
                 if n > 0 {
                     let kind = if r.characterisation { " (characterisation)" } else { "" };
@@ -1659,7 +1671,7 @@ impl App {
         for r in &info.runs {
             let mine: Vec<RemoteFile> = files
                 .iter()
-                .filter(|f| layout::is_frame_of(f.name(), &r.prefix, r.run))
+                .filter(|f| layout::frame_belongs(&f.path, &r.prefix, r.run))
                 .cloned()
                 .collect();
             if mine.is_empty() {
@@ -1736,7 +1748,7 @@ mod live {
                 rate: 3.0,
                 burst: 6,
                 known_hosts: Some(std::env::temp_dir().join("alba_watch_live_known_hosts")),
-                beamline: "bl13".into(),
+                beamlines: vec!["bl13".into(), "bl06".into()],
                 remote_root: None,
             },
             tx.clone(),
@@ -1844,7 +1856,7 @@ mod trash_check {
                 rate: 1.0,
                 burst: 1,
                 known_hosts: None,
-                beamline: "bl13".into(),
+                beamlines: vec!["bl13".into(), "bl06".into()],
                 remote_root: None,
             },
             tx.clone(),
@@ -1892,7 +1904,7 @@ mod poll_tests {
                 rate: 1.0,
                 burst: 1,
                 known_hosts: None,
-                beamline: "bl13".into(),
+                beamlines: vec!["bl13".into(), "bl06".into()],
                 remote_root: None,
             },
             tx.clone(),

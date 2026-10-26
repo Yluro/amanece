@@ -96,7 +96,7 @@ pub struct Settings {
     pub rate: f64,
     pub burst: u32,
     pub known_hosts: Option<PathBuf>,
-    pub beamline: String,
+    pub beamlines: Vec<String>,
     pub remote_root: Option<String>,
 }
 
@@ -175,7 +175,7 @@ async fn command_loop(
         port: settings.port,
         known_hosts: settings.known_hosts.clone(),
         limiter,
-        beamline: &settings.beamline,
+        beamlines: &settings.beamlines,
         remote_root: settings.remote_root.as_deref(),
     };
     let mut conn: Option<Connection> = None;
@@ -215,7 +215,7 @@ async fn command_loop(
                 }
                 match session::connect(&target, &user, &password).await {
                     Ok((c, host_key)) => {
-                        let root = c.sftp.root().to_string();
+                        let root = c.sftp.describe();
                         shared.set(Some(c.sftp.clone()));
                         conn = Some(c);
                         creds = Some((user.clone(), password));
@@ -241,7 +241,7 @@ async fn command_loop(
                 };
                 match session::connect(&target, &user, &password).await {
                     Ok((c, host_key)) => {
-                        let root = c.sftp.root().to_string();
+                        let root = c.sftp.describe();
                         shared.set(Some(c.sftp.clone()));
                         conn = Some(c);
                         backoff = Duration::from_secs(30);

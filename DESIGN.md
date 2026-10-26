@@ -142,6 +142,25 @@ Gotchas:
 - Mouse capture is on (crossterm); the last frame's panel/list geometry (`app::Hit`) maps clicks to rows and to
   the status-bar badges.
 
+### 2.9 XAIRA (BL06), found 2026-10-26
+
+- Same account, same proposal folder name on both beamlines: `/bl13/projects/cycle2026-I/<digits>-<pi>` (XALOC)
+  and `/bl06/projects/cycle2026-I/<digits>-<pi>` (XAIRA). After login the app looks on every beamline in
+  `beamlines` (default `bl13`, `bl06`), only in cycles from the proposal's year on. Beamtime ids are then
+  paths under `/` (`bl06/projects/…/20260711`); the panel shows `XAIRA 20260711`.
+- `<date>/PROCESSED_DATA/<sample>/` directly (no RESULTS); samples are named by puck position (`Sample-19-01`).
+- EDNA2/ewoks folders: `<prefix>_<pipeline>_<noanom|anom>_run<N>/` with pipelines `autoproc`,
+  `autoproc_staraniso` (skipped), `fastdp`, `xia2dials`; plus `ref-<prefix>_testxtal_run<N>` (characterisation),
+  `…_diffraction_thumbnail_run1`, `…_dozorplot_run1` (ignored). Each holds `STATUS` (`SUCCESS` / `FAIL`),
+  `main_files/` (symlinks that don't resolve over SFTP), `all_files/` (autoPROC: ~800 files, never listed),
+  `icat/`, `input_datasets.txt`.
+- Read per solve: `STATUS`, then `all_files/autoPROC.xml` or `all_files/fast_dp.xml` (same AutoProcContainer schema,
+  **R factors as fractions**). HKL: `all_files/XDS_ASCII.HKL` for both. xia2dials results not seen yet (status only).
+- Raw data: `RAW_DATA/<sample>/<prefix>/` with Eiger HDF5 (`<prefix>__master.h5` + `__data_00000N.h5`, ~2 GB);
+  the frames download takes every `.h5` in that folder.
+- Units: only EDNA's `ISPyBStoreAutoProcv1_4_dataInput.xml` stores percentages; `ispyb.xml` (xia2),
+  `autoPROC.xml` and `fast_dp.xml` store fractions. `ispyb::parse` takes the unit from the file.
+
 ## 3. Gentle-scraping rules (hard requirements)
 
 1. **Read-only by construction.** The SFTP wrapper type exposes only `read_dir`, `stat` and `open_read`.

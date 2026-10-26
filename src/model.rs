@@ -10,6 +10,8 @@ pub enum SolveKind {
     EdnaProc,
     AutoProcNoAnom,
     AutoProcAnom,
+    /// fast_dp (XAIRA)
+    FastDp,
     Xia2,
 }
 
@@ -20,6 +22,7 @@ impl SolveKind {
             SolveKind::EdnaProc => "ednaproc",
             SolveKind::AutoProcNoAnom => "autoPROC noanom",
             SolveKind::AutoProcAnom => "autoPROC anom",
+            SolveKind::FastDp => "fast_dp",
             SolveKind::Xia2 => "xia2",
         }
     }
@@ -31,13 +34,9 @@ impl SolveKind {
             SolveKind::EdnaProc => "ednaproc",
             SolveKind::AutoProcNoAnom => "autoproc_noanom",
             SolveKind::AutoProcAnom => "autoproc_anom",
+            SolveKind::FastDp => "fastdp",
             SolveKind::Xia2 => "xia2",
         }
-    }
-
-    /// xia2 writes R-factors as fractions, EDNA and autoPROC as percentages.
-    pub fn r_factors_are_fractions(self) -> bool {
-        matches!(self, SolveKind::Xia2 | SolveKind::Xia2Chem)
     }
 }
 
@@ -170,8 +169,14 @@ impl SampleInfo {
         self.solves().any(|s| s.status == Status::Running)
     }
 
+    /// Distinct prefixes among runs with solves (characterisation prefixes don't count).
     pub fn distinct_prefixes(&self) -> usize {
-        let mut p: Vec<&str> = self.runs.iter().map(|r| r.prefix.as_str()).collect();
+        let mut p: Vec<&str> = self
+            .runs
+            .iter()
+            .filter(|r| !r.characterisation)
+            .map(|r| r.prefix.as_str())
+            .collect();
         p.sort();
         p.dedup();
         p.len()

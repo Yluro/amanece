@@ -2,6 +2,7 @@
 
 use crate::app::{AlbaRow, App, Badge, Conn, Dialog, Focus, ListHit, StatsRow};
 use crate::config::PollMode;
+use crate::layout;
 use crate::console::LineKind;
 use crate::model::{SampleInfo, Shell, Solve, Status, human_bytes};
 use crate::rank;
@@ -215,7 +216,10 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     t.spans.push(Span::raw(" "));
     let root = app.remote_root.clone().unwrap_or_else(|| "/".into());
     let path = match &app.alba_date {
+        // beamline-tree accounts: the id is the path under /
+        Some(d) if d.contains('/') => format!("/{d}"),
         Some(d) => format!("{}/{d}", root.trim_end_matches('/')),
+        None if root.contains(", ") => String::new(),
         None => root,
     };
     let room = area.width.saturating_sub(28) as usize;
@@ -254,10 +258,14 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
                     .and_then(|e| e.samples.as_ref())
                     .map(|s| format!("  {} samples", s.len()))
                     .unwrap_or_default();
-                ListItem::new(Line::from(vec![
-                    Span::raw(format!("  {d}/")).fg(Color::LightBlue).bold(),
-                    Span::raw(count).fg(Color::DarkGray),
-                ]))
+                let mut spans = vec![Span::raw("  ")];
+                if let Some(bl) = layout::beamline_name(d) {
+                    let colour = if bl == "XAIRA" { Color::LightMagenta } else { Color::LightCyan };
+                    spans.push(Span::raw(format!("{bl:<6} ")).fg(colour).bold());
+                }
+                spans.push(Span::raw(format!("{}/", layout::beamtime_date(d))).fg(Color::LightBlue).bold());
+                spans.push(Span::raw(count).fg(Color::DarkGray));
+                ListItem::new(Line::from(spans))
             }
             AlbaRow::Sample { date, name } => sample_item(app, date, name, inner_w),
         })
@@ -354,7 +362,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let block = panel(
-        title(format!("{name} · {date}"), focused),
+        title(format!("{name} · {}", layout::beamtime_label(&date)), focused),
         focused,
         &[("␣", "mark"), ("d", "download"), ("F", "frames")],
     );
@@ -626,7 +634,7 @@ fn date_summary(app: &App, date: &str) -> Vec<Line<'static>> {
     let exp = app.cache.experiments.get(date);
     let total = exp.and_then(|e| e.samples.as_ref()).map(|s| s.len());
     let scanned = exp.map(|e| e.infos.len()).unwrap_or(0);
-    let mut lines = vec![Line::from(format!("Beamtime {date}")).bold()];
+    let mut lines = vec![Line::from(format!("Beamtime {}", layout::beamtime_label(date))).bold()];
     match total {
         Some(t) => {
             lines.push(Line::from(format!("{t} sample folders, {scanned} scanned")));
@@ -1082,7 +1090,7 @@ mod tests {
 
     fn fixture_stats(name: &str, kind: SolveKind) -> crate::model::Stats {
         let xml = std::fs::read_to_string(format!("{}/docs/server_samples/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap();
-        crate::ispyb::parse(&xml, kind).unwrap()
+        crate::ispyb::parse(&xml, matches!(kind, SolveKind::Xia2 | SolveKind::Xia2Chem)).unwrap()
     }
 
     fn demo_app(base: &std::path::Path) -> App {
@@ -1096,7 +1104,7 @@ mod tests {
                 rate: 1.0,
                 burst: 1,
                 known_hosts: None,
-                beamline: "bl13".into(),
+                beamlines: vec!["bl13".into()],
                 remote_root: None,
             },
             tx.clone(),

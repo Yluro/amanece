@@ -67,8 +67,9 @@ pub struct Config {
     pub external_window: Vec<String>,
     pub max_requests_per_second: f64,
     pub burst: u32,
-    /// Beamline folder used to find the proposal folder (`/bl13/projects/cycle*/...`).
-    pub beamline: String,
+    /// Beamline folders searched for the proposal (`/bl13/projects/cycle*/...`):
+    /// bl13 = XALOC, bl06 = XAIRA.
+    pub beamlines: Vec<String>,
     /// Proposal folder on the server, if automatic detection doesn't find it.
     pub remote_root: Option<String>,
 }
@@ -87,7 +88,7 @@ impl Default for Config {
             external_window: vec!["xprep".into()],
             max_requests_per_second: 3.0,
             burst: 6,
-            beamline: "bl13".into(),
+            beamlines: vec!["bl13".into(), "bl06".into()],
             remote_root: None,
         }
     }
@@ -121,7 +122,8 @@ burst = 6
 
 # Where the beamtime folders (YYYYMMDD) live. Normally found automatically:
 # either the login folder itself, or /<beamline>/projects/cycle*/<account digits>-<pi>
-beamline = "bl13"
+# on each of these beamlines (bl13 = XALOC, bl06 = XAIRA)
+beamlines = ["bl13", "bl06"]
 # remote_root = "/bl13/projects/cycle2026-I/<account digits>-<pi>"
 "#;
 

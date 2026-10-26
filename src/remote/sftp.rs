@@ -66,6 +66,8 @@ pub struct ReadOnlySftp {
     limiter: Arc<Limiter>,
     /// The account's login folder. App paths (`/20251211/...`) are relative to it.
     root: String,
+    /// Proposal folders holding beamtimes, relative to `root` (`""` = the root itself).
+    proposals: Vec<String>,
 }
 
 impl ReadOnlySftp {
@@ -74,18 +76,21 @@ impl ReadOnlySftp {
             inner,
             limiter,
             root: "/".into(),
+            proposals: vec![String::new()],
         }
     }
 
-    /// Finds the proposal folder holding the beamtime folders and makes it the root.
+    /// Finds the proposal folders that hold the beamtime folders.
     ///
-    /// Older proposal accounts log straight into it (`/20251211/...`). Newer ones log
-    /// into the beamline tree (`/bl13/projects/cycle2026-I/<account digits>-<pi>/...`),
-    /// so look for the folder named after the account number, newest cycle first.
-    pub async fn locate_root(&mut self, user: &str, beamline: &str, configured: Option<&str>) -> Result<()> {
+    /// Older proposal accounts log straight into theirs (`/20251211/...`). Newer ones log
+    /// into the beamline tree; for each beamline (`bl13` XALOC, `bl06` XAIRA …) the folder
+    /// named after the account number is looked up in `/<bl>/projects/cycle*/`, only in
+    /// cycles from the proposal's year on (2–3 listings per beamline).
+    pub async fn locate_proposals(&mut self, user: &str, beamlines: &[String], configured: Option<&str>) -> Result<()> {
         if let Some(r) = configured.map(str::trim).filter(|r| !r.is_empty()) {
             let r = r.trim_end_matches('/');
             self.root = if r.is_empty() { "/".into() } else { r.to_string() };
+            self.proposals = vec![String::new()];
             return Ok(());
         }
         self.limiter.acquire().await;
@@ -97,41 +102,71 @@ impl ReadOnlySftp {
             .filter(|r| r.starts_with('/'))
             .unwrap_or_else(|| "/".into());
         self.root = home.clone();
+        self.proposals = vec![String::new()];
         let top = self.list_abs(&home).await?;
         if top.iter().any(|e| e.is_dir && crate::layout::is_date_dir(&e.name)) {
-            return Ok(());
-        }
-        if !top.iter().any(|e| e.is_dir && e.name == beamline) {
             return Ok(());
         }
         let digits = user.trim().trim_start_matches(['u', 'U']).to_string();
         if digits.is_empty() {
             return Ok(());
         }
-        let projects = join(&home, &format!("{beamline}/projects"));
-        let mut cycles: Vec<String> = self
-            .list_abs(&projects)
-            .await?
-            .into_iter()
-            .filter(|e| e.is_dir && e.name.starts_with("cycle"))
-            .map(|e| e.name)
-            .collect();
-        cycles.sort_by(|a, b| b.cmp(a));
+        let year: Option<u32> = digits.get(..4).and_then(|y| y.parse().ok());
         let wanted = format!("{digits}-");
-        for c in cycles {
-            let dir = join(&projects, &c);
-            let Ok(entries) = self.list_abs(&dir).await else {
+        let mut found = Vec::new();
+        for bl in beamlines {
+            if !top.iter().any(|e| e.is_dir && e.name == *bl) {
+                continue;
+            }
+            let projects = format!("{bl}/projects");
+            let Ok(entries) = self.list_abs(&join(&home, &projects)).await else {
                 continue;
             };
-            if let Some(e) = entries
-                .iter()
-                .find(|e| e.is_dir && (e.name == digits || e.name.starts_with(&wanted)))
-            {
-                self.root = join(&dir, &e.name);
-                return Ok(());
+            let mut cycles: Vec<String> = entries
+                .into_iter()
+                .filter(|e| e.is_dir && e.name.starts_with("cycle"))
+                .filter(|e| {
+                    let cy: Option<u32> = e.name.get(5..9).and_then(|y| y.parse().ok());
+                    matches!((year, cy), (Some(p), Some(c)) if c >= p) || year.is_none() || cy.is_none()
+                })
+                .map(|e| e.name)
+                .collect();
+            cycles.sort_by(|a, b| b.cmp(a));
+            for c in cycles {
+                let Ok(entries) = self.list_abs(&join(&home, &format!("{projects}/{c}"))).await else {
+                    continue;
+                };
+                for e in entries
+                    .iter()
+                    .filter(|e| e.is_dir && (e.name == digits || e.name.starts_with(&wanted)))
+                {
+                    found.push(format!("{projects}/{c}/{}", e.name));
+                }
             }
         }
+        if !found.is_empty() {
+            self.proposals = found;
+        }
         Ok(())
+    }
+
+    pub fn proposals(&self) -> &[String] {
+        &self.proposals
+    }
+
+    /// The proposal folders as absolute server paths, for messages.
+    pub fn describe(&self) -> String {
+        self.proposals
+            .iter()
+            .map(|p| {
+                if p.is_empty() {
+                    self.root.clone()
+                } else {
+                    join(&self.root, p)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     pub fn root(&self) -> &str {

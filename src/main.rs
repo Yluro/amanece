@@ -64,7 +64,7 @@ fn main() -> Result<()> {
             rate: cfg.request_rate(),
             burst: cfg.burst,
             known_hosts: config::Config::known_hosts_path(),
-            beamline: cfg.beamline.clone(),
+            beamlines: cfg.beamlines.clone(),
             remote_root: cfg.remote_root.clone(),
         },
         tx.clone(),

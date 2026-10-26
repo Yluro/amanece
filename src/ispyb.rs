@@ -1,10 +1,13 @@
 //! Parser for the ISPyB `AutoProcContainer` XML that every ALBA pipeline writes.
 
-use crate::model::{Shell, SolveKind, Stats};
+use crate::model::{Shell, Stats};
 use anyhow::{Context, Result, anyhow};
 use roxmltree::{Document, Node};
 
-pub fn parse(xml: &str, kind: SolveKind) -> Result<Stats> {
+/// `r_fraction`: the file stores R factors as fractions (xia2 `ispyb.xml`, autoPROC's own
+/// `autoPROC.xml`, `fast_dp.xml`) rather than percentages (EDNA's
+/// `ISPyBStoreAutoProcv1_4_dataInput.xml`). They come out as percentages either way.
+pub fn parse(xml: &str, r_fraction: bool) -> Result<Stats> {
     let doc = Document::parse(xml).context("invalid ISPyB XML")?;
     let container = doc
         .descendants()
@@ -28,7 +31,7 @@ pub fn parse(xml: &str, kind: SolveKind) -> Result<Stats> {
         }
     }
 
-    let r_scale = if kind.r_factors_are_fractions() { 100.0 } else { 1.0 };
+    let r_scale = if r_fraction { 100.0 } else { 1.0 };
     for st in container
         .descendants()
         .filter(|n| is(n, "AutoProcScalingStatistics"))
@@ -108,7 +111,7 @@ mod tests {
 
     #[test]
     fn xia2chem_fractions_become_percent() {
-        let s = parse(&fixture("xia2chem_ispyb.xml"), SolveKind::Xia2Chem).unwrap();
+        let s = parse(&fixture("xia2chem_ispyb.xml"), true).unwrap();
         assert_eq!(s.space_group.as_deref(), Some("P 4"));
         let o = s.overall.unwrap();
         assert!((o.rmerge_pct.unwrap() - 8.529).abs() < 0.01);
@@ -121,7 +124,7 @@ mod tests {
 
     #[test]
     fn ednaproc_percent_stays_percent() {
-        let s = parse(&fixture("ednaproc_ispyb.xml"), SolveKind::EdnaProc).unwrap();
+        let s = parse(&fixture("ednaproc_ispyb.xml"), false).unwrap();
         let o = s.overall.unwrap();
         assert!((o.rmerge_pct.unwrap() - 7.2).abs() < 0.01);
         assert!((o.d_high.unwrap() - 0.94).abs() < 0.001);
@@ -133,7 +136,7 @@ mod tests {
 
     #[test]
     fn autoproc_wrapped_container() {
-        let s = parse(&fixture("autoproc_noanom_ispyb.xml"), SolveKind::AutoProcNoAnom).unwrap();
+        let s = parse(&fixture("autoproc_noanom_ispyb.xml"), false).unwrap();
         let o = s.overall.unwrap();
         assert!((o.rmerge_pct.unwrap() - 8.9).abs() < 0.01);
         assert!((o.d_high.unwrap() - 0.859).abs() < 0.001);
@@ -142,6 +145,22 @@ mod tests {
 
     #[test]
     fn rejects_empty() {
-        assert!(parse("<a/>", SolveKind::Xia2).is_err());
+        assert!(parse("<a/>", true).is_err());
+    }
+
+    #[test]
+    fn xaira_autoproc_and_fast_dp_use_fractions() {
+        let a = parse(&fixture("xaira_autoPROC.xml"), true).unwrap();
+        assert_eq!(a.space_group.as_deref(), Some("P 21 3"));
+        let o = a.overall.unwrap();
+        assert!((o.rmerge_pct.unwrap() - 11.5).abs() < 0.01);
+        assert!((o.d_high.unwrap() - 0.807).abs() < 0.001);
+        let f = parse(&fixture("xaira_fast_dp.xml"), true).unwrap();
+        let o = f.overall.unwrap();
+        assert!((o.rmerge_pct.unwrap() - 8.5).abs() < 0.01);
+        assert!((o.cc_half.unwrap() - 0.999).abs() < 0.001);
+        // ALBA's own autoPROC.xml (2025) is fractions too
+        let old = parse(&fixture("autoproc_autoPROC.xml"), true).unwrap();
+        assert!((old.overall.unwrap().rmerge_pct.unwrap() - 8.9).abs() < 0.01);
     }
 }
