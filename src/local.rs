@@ -59,7 +59,7 @@ impl LocalPanel {
                     .flatten()
                     .filter_map(|e| {
                         let name = e.file_name().to_string_lossy().to_string();
-                        if name == ".alba_watch" || name == SOURCE_FILE {
+                        if name == ".amanece" || name == ".alba_watch" || name == SOURCE_FILE {
                             return None;
                         }
                         let md = e.metadata().ok()?;
@@ -223,7 +223,7 @@ pub fn describe(path: &Path) -> String {
     }
 }
 
-/// (beamtime id, sample) of everything alba_watch downloaded into `dir` or its
+/// (beamtime id, sample) of everything amanece downloaded into `dir` or its
 /// immediate subfolders (`<sample>/<program>/`), from their `.alba_source.json`.
 fn origins_of(dir: &Path) -> Vec<(String, String)> {
     let mut dirs = vec![dir.to_path_buf()];
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn make_dir_creates_and_selects() {
-        let base = std::env::temp_dir().join(format!("alba_watch_local_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("amanece_local_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let mut p = LocalPanel::new(base.clone());
         p.make_dir("JSG300").unwrap();

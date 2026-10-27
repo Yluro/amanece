@@ -98,7 +98,7 @@ impl Default for Config {
     }
 }
 
-const TEMPLATE: &str = r#"# alba_watch configuration. Credentials are never stored here.
+const TEMPLATE: &str = r#"# amanece configuration. Credentials are never stored here.
 host = "userdata.cells.es"
 port = 443
 
@@ -136,7 +136,20 @@ beamlines = ["bl13", "bl06"]
 
 impl Config {
     pub fn dir() -> Option<PathBuf> {
-        directories::ProjectDirs::from("", "", "alba_watch").map(|d| d.config_dir().to_path_buf())
+        let dir = directories::ProjectDirs::from("", "", "amanece")?.config_dir().to_path_buf();
+        // The app used to be called alba_watch: carry its settings and pinned host key over.
+        if !dir.exists() {
+            if let Some(old) = directories::ProjectDirs::from("", "", "alba_watch")
+                .map(|d| d.config_dir().to_path_buf())
+                .filter(|o| o.exists())
+            {
+                if let Some(parent) = dir.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::rename(old, &dir);
+            }
+        }
+        Some(dir)
     }
 
     pub fn known_hosts_path() -> Option<PathBuf> {

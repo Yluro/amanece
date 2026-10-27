@@ -1,4 +1,4 @@
-//! `<base>/.alba_watch/cache.json`: listings and stats already fetched, so a restart
+//! `<base>/.amanece/cache.json`: listings and stats already fetched, so a restart
 //! doesn't scrape the server again. Finished solves never change on the server.
 
 use crate::model::Experiment;
@@ -20,7 +20,13 @@ pub struct Cache {
 }
 
 pub fn state_dir(base: &Path) -> PathBuf {
-    base.join(".alba_watch")
+    let dir = base.join(".amanece");
+    // The app used to be called alba_watch: keep its cache instead of refetching everything.
+    let old = base.join(".alba_watch");
+    if !dir.exists() && old.exists() {
+        let _ = std::fs::rename(old, &dir);
+    }
+    dir
 }
 
 fn path(base: &Path) -> PathBuf {
@@ -92,7 +98,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let dir = std::env::temp_dir().join(format!("alba_watch_cache_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("amanece_cache_test_{}", std::process::id()));
         let mut c = Cache::load(&dir, "h");
         c.set_dates(vec!["20251211".into()]);
         c.save(&dir).unwrap();

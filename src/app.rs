@@ -334,11 +334,11 @@ impl App {
             cfg,
         };
         app.console
-            .open_log(&crate::cache::state_dir(&app.base).join("alba_watch.log"));
+            .open_log(&crate::cache::state_dir(&app.base).join("amanece.log"));
         app.console.push(
             LineKind::Info,
             format!(
-                "alba_watch {} · base {} · press ? for keys",
+                "amanece {} · base {} · press ? for keys",
                 env!("CARGO_PKG_VERSION"),
                 app.base.display()
             ),
@@ -643,7 +643,7 @@ impl App {
                                 title: "Login failed".into(),
                                 text: format!(
                                     "{MAX_LOGIN_ATTEMPTS} failed login attempts.\n\
-                                     alba_watch stops here so the account doesn't get locked.\n\n\
+                                     amanece stops here so the account doesn't get locked.\n\n\
                                      Press any key to exit."
                                 ),
                                 exit: true,
@@ -1154,7 +1154,7 @@ impl App {
         if let Some(r) = &self.console.pty {
             lines.push(format!("`{}` is still running in the console and will be stopped.", r.label));
         }
-        lines.push("Quit alba_watch? (y/n)".into());
+        lines.push("Quit amanece? (y/n)".into());
         self.dialog = Some(Dialog::Confirm {
             title: "Quit".into(),
             lines,
@@ -1919,14 +1919,14 @@ mod live {
                 port: 443,
                 rate: 3.0,
                 burst: 6,
-                known_hosts: Some(std::env::temp_dir().join("alba_watch_live_known_hosts")),
+                known_hosts: Some(std::env::temp_dir().join("amanece_live_known_hosts")),
                 beamlines: vec!["bl13".into(), "bl06".into()],
                 remote_root: None,
                 parallel_downloads: 3,
             },
             tx.clone(),
         );
-        let base = std::env::temp_dir().join(format!("alba_watch_flow_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("amanece_flow_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let mut app = App::new(Config::default(), None, base.clone(), remote, tx, Some(user.clone()), false);
         if let Some(Dialog::Login(l)) = &mut app.dialog {
@@ -2095,14 +2095,14 @@ mod trash_check {
             },
             tx.clone(),
         );
-        let base = std::env::temp_dir().join(format!("alba_watch_trash_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("amanece_trash_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
-        let file = base.join("alba_watch_trash_test.txt");
-        std::fs::write(&file, b"test file from alba_watch, safe to delete").unwrap();
+        let file = base.join("amanece_trash_test.txt");
+        std::fs::write(&file, b"test file from amanece, safe to delete").unwrap();
         let mut app = App::new(Config::default(), None, base.clone(), remote, tx, None, true);
         app.focus = Focus::Local;
         app.local.refresh();
-        app.local.select_name("alba_watch_trash_test.txt");
+        app.local.select_name("amanece_trash_test.txt");
 
         app.on_key(KeyEvent::from(KeyCode::Delete));
         assert!(matches!(app.dialog, Some(Dialog::Confirm { .. })));
@@ -2144,7 +2144,7 @@ mod poll_tests {
             },
             tx.clone(),
         );
-        let base = std::env::temp_dir().join(format!("alba_watch_poll_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("amanece_poll_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let mut app = App::new(Config::default(), None, base.clone(), remote, tx, None, true);
         app.conn = Conn::Connected("u".into());

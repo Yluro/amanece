@@ -122,10 +122,10 @@ pub struct Target<'a> {
 /// (reproduced against ALBA with every cipher; by default it rekeys after 1 GiB, which
 /// cut frame downloads at frame ~172). So: prefer AES-GCM, for which OpenSSH servers only
 /// rekey after 64 GB, and raise the client's own limit to 32 GiB. Downloads reconnect
-/// and retry if the session drops anyway. `ALBA_WATCH_REKEY_MB` lowers the limit to
+/// and retry if the session drops anyway. `AMANECE_REKEY_MB` lowers the limit to
 /// test exactly that.
 pub fn client_config() -> client::Config {
-    let limit = std::env::var("ALBA_WATCH_REKEY_MB")
+    let limit = std::env::var("AMANECE_REKEY_MB")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .map(|mb| mb << 20)
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn tofu_known_hosts() {
-        let p = std::env::temp_dir().join(format!("alba_watch_kh_{}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("amanece_kh_{}", std::process::id()));
         let _ = std::fs::remove_file(&p);
         let h = "userdata.cells.es:443";
         assert!(matches!(check_and_record(Some(&p), h, "ecdsa-sha2-nistp256", "SHA256:aaa"), HostKey::Added { .. }));

@@ -23,7 +23,7 @@ mod live {
             panic!("set ALBA_USER and ALBA_PASS");
         };
         let count = Arc::new(AtomicU64::new(0));
-        let kh = std::env::temp_dir().join("alba_watch_live_known_hosts");
+        let kh = std::env::temp_dir().join("amanece_live_known_hosts");
         let beamlines = vec!["bl13".to_string(), "bl06".to_string()];
         let target = Target {
             host: "userdata.cells.es",
@@ -154,7 +154,7 @@ mod live_rekey {
         let target = Target {
             host: "userdata.cells.es",
             port: 443,
-            known_hosts: Some(std::env::temp_dir().join("alba_watch_live_known_hosts")),
+            known_hosts: Some(std::env::temp_dir().join("amanece_live_known_hosts")),
             limiter: Arc::new(Limiter::new(3.0, 6, Arc::new(AtomicU64::new(0)))),
             beamlines: &beamlines,
             remote_root: None,
@@ -227,7 +227,7 @@ mod live_bench {
         let target = Target {
             host: "userdata.cells.es",
             port: 443,
-            known_hosts: Some(std::env::temp_dir().join("alba_watch_live_known_hosts")),
+            known_hosts: Some(std::env::temp_dir().join("amanece_live_known_hosts")),
             limiter: Arc::new(Limiter::new(100.0, 100, Arc::new(AtomicU64::new(0)))),
             beamlines: &beamlines,
             remote_root: None,

@@ -224,7 +224,7 @@ mod sadabs_check {
         if !exe.exists() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("alba_watch_sadabs_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("amanece_sadabs_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (tx, _rx) = std::sync::mpsc::channel();
         let cmd = portable_pty::CommandBuilder::new(exe);

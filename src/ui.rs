@@ -1294,7 +1294,7 @@ mod tests {
 
     #[test]
     fn mouse_selects_marks_and_toggles() {
-        let base = std::env::temp_dir().join(format!("alba_watch_mouse_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("amanece_mouse_{}", std::process::id()));
         std::fs::create_dir_all(base.join("JSG285b")).unwrap();
         let mut app = demo_app(&base);
         let screen = render(&app, 170, 42);
@@ -1332,7 +1332,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn console_shows_a_running_programs_prompt() {
-        let base = std::env::temp_dir().join(format!("alba_watch_term_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("amanece_term_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let mut app = demo_app(&base);
         let _ = render(&app, 170, 42);
@@ -1362,7 +1362,7 @@ mod tests {
     fn scans_never_remove_rows_and_selection_follows_the_sample() {
         use crate::event::AppEvent;
         use crate::remote::RemoteEvent;
-        let base = std::env::temp_dir().join(format!("alba_watch_rows_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("amanece_rows_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let mut app = demo_app(&base);
         let selected = |app: &App| app.selected_sample().map(|s| s.1);
@@ -1418,7 +1418,7 @@ mod tests {
 
     #[test]
     fn diamonds_tell_downloaded_from_same_name() {
-        let base = std::env::temp_dir().join(format!("alba_watch_dia_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("amanece_dia_{}", std::process::id()));
         // JSG285b: downloaded from this beamtime; JSG285-2: just a folder with that name
         let solve = base.join("JSG285b").join("xia2chem_r3");
         let mut s = crate::download::Sources::default();
@@ -1452,7 +1452,7 @@ mod tests {
     fn frames_get_a_progress_bar_and_two_console_lines() {
         use crate::event::AppEvent;
         use crate::remote::{DownloadEvent, RemoteEvent};
-        let base = std::env::temp_dir().join(format!("alba_watch_bar_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("amanece_bar_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let mut app = demo_app(&base);
         let files: Vec<RemoteFile> = (1..=3)
@@ -1490,7 +1490,7 @@ mod tests {
     fn local_shows_downloads_while_frames_keep_the_queue_busy() {
         use crate::event::AppEvent;
         use crate::remote::{DownloadEvent, RemoteEvent};
-        let base = std::env::temp_dir().join(format!("alba_watch_lref_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("amanece_lref_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let mut app = demo_app(&base);
         let names = |app: &App| app.local.entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
@@ -1513,7 +1513,7 @@ mod tests {
 
     #[test]
     fn render_snapshots() {
-        let base = std::env::temp_dir().join(format!("alba_watch_ui_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("amanece_ui_{}", std::process::id()));
         std::fs::create_dir_all(base.join("JSG285b/xia2chem_r3")).unwrap();
         let app = demo_app(&base);
         let wide = render(&app, 170, 42);

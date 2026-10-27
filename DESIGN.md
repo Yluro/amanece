@@ -1,4 +1,4 @@
-# alba_watch — design notes
+# amanece — design notes
 
 A ratatui TUI that replaces the `alba_download.ipynb` notebook (ALBAscrapper): browse the
 ALBA BL13-XALOC autoprocessing results over SFTP, compare the statistics of every solve,
@@ -171,7 +171,7 @@ Gotchas:
   asks the command loop (`ConnectionLost`), which logs in again with the in-memory credentials, and the file is
   retried. A retry resumes from the `.part` already on disk (remote seek + local append), and only tries that
   brought no new bytes count: 3 of those in a row and the file fails (its `.part` is removed then, or on cancel).
-  `ALBA_WATCH_REKEY_MB=16` forces drops to test this: AS514 (9 frames + a 10.7 MB HKL, many drops) completes
+  `AMANECE_REKEY_MB=16` forces drops to test this: AS514 (9 frames + a 10.7 MB HKL, many drops) completes
   and every file's SHA-256 matches a clean run (`ALBA_KEEP=1` keeps the live test's downloads).
 
 ### 2.11 Download speed (measured 2026-10-27)
@@ -206,7 +206,7 @@ Gotchas:
 3. **One request queue**, processed sequentially, rate-limited (3 req/s sustained, burst 6; config can lower it, never above 5 req/s). Scanning one sample costs ≈ 26 requests (~7 s); the status bar shows the running total.
 4. **Lazy:** login lists `/` (1 request). Expanding a date lists its `RESULTS/` (1). Selecting a sample discovers its
    solves and fetches their stats XMLs (≈ 10–15 requests, ~60 KB). "Fetch all stats" walks samples at ≤ 1 sample / 3 s.
-5. **Cache** in `<base>/.alba_watch/cache.json`. Finished solves never change, so their stats are never fetched again.
+5. **Cache** in `<base>/.amanece/cache.json`. Finished solves never change, so their stats are never fetched again.
    Unfinished solves are re-checked only by polling (1 `stat` of the marker each).
 6. **Max 3 login attempts per launch**, then exit, to stay clear of lockouts.
 7. **Downloads**: at most `parallel_downloads` (default 3, max 4) frames at a time plus one HKL/log slot (§2.12),
@@ -274,8 +274,8 @@ Keys (draft): `Tab`/`Shift-Tab` cycle panels · `↑↓`/`jk` move · `Enter` op
 src/
 ├── main.rs            CLI (clap), terminal setup/teardown, event loop
 ├── app.rs             App state, focus, key dispatch, messages from workers
-├── config.rs          %APPDATA%\alba_watch\config.toml (poll mode, sound, external_window…; never credentials)
-├── cache.rs           <base>/.alba_watch/cache.json
+├── config.rs          %APPDATA%\amanece\config.toml (poll mode, sound, external_window…; never credentials)
+├── cache.rs           <base>/.amanece/cache.json
 ├── local.rs           local directory model
 ├── remote/
 │   ├── session.rs     russh connect + password/keyboard-interactive auth, TOFU host-key check
@@ -294,7 +294,7 @@ UI thread never blocks: workers talk to `App` over `tokio::mpsc` channels.
 
 Crates (pin current versions at implementation time): `ratatui` + `crossterm`, `tokio`, `russh` + `russh-sftp`
 (pure Rust, works on the MSVC toolchain, supports the server's ECDSA host key), `quick-xml`, `serde`/`serde_json`/`toml`,
-`regex`, `clap`, `directories`, `anyhow`, `tracing` (file log in `.alba_watch/`), `windows-sys` (sound).
+`regex`, `clap`, `directories`, `anyhow`, `tracing` (file log in `.amanece/`), `windows-sys` (sound).
 
 Data model sketch:
 
@@ -339,7 +339,7 @@ keyboard-interactive the server actually accepted.
   the CRT linked in: `.cargo/config.toml` with
   `[target.x86_64-pc-windows-msvc] rustflags = ["-C", "target-feature=+crt-static"]`, then check that the
   only imports left are Windows' own DLLs (`api-ms-win-crt-*` / UCRT ship with Windows 10+). After that a
-  colleague can just run the single `alba_watch.exe`.
+  colleague can just run the single `amanece.exe`.
 - When handing the .exe to colleagues, tell them: Windows 10 1809+ or 11, 64-bit; unsigned, so SmartScreen asks
   once (*More info → Run anyway*); best in Windows Terminal (old console may show boxes for ★ ✓ ⏎); SHELX /
   XPREP / SADABS on PATH only for the console; their own ALBA login. Consider a zipped GitHub release.

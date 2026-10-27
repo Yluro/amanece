@@ -85,7 +85,7 @@ impl Console {
         self.started = Some(std::time::Instant::now());
         let unix = crate::model::now_secs();
         self.log_only(&format!(
-            "==== alba_watch {} started (unix time {unix})",
+            "==== amanece {} started (unix time {unix})",
             env!("CARGO_PKG_VERSION")
         ));
         let existing: Vec<String> = self.lines.iter().map(|l| l.text.clone()).collect();
@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn big_logs_are_trimmed_at_startup() {
-        let p = std::env::temp_dir().join(format!("alba_watch_logtrim_{}.log", std::process::id()));
+        let p = std::env::temp_dir().join(format!("amanece_logtrim_{}.log", std::process::id()));
         let line = "x".repeat(99) + "\n";
         std::fs::write(&p, line.repeat(60_000) + "last line\n").unwrap();
         trim_log(&p);

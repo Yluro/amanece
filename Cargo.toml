@@ -1,5 +1,5 @@
 [package]
-name = "alba_watch"
+name = "amanece"
 version = "0.1.0"
 edition = "2024"
 description = "TUI to browse ALBA BL13-XALOC autoprocessing results over SFTP and fetch HKL files"

@@ -20,7 +20,7 @@ pub struct Source {
     pub downloaded_at: u64,
 }
 
-/// File name → origin, for the files alba_watch downloaded into one folder.
+/// File name → origin, for the files amanece downloaded into one folder.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Sources {
     pub files: BTreeMap<String, Source>,
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn names_never_overwrite_unrelated_files() {
-        let dir = std::env::temp_dir().join(format!("alba_watch_names_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("amanece_names_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut sources = Sources::default();
         let mut taken = HashSet::new();
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn one_folder_per_solve() {
-        let cwd = std::env::temp_dir().join(format!("alba_watch_dirs_{}", std::process::id()));
+        let cwd = std::env::temp_dir().join(format!("amanece_dirs_{}", std::process::id()));
         std::fs::create_dir_all(&cwd).unwrap();
         let first = solve_dir(&cwd, "xia2chem_r3", "20251211", "JSG285b");
         assert_eq!(first, cwd.join("xia2chem_r3"));
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn forget_drops_entries() {
-        let dir = std::env::temp_dir().join(format!("alba_watch_forget_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("amanece_forget_{}", std::process::id()));
         let mut s = Sources::default();
         s.files.insert("a.hkl".into(), src("/r/a.hkl"));
         s.files.insert("b.ins".into(), src("/r/b.ins"));
@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn sources_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("alba_watch_src_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("amanece_src_{}", std::process::id()));
         let mut s = Sources::default();
         s.files.insert("a.hkl".into(), src("/r/a.hkl"));
         write_sources(&dir, &s).unwrap();
