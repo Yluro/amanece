@@ -879,16 +879,19 @@ impl App {
                         }
                         self.finish_group(gid);
                     }
-                    None if skipped => self
-                        .console
-                        .push(LineKind::Info, format!("= {label} (already here)")),
-                    None => self
-                        .console
-                        .push(LineKind::Good, format!("↓ {label}  {}", human_bytes(bytes))),
+                    None => {
+                        if skipped {
+                            self.console.push(LineKind::Info, format!("= {label} (already here)"));
+                        } else {
+                            self.console
+                                .push(LineKind::Good, format!("↓ {label}  {}", human_bytes(bytes)));
+                        }
+                        // at once, not when the queue is empty: frames may keep it busy for long
+                        self.local.refresh();
+                    }
                 }
                 if self.downloads.queued == 0 {
                     self.status = Some(("downloads finished".into(), LineKind::Good, Instant::now()));
-                    self.local.refresh();
                 }
             }
             DownloadEvent::Failed { id, label, message } => {
@@ -907,10 +910,10 @@ impl App {
                         }
                         self.finish_group(gid);
                     }
-                    None => self.say(LineKind::Error, format!("✗ {label}: {message}")),
-                }
-                if self.downloads.queued == 0 {
-                    self.local.refresh();
+                    None => {
+                        self.say(LineKind::Error, format!("✗ {label}: {message}"));
+                        self.local.refresh();
+                    }
                 }
             }
         }
@@ -1736,6 +1739,8 @@ impl App {
         let n = jobs.len();
         self.downloads.queued += n;
         self.remote.send(RemoteCmd::Download(jobs));
+        // planning created the folders (and their .alba_source.json): show them now
+        self.local.refresh();
         let size = if total > 0 {
             format!(" ({}+)", human_bytes(total))
         } else {

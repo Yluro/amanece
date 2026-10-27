@@ -1487,6 +1487,31 @@ mod tests {
     }
 
     #[test]
+    fn local_shows_downloads_while_frames_keep_the_queue_busy() {
+        use crate::event::AppEvent;
+        use crate::remote::{DownloadEvent, RemoteEvent};
+        let base = std::env::temp_dir().join(format!("alba_watch_lref_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        let names = |app: &App| app.local.entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+        let files = vec![RemoteFile::new("/r/manually-mounted_3_0001.cbf".to_string(), Some(100))];
+        app.enqueue_frames("20251211", "JSG285b", files);
+        // the frames folder shows as soon as it's queued
+        assert!(names(&app).contains(&"JSG285b".to_string()), "{:?}", names(&app));
+        // an HKL of another sample lands while the frames are still going
+        std::fs::create_dir_all(base.join("KS347/autoproc_anom_r1")).unwrap();
+        std::fs::write(base.join("KS347/autoproc_anom_r1/XDS_ASCII.HKL"), "x").unwrap();
+        app.downloads.queued += 1;
+        let ev = |d| AppEvent::Remote(RemoteEvent::Download(d));
+        let label = "autoproc_anom_r1/XDS_ASCII.HKL".to_string();
+        app.handle(ev(DownloadEvent::Started { id: 9999, label: label.clone(), total: Some(1) }));
+        app.handle(ev(DownloadEvent::Finished { id: 9999, label, bytes: 1, skipped: false }));
+        assert!(app.downloads.queued > 0 && !app.downloads.groups.is_empty());
+        assert!(names(&app).contains(&"KS347".to_string()), "{:?}", names(&app));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
     fn render_snapshots() {
         let base = std::env::temp_dir().join(format!("alba_watch_ui_{}", std::process::id()));
         std::fs::create_dir_all(base.join("JSG285b/xia2chem_r3")).unwrap();
