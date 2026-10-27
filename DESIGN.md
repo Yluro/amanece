@@ -171,6 +171,15 @@ Gotchas:
   asks the command loop (`ConnectionLost`), which logs in again with the in-memory credentials, and the file is
   retried (3 tries). `ALBA_WATCH_REKEY_MB=16` forces drops to test this.
 
+### 2.11 Download speed (measured 2026-10-27)
+
+- `live_bench` (8 AS514 frames, 50 MB, read into memory, one SSH connection), release build:
+  1 file at a time 10.9 MB/s; 3 at a time 11.1 MB/s; 3 at a time with a 16 MB SSH window 11.2 MB/s.
+  (Debug build: 8.5 → 11.1 MB/s, so parallelism only hid debug-mode overhead.)
+- The cap is the PC's link: the Intel I219-V (gigabit) negotiated **100 Mbps** ≈ 11.5 MB/s of payload. Parallel
+  downloads can't help there; a gigabit link could. Re-run `live_bench` with `ALBA_PAR=1/3` on a faster network
+  before adding parallel downloads.
+
 ## 3. Gentle-scraping rules (hard requirements)
 
 1. **Read-only by construction.** The SFTP wrapper type exposes only `read_dir`, `stat` and `open_read`.

@@ -195,3 +195,81 @@ mod live_rekey {
         conn.close().await;
     }
 }
+
+/// Throughput of frame downloads: sequential vs N files at a time on one session.
+/// `ALBA_PAR` (default 1), `ALBA_FROM` (first frame index), `ALBA_FILES`, `ALBA_WINDOW_MB`.
+/// `cargo test live_bench -- --ignored --nocapture`
+#[cfg(test)]
+mod live_bench {
+    use super::scan;
+    use super::session::{self, Target};
+    use super::sftp::Limiter;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    async fn live_bench() {
+        let env = |k: &str| std::env::var(k).ok();
+        let (Some(user), Some(pass), Some(date), Some(sample)) =
+            (env("ALBA_USER"), env("ALBA_PASS"), env("ALBA_DATE"), env("ALBA_SAMPLE"))
+        else {
+            panic!("set ALBA_USER, ALBA_PASS, ALBA_DATE, ALBA_SAMPLE");
+        };
+        let par: usize = env("ALBA_PAR").and_then(|v| v.parse().ok()).unwrap_or(1);
+        let from: usize = env("ALBA_FROM").and_then(|v| v.parse().ok()).unwrap_or(300);
+        let files: usize = env("ALBA_FILES").and_then(|v| v.parse().ok()).unwrap_or(8);
+        let mut cfg = session::client_config();
+        if let Some(w) = env("ALBA_WINDOW_MB").and_then(|v| v.parse::<u32>().ok()) {
+            cfg.window_size = w << 20;
+        }
+        let beamlines = vec!["bl13".to_string(), "bl06".to_string()];
+        let target = Target {
+            host: "userdata.cells.es",
+            port: 443,
+            known_hosts: Some(std::env::temp_dir().join("alba_watch_live_known_hosts")),
+            limiter: Arc::new(Limiter::new(100.0, 100, Arc::new(AtomicU64::new(0)))),
+            beamlines: &beamlines,
+            remote_root: None,
+        };
+        let (conn, _) = session::connect_with(&target, &user, &pass, cfg).await.expect("connect");
+        let frames = scan::list_frames(&conn.sftp, &date, &sample, &[(sample.clone(), 1)]).await.unwrap();
+        let todo: Vec<String> = frames.iter().skip(from).take(files).map(|f| f.path.clone()).collect();
+        let queue = Arc::new(tokio::sync::Mutex::new(todo));
+        let t = std::time::Instant::now();
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..par {
+            let (q, sftp) = (queue.clone(), conn.sftp.clone());
+            tasks.spawn(async move {
+                let mut bytes = 0usize;
+                loop {
+                    let Some(path) = q.lock().await.pop() else { break };
+                    let mut r = sftp.open_read(&path).await.expect("open");
+                    let mut buf = vec![0u8; 256 * 1024];
+                    loop {
+                        let k = r.read(&mut buf).await.expect("read");
+                        if k == 0 {
+                            break;
+                        }
+                        bytes += k;
+                    }
+                    r.close().await;
+                }
+                bytes
+            });
+        }
+        let mut total = 0usize;
+        while let Some(b) = tasks.join_next().await {
+            total += b.unwrap();
+        }
+        let secs = t.elapsed().as_secs_f64();
+        println!(
+            "par={par} files={files} window={:?}: {:.1} MB in {:.1}s = {:.1} MB/s",
+            env("ALBA_WINDOW_MB"),
+            total as f64 / 1e6,
+            secs,
+            total as f64 / 1e6 / secs
+        );
+        conn.close().await;
+    }
+}
