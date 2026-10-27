@@ -11,11 +11,16 @@ pub struct LocalEntry {
     pub size: u64,
     /// Folder holds a downloaded solve, or a sample folder holding one.
     pub downloaded: bool,
+    /// (beamtime id, sample) of the downloads in this folder and its subfolders.
+    pub origins: Vec<(String, String)>,
 }
 
 pub struct LocalPanel {
     pub cwd: PathBuf,
     pub entries: Vec<LocalEntry>,
+    /// Origins of downloads in the current folder's subfolders (when it is itself a
+    /// sample folder).
+    pub here_origins: Vec<(String, String)>,
     pub selected: usize,
     pub error: Option<String>,
 }
@@ -25,6 +30,7 @@ impl LocalPanel {
         let mut p = LocalPanel {
             cwd,
             entries: Vec::new(),
+            here_origins: Vec::new(),
             selected: 0,
             error: None,
         };
@@ -42,8 +48,10 @@ impl LocalPanel {
                 is_dir: true,
                 size: 0,
                 downloaded: false,
+                origins: Vec::new(),
             });
         }
+        self.here_origins = origins_of(&self.cwd);
         let sources = crate::download::read_sources(&self.cwd);
         match std::fs::read_dir(&self.cwd) {
             Ok(rd) => {
@@ -56,8 +64,9 @@ impl LocalPanel {
                         }
                         let md = e.metadata().ok()?;
                         let is_dir = md.is_dir();
+                        let origins = if is_dir { origins_of(&e.path()) } else { Vec::new() };
                         let downloaded = if is_dir {
-                            holds_download(&e.path())
+                            !origins.is_empty()
                         } else {
                             sources.files.contains_key(&name)
                         };
@@ -66,6 +75,7 @@ impl LocalPanel {
                             is_dir,
                             size: md.len(),
                             downloaded,
+                            origins,
                         })
                     })
                     .collect();
@@ -213,13 +223,22 @@ pub fn describe(path: &Path) -> String {
     }
 }
 
-fn holds_download(dir: &Path) -> bool {
-    if dir.join(SOURCE_FILE).exists() {
-        return true;
+/// (beamtime id, sample) of everything alba_watch downloaded into `dir` or its
+/// immediate subfolders (`<sample>/<program>/`), from their `.alba_source.json`.
+fn origins_of(dir: &Path) -> Vec<(String, String)> {
+    let mut dirs = vec![dir.to_path_buf()];
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        dirs.extend(rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
     }
-    std::fs::read_dir(dir)
-        .map(|rd| rd.flatten().any(|e| e.path().join(SOURCE_FILE).exists()))
-        .unwrap_or(false)
+    let mut out: Vec<(String, String)> = dirs
+        .iter()
+        .filter(|d| d.join(SOURCE_FILE).exists())
+        .flat_map(|d| crate::download::read_sources(d).files.into_values())
+        .map(|s| (s.date, s.sample))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// `canonicalize` on Windows returns `\\?\C:\...`; strip that for display and for child processes.

@@ -23,6 +23,8 @@ Each panel shows its keys on its bottom border; `?` lists them all. In short:
   `JSG285b/frames_r3/…`.
 - **ALBA**: beamtimes like folders, from XALOC (BL13) and XAIRA (BL06) together, newest first;
   `Enter` opens one (the others are hidden), `Backspace` goes back.
+  A green ◆ next to a sample: it's already downloaded (from this beamtime) into the Local folder;
+  yellow ◆: only a local folder with the same name exists.
 - **Stats**: every solve with its statistics, ★ on the best one. `Space` marks, `d` downloads,
   `F` downloads raw frames (asks first).
 - **Console**: a terminal (Windows ConPTY). `:` to type. Commands run in the Local folder and a

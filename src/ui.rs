@@ -286,18 +286,51 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     };
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalMark {
+    /// A folder with the sample's name exists in the Local panel's folder.
+    SameName,
+    /// …and it holds files downloaded from this beamtime's sample.
+    Downloaded,
+}
+
+fn local_mark(app: &App, date: &str, name: &str) -> Option<LocalMark> {
+    let folder = crate::download::sanitize(name);
+    let from_here = |origins: &[(String, String)]| {
+        origins.iter().any(|(d, s)| {
+            s == name
+                // downloads made before beamtime ids became paths stored only the date
+                && (d == date || (!d.contains('/') && d == layout::beamtime_date(date)))
+        })
+    };
+    let inside = app
+        .local
+        .cwd
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&folder));
+    let origins = if inside {
+        Some(&app.local.here_origins)
+    } else {
+        app.local
+            .entries
+            .iter()
+            .find(|e| e.is_dir && e.name.eq_ignore_ascii_case(&folder))
+            .map(|e| &e.origins)
+    }?;
+    Some(if from_here(origins) {
+        LocalMark::Downloaded
+    } else {
+        LocalMark::SameName
+    })
+}
+
 fn sample_item(app: &App, date: &str, name: &str, width: usize) -> ListItem<'static> {
-    // ◆: a folder with this sample's name exists in the Local panel's folder.
-    let local = app.local.entries.iter().any(|e| e.is_dir && e.name == name);
-    let mut spans = vec![
-        Span::raw("  "),
-        if local {
-            Span::raw("◆").green()
-        } else {
-            Span::raw(" ")
-        },
-        Span::raw(" "),
-    ];
+    let mark = match local_mark(app, date, name) {
+        Some(LocalMark::Downloaded) => Span::raw("◆").green(),
+        Some(LocalMark::SameName) => Span::raw("◆").yellow(),
+        None => Span::raw(" "),
+    };
+    let mut spans = vec![Span::raw("  "), mark, Span::raw(" ")];
     let test = app.is_test_sample(date, name);
     let mut right: Vec<Span> = Vec::new();
     let scanning = app.scanning.contains(&(date.to_string(), name.to_string()));
@@ -1036,7 +1069,7 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
             f.render_widget(Paragraph::new(lines).block(dialog_block(title)), r);
         }
         Dialog::Help => {
-            let r = centered(80, 41, area);
+            let r = centered(80, 43, area);
             f.render_widget(Clear, r);
             f.render_widget(
                 Paragraph::new(help_lines()).block(dialog_block("Keys (any key closes)")),
@@ -1075,6 +1108,8 @@ fn help_lines() -> Vec<Line<'static>> {
         sec("Stats"),
         row("Space", "mark solve for download / tick a frames run"),
         row("a", "mark all solves with HKL files     ★ marks the best solve"),
+        row("◆ green", "ALBA sample already downloaded (from this beamtime) here"),
+        row("◆ yellow", "only a local folder with the same name exists here"),
         row("d", "download marked solves into xia2chem_r3/, ednaproc_r3/ … in the Local folder"),
         row("F", "download ticked raw-frame runs (asks first)"),
         sec("Console (a terminal in the Local panel's folder)"),
@@ -1301,6 +1336,53 @@ mod tests {
         }));
         assert_eq!(app.alba_rows().len(), rows + 1);
         assert_eq!(selected(&app).as_deref(), Some("JSG285b"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    fn style_at(app: &App, w: u16, h: u16, needle: &str, glyph: &str) -> Option<Color> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let rows = app.hit.borrow().alba.rows;
+        let xs = rows.x..(rows.x + rows.width).min(w);
+        for y in rows.y..rows.y + rows.height {
+            let line: String = xs.clone().map(|x| buf[(x, y)].symbol().to_string()).collect();
+            if line.contains(needle) {
+                return xs.clone().find(|&x| buf[(x, y)].symbol() == glyph).map(|x| buf[(x, y)].fg);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn diamonds_tell_downloaded_from_same_name() {
+        let base = std::env::temp_dir().join(format!("alba_watch_dia_{}", std::process::id()));
+        // JSG285b: downloaded from this beamtime; JSG285-2: just a folder with that name
+        let solve = base.join("JSG285b").join("xia2chem_r3");
+        let mut s = crate::download::Sources::default();
+        s.files.insert(
+            "shelxt.hkl".into(),
+            crate::download::Source {
+                date: "20251211".into(),
+                sample: "JSG285b".into(),
+                remote: "/r/shelxt.hkl".into(),
+                what: "xia2chem".into(),
+                run: 3,
+                downloaded_at: 0,
+            },
+        );
+        crate::download::write_sources(&solve, &s).unwrap();
+        std::fs::create_dir_all(base.join("JSG285-2")).unwrap();
+        let mut app = demo_app(&base);
+        app.local.refresh();
+        let _ = render(&app, 170, 42);
+        assert_eq!(style_at(&app, 170, 42, "JSG285b ", "◆"), Some(Color::Green));
+        assert_eq!(style_at(&app, 170, 42, "JSG285-2", "◆"), Some(Color::Yellow));
+        assert_eq!(style_at(&app, 170, 42, "JSG285 ", "◆"), None);
+        // inside the sample folder itself: still green
+        app.local.cd(base.join("JSG285b"));
+        let _ = render(&app, 170, 42);
+        assert_eq!(style_at(&app, 170, 42, "JSG285b ", "◆"), Some(Color::Green));
         std::fs::remove_dir_all(&base).ok();
     }
 
