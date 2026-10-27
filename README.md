@@ -11,7 +11,7 @@ See [DESIGN.md](DESIGN.md).
 
 ### Prebuilt binaries
 
-Every tagged version is published under [Releases](https://github.com/Yluro/albawatch/releases)
+Every tagged version is published under [Releases](https://github.com/Yluro/amanece/releases)
 with one archive per platform:
 
 | Platform | Archive |
