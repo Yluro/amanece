@@ -90,6 +90,9 @@ fn main() -> Result<()> {
     });
 
     let mut app = app::App::new(cfg, cfg_path, base, remote, tx, args.user, args.offline);
+    if ui::splash::is_premiere_day() {
+        app.egg = Some(ui::splash::Egg::new());
+    }
     let mut terminal = ratatui::init();
     mouse_capture(true);
     // ratatui's hook restores the screen on a panic; also release the mouse.
@@ -110,7 +113,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut app::App, rx: &mpsc::R
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
         app.sync_layout();
-        match rx.recv_timeout(Duration::from_millis(250)) {
+        // Redraw fast enough for the dialogue to look typed.
+        let wait = if app.egg.is_some() { 40 } else { 250 };
+        match rx.recv_timeout(Duration::from_millis(wait)) {
             Ok(ev) => app.handle(ev),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,

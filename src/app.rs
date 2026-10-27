@@ -4,6 +4,7 @@ use crate::cache::Cache;
 use crate::config::{Config, HEAVY_POLL_GAP, PollMode, interval_label};
 use crate::console::{Builtin, Console, ConsoleEvent, LineKind};
 use crate::download::{self, Source};
+use crate::ui::splash::Egg;
 use crate::event::AppEvent;
 use crate::layout;
 use crate::local::LocalPanel;
@@ -154,6 +155,8 @@ pub struct Hit {
     pub console: Rect,
     pub console_cols: u16,
     pub badges: Vec<(Rect, Badge)>,
+    /// Top-right corner of the screen: the hidden button.
+    pub egg: Rect,
 }
 
 pub struct Active {
@@ -236,6 +239,8 @@ pub struct App {
     pub focus: Focus,
     prev_focus: Focus,
     pub dialog: Option<Dialog>,
+    /// The easter egg scene, over everything else while it runs.
+    pub egg: Option<Egg>,
     pub conn: Conn,
     pub login_attempts: u32,
     pub local: LocalPanel,
@@ -302,6 +307,7 @@ impl App {
             focus: Focus::Alba,
             prev_focus: Focus::Alba,
             dialog: None,
+            egg: None,
             conn: Conn::Offline,
             login_attempts: 0,
             cache,
@@ -977,6 +983,12 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
+        if let Some(egg) = &mut self.egg {
+            if key.code == KeyCode::Esc || !egg.advance() {
+                self.egg = None;
+            }
+            return;
+        }
         if self.dialog.is_some() {
             self.dialog_key(key);
             return;
@@ -1042,6 +1054,18 @@ impl App {
     /// Click: focus a panel and select the row; double-click: open (like Enter);
     /// a click in the Stats checkbox column marks; wheel: scroll; status-bar badges toggle.
     fn on_mouse(&mut self, m: MouseEvent) {
+        let clicked = m.kind == MouseEventKind::Down(MouseButton::Left);
+        if let Some(egg) = &mut self.egg {
+            if clicked && !egg.advance() {
+                self.egg = None;
+            }
+            return;
+        }
+        // The hidden button, a few cells in the screen's top-right corner.
+        if clicked && self.hit.borrow().egg.contains(Position::new(m.column, m.row)) {
+            self.egg = Some(Egg::new());
+            return;
+        }
         if self.dialog.is_some() {
             return;
         }

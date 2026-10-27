@@ -62,6 +62,15 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Some(d) = &app.dialog {
         draw_dialog(f, app, d);
     }
+    app.hit.borrow_mut().egg = Rect::new(
+        area.right().saturating_sub(splash::HOT_W),
+        area.y,
+        splash::HOT_W.min(area.width),
+        1,
+    );
+    if let Some(egg) = &app.egg {
+        splash::draw(f, egg);
+    }
 }
 
 fn panel(title: Line<'static>, focused: bool, keys: &[(&str, &str)]) -> Block<'static> {
@@ -1188,6 +1197,450 @@ fn help_lines() -> Vec<Line<'static>> {
     ]
 }
 
+pub mod splash {
+    //! Easter egg: the "Pasión en el bancal" scene of *Amanece, que no es poco* (released on
+    //! 17 January 1989), narrated and typed out over an ASCII still, like a videogame dialog.
+    //! Pops up on 17 January, or when the hidden corner of the screen is clicked.
+
+    use ratatui::Frame;
+    use ratatui::layout::{Alignment, Rect};
+    use ratatui::style::{Color, Modifier, Style, Stylize};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    /// The still: one terminal row per line (`splash.txt`) and the colour of each cell as
+    /// raw RGB bytes (`splash.bin`), both made by asciify-engine from a frame.
+    /// Any size will do: it is resampled to the popup (see `Still`).
+    const ART: &str = include_str!("splash.txt");
+    const ART_RGB: &[u8] = include_bytes!("splash.bin");
+
+    enum Beat {
+        /// What happens on screen: no speaker.
+        Narration(&'static str),
+        Say(&'static str, &'static str),
+    }
+
+    use Beat::{Narration, Say};
+
+    const SCRIPT: &[Beat] = &[
+        Narration("Lejos de la feria, en el bancal, Elena y Mariano se besan y abrazan apasionadamente."),
+        Narration("Mariano, el brotado, ha crecido ya mucho."),
+        Narration("Elena se le echa encima e intenta quitarle apasionadamente la ropa..."),
+        Say("Mariano", "Ten cuidado, mujer, que me estoy torciendo el pie."),
+        Narration("Mariano está a punto de caerse."),
+        Narration("Elena tira de su pantalón hasta desenterrarle el pie derecho, que todavía es un muñón terroso..."),
+        Say("Mariano", "¡Aaargh!"),
+        Say("Elena", "¡¿Qué te he hecho?!"),
+        Narration("Mariano, muy enfadado, mira su pierna con dolor."),
+        Say("Mariano", "Mírale tú qué gracia. Cojito para toda la vida."),
+        Narration("Elena, avergonzada, se tapa la cara con las manos..."),
+        Say("Mariano", "¡Me has arrancado de cuajo cuando aún estaba verde!"),
+        Narration("En honor a José Luis Cuerda (1947 - 2020)"),
+    ];
+
+    const CHAR_TIME: Duration = Duration::from_millis(45);
+    /// Height of the dialog box laid over the bottom of the still (borders included).
+    const BOX_H: u16 = 4;
+    /// Largest popup, in terminal cells (borders included).
+    const MAX_W: u16 = 120;
+    const MAX_H: u16 = 34;
+    /// Width of the clickable top-right corner of the screen that opens the egg.
+    pub const HOT_W: u16 = 3;
+
+    pub struct Egg {
+        line: usize,
+        since: Instant,
+    }
+
+    impl Egg {
+        pub fn new() -> Egg {
+            Egg { line: 0, since: Instant::now() }
+        }
+
+        fn text(&self) -> &'static str {
+            match SCRIPT[self.line] {
+                Narration(t) | Say(_, t) => t,
+            }
+        }
+
+        fn typing_time(&self) -> Duration {
+            CHAR_TIME * self.text().chars().count() as u32
+        }
+
+        fn typed(&self) -> usize {
+            (self.since.elapsed().as_millis() / CHAR_TIME.as_millis()) as usize
+        }
+
+        fn line_done(&self) -> bool {
+            self.since.elapsed() >= self.typing_time()
+        }
+
+        fn is_last(&self) -> bool {
+            self.line + 1 == SCRIPT.len()
+        }
+
+        /// Enter, a click: finish the line being typed, else show the next one. Nothing moves
+        /// on without it. `false` once the scene is over.
+        pub fn advance(&mut self) -> bool {
+            if !self.line_done() {
+                let now = Instant::now();
+                self.since = now.checked_sub(self.typing_time()).unwrap_or(now);
+            } else if self.is_last() {
+                return false;
+            } else {
+                self.line += 1;
+                self.since = Instant::now();
+            }
+            true
+        }
+    }
+
+    pub fn draw(f: &mut Frame, egg: &Egg) {
+        let area = f.area();
+        let w = area.width.saturating_sub(2).min(MAX_W);
+        let h = area.height.saturating_sub(2).min(MAX_H);
+        if w < 24 || h < BOX_H + 4 {
+            return;
+        }
+        let r = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
+        f.render_widget(Clear, r);
+        let block = Block::bordered()
+            .border_type(BorderType::Double)
+            .border_style(Style::new().fg(Color::Yellow))
+            .style(Style::new().bg(Color::Black))
+            .title(Line::from(" Amanece, que no es poco · Pasión en el bancal ").bold().fg(Color::Yellow))
+            .title_bottom(Line::from(" Enter / clic: siguiente · Esc: cerrar ").fg(Color::DarkGray).right_aligned());
+        let inner = block.inner(r);
+        f.render_widget(block, r);
+
+        f.render_widget(Paragraph::new(still().render(inner.width, inner.height)), inner);
+
+        // The dialog box over the bottom of the still.
+        let box_w = inner.width.saturating_sub(4).min(100);
+        let b = Rect::new(
+            inner.x + (inner.width - box_w) / 2,
+            inner.bottom().saturating_sub(BOX_H + 1),
+            box_w,
+            BOX_H,
+        );
+        f.render_widget(Clear, b);
+        let mut dialog = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .style(Style::new().bg(Color::Black));
+        let narration = matches!(SCRIPT[egg.line], Narration(_));
+        dialog = match SCRIPT[egg.line] {
+            Narration(_) => dialog.border_style(Style::new().fg(Color::DarkGray)),
+            Say(who, _) => {
+                let speaker = Style::new().fg(speaker_color(who)).add_modifier(Modifier::BOLD);
+                dialog
+                    .border_style(Style::new().fg(Color::White))
+                    .title(Line::from(vec![Span::raw(" "), Span::styled(who, speaker), Span::raw(" ")]))
+            }
+        };
+        let text_area = dialog.inner(b);
+        f.render_widget(dialog, b);
+
+        let mut left = egg.typed();
+        let shown: Vec<Line> = wrap(egg.text(), text_area.width.saturating_sub(2) as usize)
+            .into_iter()
+            .map(|l| {
+                let n = l.chars().count().min(left);
+                left -= n;
+                Line::from(format!(" {}", l.chars().take(n).collect::<String>()))
+            })
+            .collect();
+        let style = if narration {
+            Style::new().fg(Color::Gray).add_modifier(Modifier::ITALIC)
+        } else {
+            Style::new().fg(Color::White)
+        };
+        f.render_widget(Paragraph::new(shown).style(style), text_area);
+        if egg.line_done() && egg.since.elapsed().as_millis() / 400 % 2 == 0 {
+            let marker = if egg.is_last() { "■" } else { "▼" };
+            f.render_widget(
+                Paragraph::new(marker).alignment(Alignment::Right).style(Style::new().fg(Color::Yellow)),
+                Rect::new(b.x + 1, b.bottom().saturating_sub(2), b.width.saturating_sub(3), 1),
+            );
+        }
+    }
+
+    fn speaker_color(who: &str) -> Color {
+        match who {
+            "Elena" => Color::LightMagenta,
+            _ => Color::LightCyan,
+        }
+    }
+
+    /// Greedy word wrap, done on the whole line so the words do not jump while it is typed.
+    fn wrap(text: &str, width: usize) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for word in text.split_whitespace() {
+            match out.last_mut() {
+                Some(l) if l.chars().count() + 1 + word.chars().count() <= width => {
+                    l.push(' ');
+                    l.push_str(word);
+                }
+                _ => out.push(word.to_string()),
+            }
+        }
+        out
+    }
+
+    // ------------------------------------------------------------------ the still
+
+    /// The ramp the art was made with (asciify's "detailed" set), light to dense.
+    const ART_RAMP: &str = " .,:;-~=+*xX#%@";
+    /// Fallback for art made with other characters: the usual ASCII-art order, light to dense.
+    const DENSITY: &str = " .'`^\",:;Il!i><~+_-=?][}{1)(|/tfjrxnuvczXYUJCLQ0OZSmwqpdbkhao*#MW&8%B@$";
+    /// What the popup is drawn with.
+    const RAMP: &[char] = &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
+    /// Where the visible window of the still starts when it has to be cropped vertically:
+    /// near the top, since the dialog box covers the bottom.
+    const CROP_TOP: f32 = 0.15;
+
+    struct Still {
+        w: usize,
+        h: usize,
+        /// Brightness 0..1 per cell, contrast-stretched.
+        cells: Vec<f32>,
+        /// Colour per cell, 0..1; empty when the art has none.
+        rgb: Vec<[f32; 3]>,
+    }
+
+    fn still() -> &'static Still {
+        static STILL: OnceLock<Still> = OnceLock::new();
+        STILL.get_or_init(|| Still::parse(ART, ART_RGB))
+    }
+
+    impl Still {
+        fn parse(art: &str, rgb: &[u8]) -> Still {
+            let rows: Vec<Vec<char>> = art.lines().map(|l| l.chars().collect()).collect();
+            let w = rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
+            let h = rows.len().max(1);
+            let place = |c: char, ramp: &str| ramp.find(c).map(|i| i as f32 / (ramp.len() - 1) as f32);
+            let mut cells = vec![0.0; w * h];
+            for (y, row) in rows.iter().enumerate() {
+                for (x, c) in row.iter().enumerate() {
+                    cells[y * w + x] = place(*c, ART_RAMP).or_else(|| place(*c, DENSITY)).unwrap_or(0.0);
+                }
+            }
+            // Stretch so that art that only uses part of the ramp still has full contrast.
+            let mut sorted = cells.clone();
+            sorted.sort_by(f32::total_cmp);
+            let lo = sorted[sorted.len() / 50];
+            let hi = sorted[sorted.len() - 1 - sorted.len() / 50].max(lo + 0.01);
+            for v in &mut cells {
+                *v = ((*v - lo) / (hi - lo)).clamp(0.0, 1.0);
+            }
+            let rgb = if rgb.len() == w * h * 3 {
+                rgb.chunks_exact(3).map(|p| [p[0], p[1], p[2]].map(|v| f32::from(v) / 255.0)).collect()
+            } else {
+                Vec::new()
+            };
+            Still { w, h, cells, rgb }
+        }
+
+        /// The still scaled to fill `cols` x `rows` (cropping what does not fit), averaging
+        /// the source cells under each target cell.
+        fn render(&self, cols: u16, rows: u16) -> Vec<Line<'static>> {
+            let (cols, rows) = (cols as usize, rows as usize);
+            let (sw, sh) = (self.w as f32, self.h as f32);
+            let scale = (cols as f32 / sw).max(rows as f32 / sh);
+            let (win_w, win_h) = (cols as f32 / scale, rows as f32 / scale);
+            let x0 = (sw - win_w) / 2.0;
+            let y0 = (sh - win_h) * CROP_TOP;
+            let (step_x, step_y) = (win_w / cols as f32, win_h / rows as f32);
+            (0..rows)
+                .map(|ty| {
+                    let ya = y0 + ty as f32 * step_y;
+                    Line::from(
+                        (0..cols)
+                            .map(|tx| {
+                                let xa = x0 + tx as f32 * step_x;
+                                let (v, rgb) = self.average(xa, ya, xa + step_x, ya + step_y);
+                                let i = ((v.powf(0.85) * RAMP.len() as f32) as usize).min(RAMP.len() - 1);
+                                Span::styled(RAMP[i].to_string(), Style::new().fg(tint(i, rgb)))
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect()
+        }
+
+        /// Mean brightness and colour of the source cells in the rectangle; the colour leans
+        /// to the bright cells so a lit shirt is not muddied by the shadow next to it.
+        fn average(&self, xa: f32, ya: f32, xb: f32, yb: f32) -> (f32, Option<[f32; 3]>) {
+            let x_from = (xa.floor().max(0.0) as usize).min(self.w - 1);
+            let y_from = (ya.floor().max(0.0) as usize).min(self.h - 1);
+            let x_to = (xb.ceil() as usize).clamp(x_from + 1, self.w);
+            let y_to = (yb.ceil() as usize).clamp(y_from + 1, self.h);
+            let (mut sum, mut weights, mut colour) = (0.0, 0.0, [0.0; 3]);
+            for y in y_from..y_to {
+                for x in x_from..x_to {
+                    let i = y * self.w + x;
+                    sum += self.cells[i];
+                    if let Some(c) = self.rgb.get(i) {
+                        let wt = self.cells[i] + 0.1;
+                        weights += wt;
+                        for k in 0..3 {
+                            colour[k] += c[k] * wt;
+                        }
+                    }
+                }
+            }
+            let rgb = (weights > 0.0).then(|| colour.map(|c| c / weights));
+            (sum / ((x_to - x_from) * (y_to - y_from)) as f32, rgb)
+        }
+    }
+
+    /// The cell's own colour, brightened (the frame is a night scene, dark on a dark screen).
+    /// Art without colour gets a grey that is warm at the bright end.
+    fn tint(i: usize, rgb: Option<[f32; 3]>) -> Color {
+        if i == 0 {
+            return Color::Reset;
+        }
+        let lift = |c: f32| (c.powf(0.75) * 1.15).clamp(0.0, 1.0);
+        match rgb {
+            Some(c) => {
+                // Averaging and the lift wash colours out: push them back from their grey.
+                let grey = 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
+                let [r, g, b] = c.map(|v| (lift((grey + (v - grey) * 1.8).max(0.0)) * 255.0) as u8);
+                Color::Rgb(r.max(40), g.max(40), b.max(40))
+            }
+            None => {
+                let t = i as u16 * 255 / (RAMP.len() as u16 - 1);
+                Color::Rgb((50 + t * 3 / 4).min(255) as u8, (55 + t * 2 / 3) as u8, (50 + t / 2) as u8)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ the date
+
+    /// 17 January, the day the film was released (local date).
+    pub fn is_premiere_day() -> bool {
+        month_day() == (1, 17)
+    }
+
+    #[cfg(windows)]
+    fn month_day() -> (u32, u32) {
+        use windows_sys::Win32::Foundation::SYSTEMTIME;
+        use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+        let mut t = SYSTEMTIME::default();
+        // SAFETY: GetLocalTime only writes the struct it is given.
+        unsafe { GetLocalTime(&mut t) };
+        (t.wMonth.into(), t.wDay.into())
+    }
+
+    #[cfg(not(windows))]
+    fn month_day() -> (u32, u32) {
+        month_day_utc(crate::model::now_secs())
+    }
+
+    /// (month, day) of a Unix time in UTC (Hinnant's civil-from-days).
+    #[cfg_attr(windows, allow(dead_code))]
+    fn month_day_utc(secs: u64) -> (u32, u32) {
+        let z = (secs / 86_400) as i64 + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        (month as u32, day as u32)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        fn screen(egg: &Egg, w: u16, h: u16) -> String {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| draw(f, egg)).unwrap();
+            let buf = term.backend().buffer().clone();
+            (0..h)
+                .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        #[test]
+        fn premiere_date_from_unix_time() {
+            // 1989-01-17 05:00 UTC, the day of the release
+            assert_eq!(month_day_utc(600_998_400 + 5 * 3600), (1, 17));
+            assert_eq!(month_day_utc(600_998_400 - 1), (1, 16));
+            // 2024-02-29
+            assert_eq!(month_day_utc(1_709_164_800), (2, 29));
+        }
+
+        #[test]
+        fn wraps_without_splitting_words() {
+            assert_eq!(wrap("uno dos tres cuatro", 8), ["uno dos", "tres", "cuatro"]);
+        }
+
+        #[test]
+        fn every_beat_is_typed_then_waits_for_the_user() {
+            let mut egg = Egg::new();
+            for beat in SCRIPT {
+                let (who, text) = match beat {
+                    Narration(t) => (None, *t),
+                    Say(w, t) => (Some(*w), *t),
+                };
+                assert!(!screen(&egg, 130, 36).contains(text), "{text} shows before it is typed");
+                // enter finishes the line being typed ...
+                assert!(egg.advance());
+                let s = screen(&egg, 130, 36);
+                assert!(s.contains(text));
+                if let Some(w) = who {
+                    assert!(s.contains(w));
+                }
+                // ... and time alone never moves on: only the next enter does
+                egg.since = Instant::now().checked_sub(Duration::from_secs(600)).unwrap();
+                assert!(screen(&egg, 130, 36).contains(text));
+                if !egg.is_last() {
+                    assert!(egg.advance());
+                }
+            }
+            assert!(!egg.advance(), "after the last line the scene ends");
+        }
+
+        #[test]
+        fn the_popup_is_wide_but_fits_the_terminal() {
+            let egg = Egg::new();
+            let popup_width = |s: String| {
+                let line = s.lines().find(|l| l.contains('╔')).unwrap().to_string();
+                let from = line.chars().position(|c| c == '╔').unwrap();
+                let to = line.chars().position(|c| c == '╗').unwrap();
+                to - from + 1
+            };
+            assert_eq!(popup_width(screen(&egg, 160, 45)), MAX_W as usize);
+            assert_eq!(popup_width(screen(&egg, 100, 30)), 98);
+        }
+
+        #[test]
+        fn the_still_fills_the_requested_size_from_any_art() {
+            let art = Still::parse("@@@@\n@@@@\n....\n....", &[]);
+            let out = art.render(10, 3);
+            assert_eq!(out.len(), 3);
+            assert!(out.iter().all(|l| l.spans.len() == 10));
+            let mono = Still::parse("", &[]);
+            assert_eq!(mono.render(5, 2).len(), 2);
+        }
+
+        #[test]
+        fn small_terminal_does_not_panic() {
+            let egg = Egg::new();
+            for (w, h) in [(10, 5), (40, 12), (70, 20), (200, 60)] {
+                screen(&egg, w, h);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1290,6 +1743,27 @@ mod tests {
             }
         }
         panic!("{needle} not on screen");
+    }
+
+    #[test]
+    fn hidden_corner_button_opens_the_easter_egg() {
+        let base = std::env::temp_dir().join(format!("amanece_egg_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        let (w, h) = (160, 45);
+        assert!(!render(&app, w, h).contains("Pasión en el bancal"));
+        click(&mut app, w - 2, 0);
+        assert!(render(&app, w, h).contains("Pasión en el bancal"));
+        // a click finishes the typing, another moves on, and Esc closes it
+        click(&mut app, 5, 5);
+        click(&mut app, 5, 5);
+        click(&mut app, 5, 5);
+        assert!(render(&app, w, h).contains("Mariano, el brotado"));
+        app.handle(crate::event::AppEvent::Input(ratatui::crossterm::event::Event::Key(
+            ratatui::crossterm::event::KeyEvent::from(ratatui::crossterm::event::KeyCode::Esc),
+        )));
+        assert!(!render(&app, w, h).contains("Pasión en el bancal"));
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
