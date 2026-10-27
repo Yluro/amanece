@@ -12,6 +12,11 @@ use std::sync::mpsc::Sender;
 use std::thread;
 
 const MAX_LINES: usize = 3000;
+/// Longer lines (a program printing without newlines) are cut.
+const MAX_LINE_CHARS: usize = 4000;
+/// At startup a log above `LOG_MAX` bytes is cut down to its last `LOG_KEEP` bytes.
+const LOG_MAX: u64 = 5 << 20;
+const LOG_KEEP: u64 = 1 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineKind {
@@ -71,6 +76,7 @@ impl Console {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
+        trim_log(path);
         self.log = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -100,10 +106,12 @@ impl Console {
         let text = text.into();
         self.log_only(&text);
         for l in text.split('\n') {
-            self.lines.push_back(ConsoleLine {
-                kind,
-                text: l.trim_end_matches('\r').to_string(),
-            });
+            let l = l.trim_end_matches('\r');
+            let text = match l.char_indices().nth(MAX_LINE_CHARS) {
+                Some((cut, _)) => format!("{} … [{} more bytes]", &l[..cut], l.len() - cut),
+                None => l.to_string(),
+            };
+            self.lines.push_back(ConsoleLine { kind, text });
             // Keep the view still while the user is scrolled up.
             if self.scroll > 0 {
                 self.scroll += 1;
@@ -485,6 +493,28 @@ pub fn is_gui_exe(path: &Path) -> bool {
         && u16::from_le_bytes([head[sub], head[sub + 1]]) == 2
 }
 
+/// Keeps the log small: above `LOG_MAX`, only the last `LOG_KEEP` bytes (from a line
+/// start) are kept.
+fn trim_log(path: &Path) {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
+        return;
+    };
+    if len <= LOG_MAX {
+        return;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return;
+    };
+    let mut tail = Vec::new();
+    if f.seek(SeekFrom::End(-(LOG_KEEP as i64))).is_err() || f.read_to_end(&mut tail).is_err() {
+        return;
+    }
+    drop(f);
+    let start = tail.iter().position(|&b| b == b'\n').map_or(tail.len(), |i| i + 1);
+    let _ = std::fs::write(path, &tail[start..]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,6 +619,26 @@ mod tests {
         assert!(!is_gui_exe(&cmd));
         let notepad = resolve_program("notepad", Path::new(".")).expect("notepad on PATH");
         assert!(is_gui_exe(&notepad));
+    }
+
+    #[test]
+    fn long_lines_are_cut() {
+        let mut c = Console::default();
+        c.push(LineKind::Out, "Expert mode (Y or N) [N]: ".repeat(1000));
+        let l = &c.lines.back().unwrap().text;
+        assert!(l.len() < MAX_LINE_CHARS + 50 && l.ends_with("more bytes]"));
+    }
+
+    #[test]
+    fn big_logs_are_trimmed_at_startup() {
+        let p = std::env::temp_dir().join(format!("alba_watch_logtrim_{}.log", std::process::id()));
+        let line = "x".repeat(99) + "\n";
+        std::fs::write(&p, line.repeat(60_000) + "last line\n").unwrap();
+        trim_log(&p);
+        let after = std::fs::read_to_string(&p).unwrap();
+        assert!(after.len() as u64 <= LOG_KEEP);
+        assert!(after.starts_with('x') && after.ends_with("last line\n"));
+        std::fs::remove_file(&p).ok();
     }
 
     #[test]

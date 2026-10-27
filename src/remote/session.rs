@@ -118,14 +118,51 @@ pub struct Target<'a> {
     pub remote_root: Option<&'a str>,
 }
 
-pub async fn connect(t: &Target<'_>, user: &str, password: &str) -> Result<(Connection, HostKey), ConnectError> {
-    let other = |e: &dyn std::fmt::Display| ConnectError::Other(e.to_string());
-    let config = Arc::new(client::Config {
+/// russh drops the session when it renegotiates keys in the middle of a transfer
+/// (reproduced against ALBA with every cipher; by default it rekeys after 1 GiB, which
+/// cut frame downloads at frame ~172). So: prefer AES-GCM, for which OpenSSH servers only
+/// rekey after 64 GB, and raise the client's own limit to 32 GiB. Downloads reconnect
+/// and retry if the session drops anyway. `ALBA_WATCH_REKEY_MB` lowers the limit to
+/// test exactly that.
+pub fn client_config() -> client::Config {
+    let limit = std::env::var("ALBA_WATCH_REKEY_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|mb| mb << 20)
+        .unwrap_or(32usize << 30);
+    client::Config {
         keepalive_interval: Some(Duration::from_secs(30)),
         keepalive_max: 4,
         inactivity_timeout: None,
+        limits: russh::Limits {
+            rekey_write_limit: limit,
+            rekey_read_limit: limit,
+            rekey_time_limit: Duration::from_secs(24 * 3600),
+        },
+        preferred: russh::Preferred {
+            cipher: std::borrow::Cow::Borrowed(&[
+                russh::cipher::AES_256_GCM,
+                russh::cipher::AES_128_GCM,
+                russh::cipher::CHACHA20_POLY1305,
+            ]),
+            ..Default::default()
+        },
         ..Default::default()
-    });
+    }
+}
+
+pub async fn connect(t: &Target<'_>, user: &str, password: &str) -> Result<(Connection, HostKey), ConnectError> {
+    connect_with(t, user, password, client_config()).await
+}
+
+pub async fn connect_with(
+    t: &Target<'_>,
+    user: &str,
+    password: &str,
+    config: client::Config,
+) -> Result<(Connection, HostKey), ConnectError> {
+    let other = |e: &dyn std::fmt::Display| ConnectError::Other(e.to_string());
+    let config = Arc::new(config);
     let outcome = Arc::new(Mutex::new(None));
     let handler = Client {
         host_id: format!("{}:{}", t.host, t.port),

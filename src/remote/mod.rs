@@ -114,3 +114,84 @@ mod live {
         conn.close().await;
     }
 }
+
+/// Reproduces key renegotiation (rekey) during a download, cheaply: the client rekeys
+/// every `ALBA_REKEY_MB` instead of every 1 GiB. Reads `ALBA_FILES` raw frames of
+/// `ALBA_SAMPLE` (run 1) into memory. `ALBA_CIPHER=aes` prefers AES-GCM.
+/// `cargo test live_rekey -- --ignored --nocapture`
+#[cfg(test)]
+mod live_rekey {
+    use super::scan;
+    use super::session::{self, Target};
+    use super::sftp::Limiter;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_rekey() {
+        let env = |k: &str| std::env::var(k).ok();
+        let (Some(user), Some(pass), Some(date), Some(sample)) =
+            (env("ALBA_USER"), env("ALBA_PASS"), env("ALBA_DATE"), env("ALBA_SAMPLE"))
+        else {
+            panic!("set ALBA_USER, ALBA_PASS, ALBA_DATE, ALBA_SAMPLE");
+        };
+        let mb: usize = env("ALBA_REKEY_MB").and_then(|v| v.parse().ok()).unwrap_or(16);
+        let files: usize = env("ALBA_FILES").and_then(|v| v.parse().ok()).unwrap_or(6);
+        let mut cfg = session::client_config();
+        cfg.limits = russh::Limits {
+            rekey_write_limit: mb << 20,
+            rekey_read_limit: mb << 20,
+            rekey_time_limit: std::time::Duration::from_secs(3600),
+        };
+        if env("ALBA_CIPHER").as_deref() == Some("aes") {
+            cfg.preferred = russh::Preferred {
+                cipher: std::borrow::Cow::Borrowed(&[russh::cipher::AES_256_GCM, russh::cipher::AES_128_GCM]),
+                ..Default::default()
+            };
+        }
+        let beamlines = vec!["bl13".to_string(), "bl06".to_string()];
+        let target = Target {
+            host: "userdata.cells.es",
+            port: 443,
+            known_hosts: Some(std::env::temp_dir().join("alba_watch_live_known_hosts")),
+            limiter: Arc::new(Limiter::new(3.0, 6, Arc::new(AtomicU64::new(0)))),
+            beamlines: &beamlines,
+            remote_root: None,
+        };
+        let (conn, _) = session::connect_with(&target, &user, &pass, cfg).await.expect("connect");
+        let frames = scan::list_frames(&conn.sftp, &date, &sample, &[(sample.clone(), 1)]).await.unwrap();
+        println!("rekey every {mb} MiB; {} frames listed, reading {files}", frames.len());
+        let mut total = 0usize;
+        for f in frames.iter().take(files) {
+            let t = std::time::Instant::now();
+            let res: anyhow::Result<usize> = async {
+                let mut r = conn.sftp.open_read(&f.path).await?;
+                let mut buf = vec![0u8; 256 * 1024];
+                let mut n = 0;
+                loop {
+                    let k = r.read(&mut buf).await?;
+                    if k == 0 {
+                        break;
+                    }
+                    n += k;
+                }
+                r.close().await;
+                Ok(n)
+            }
+            .await;
+            match res {
+                Ok(n) => {
+                    total += n;
+                    println!("  {} {} bytes in {:.1}s (total {:.1} MiB)", f.name(), n, t.elapsed().as_secs_f64(), total as f64 / 1048576.0);
+                }
+                Err(e) => {
+                    println!("  {} FAILED after {:.1} MiB total: {e:#}", f.name(), total as f64 / 1048576.0);
+                    break;
+                }
+            }
+        }
+        println!("session closed: {}", conn.handle.is_closed());
+        conn.close().await;
+    }
+}

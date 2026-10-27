@@ -19,6 +19,19 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 /// Pause between background scans ("fetch all stats", poll rescans).
 const BACKGROUND_GAP: Duration = Duration::from_secs(3);
 const MAX_BACKOFF: Duration = Duration::from_secs(600);
+/// Tries per file when the session drops under a download (reconnecting in between).
+const DOWNLOAD_ATTEMPTS: usize = 3;
+
+/// Answer to `RemoteCmd::ConnectionLost`.
+#[derive(Debug)]
+pub enum Recovery {
+    /// The session is fine: the error was about the file itself.
+    Alive,
+    /// The session had died and a new one is up: retry.
+    Reconnected,
+    /// The session is gone and could not be restored now.
+    Gone,
+}
 
 #[derive(Debug, Clone)]
 pub struct DownloadJob {
@@ -49,6 +62,8 @@ pub enum RemoteCmd {
     Download(Vec<DownloadJob>),
     CancelDownloads,
     Reconnect,
+    /// From the download loop after a failed file: did the session die? Reconnect if so.
+    ConnectionLost(tokio::sync::oneshot::Sender<Recovery>),
     Shutdown,
 }
 
@@ -87,6 +102,8 @@ pub enum RemoteEvent {
     ScanFailed { date: String, sample: String, message: String },
     Frames { date: String, sample: String, files: Vec<RemoteFile> },
     Download(DownloadEvent),
+    /// Something worth a line in the console (not an error).
+    Notice(String),
     Error(String),
 }
 
@@ -146,7 +163,7 @@ pub fn spawn(rt: &tokio::runtime::Runtime, settings: Settings, events: std::sync
         limiter,
         events.clone(),
     ));
-    rt.spawn(download_loop(dl_rx, shared, events));
+    rt.spawn(download_loop(dl_rx, tx.clone(), shared, events));
     RemoteHandle { tx, requests }
 }
 
@@ -261,6 +278,47 @@ async fn command_loop(
             }
             RemoteCmd::CancelDownloads => {
                 shared.generation.fetch_add(1, Ordering::SeqCst);
+            }
+            RemoteCmd::ConnectionLost(reply) => {
+                if conn.as_ref().is_some_and(|c| !c.handle.is_closed()) {
+                    let _ = reply.send(Recovery::Alive);
+                    continue;
+                }
+                shared.set(None);
+                if let Some(c) = conn.take() {
+                    let _ = tokio::time::timeout(Duration::from_secs(2), c.close()).await;
+                }
+                let Some((user, password)) = creds.clone() else {
+                    let _ = reply.send(Recovery::Gone);
+                    continue;
+                };
+                emit(
+                    &events,
+                    RemoteEvent::Disconnected {
+                        message: "connection lost during a download; reconnecting".into(),
+                    },
+                );
+                match session::connect(&target, &user, &password).await {
+                    Ok((c, host_key)) => {
+                        let root = c.sftp.describe();
+                        shared.set(Some(c.sftp.clone()));
+                        conn = Some(c);
+                        backoff = Duration::from_secs(30);
+                        emit(&events, RemoteEvent::Connected { user, host_key, root });
+                        let _ = reply.send(Recovery::Reconnected);
+                    }
+                    Err(ConnectError::Auth(m)) => {
+                        creds = None;
+                        emit(&events, RemoteEvent::ConnectFailed { auth: true, message: m });
+                        let _ = reply.send(Recovery::Gone);
+                    }
+                    Err(e) => {
+                        emit(&events, RemoteEvent::Error(format!("reconnect failed: {e}")));
+                        schedule_reconnect(&self_tx, backoff, &mut reconnect_pending, &events);
+                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                        let _ = reply.send(Recovery::Gone);
+                    }
+                }
             }
             RemoteCmd::Download(jobs) => {
                 let generation = shared.generation.load(Ordering::SeqCst);
@@ -413,6 +471,7 @@ async fn run_op(sftp: &ReadOnlySftp, op: RemoteCmd, events: &std::sync::mpsc::Se
 
 async fn download_loop(
     mut rx: UnboundedReceiver<(u64, DownloadJob)>,
+    cmd_tx: UnboundedSender<RemoteCmd>,
     shared: Arc<Shared>,
     events: std::sync::mpsc::Sender<AppEvent>,
 ) {
@@ -431,12 +490,34 @@ async fn download_loop(
             fail("cancelled".into());
             continue;
         }
-        let Some(sftp) = shared.get() else {
-            fail("not connected".into());
-            continue;
-        };
-        if let Err(e) = download_one(&sftp, &job, generation, &shared, &events).await {
-            fail(format!("{e:#}"));
+        for attempt in 1..=DOWNLOAD_ATTEMPTS {
+            let Some(sftp) = shared.get() else {
+                fail("not connected".into());
+                break;
+            };
+            let Err(e) = download_one(&sftp, &job, generation, &shared, &events).await else {
+                break;
+            };
+            if generation != shared.generation.load(Ordering::SeqCst) || attempt == DOWNLOAD_ATTEMPTS {
+                fail(format!("{e:#}"));
+                break;
+            }
+            // Did the session die under us? The command loop checks and reconnects.
+            let (tx, answer) = tokio::sync::oneshot::channel();
+            if cmd_tx.send(RemoteCmd::ConnectionLost(tx)).is_err() {
+                fail(format!("{e:#}"));
+                break;
+            }
+            match answer.await {
+                Ok(Recovery::Reconnected) => emit(
+                    &events,
+                    RemoteEvent::Notice(format!("connection restored, retrying {}", job.label)),
+                ),
+                _ => {
+                    fail(format!("{e:#}"));
+                    break;
+                }
+            }
         }
     }
 }

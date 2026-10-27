@@ -762,6 +762,7 @@ impl App {
             }
             RemoteEvent::Frames { date, sample, files } => self.confirm_frames(date, sample, files),
             RemoteEvent::Download(d) => self.on_download(d),
+            RemoteEvent::Notice(m) => self.say(LineKind::Warn, m),
             RemoteEvent::Error(m) => self.say(LineKind::Error, m),
         }
     }
@@ -1819,6 +1820,26 @@ mod live {
             let info = app.info(&date, &sample).cloned().expect("scanned");
             let best = crate::rank::best(&info);
             println!("best: {best:?}");
+            if let Some(n) = std::env::var("ALBA_FRAMES_N").ok().and_then(|v| v.parse::<usize>().ok()) {
+                app.request_frames(&date, &info);
+                let t = Instant::now();
+                while t.elapsed() < Duration::from_secs(30) && app.dialog.is_none() {
+                    if let Ok(ev) = rx.recv_timeout(Duration::from_millis(200)) {
+                        app.handle(ev);
+                    }
+                }
+                if let Some(Dialog::Confirm { action: Pending::Frames { date, sample, files }, .. }) = app.dialog.take() {
+                    println!("frames listed: {}, downloading {n}", files.len());
+                    app.enqueue_frames(&date, &sample, files.into_iter().take(n).collect());
+                }
+                let t = Instant::now();
+                while t.elapsed() < Duration::from_secs(300) && app.downloads.queued > 0 {
+                    if let Ok(ev) = rx.recv_timeout(Duration::from_millis(200)) {
+                        app.handle(ev);
+                    }
+                }
+                println!("frames: done {} failed {} queued {}", app.downloads.done, app.downloads.failed, app.downloads.queued);
+            }
             if std::env::var("ALBA_DOWNLOAD").is_ok()
                 && let Some((key, _)) = best
             {

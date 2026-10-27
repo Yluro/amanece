@@ -161,6 +161,16 @@ Gotchas:
 - Units: only EDNA's `ISPyBStoreAutoProcv1_4_dataInput.xml` stores percentages; `ispyb.xml` (xia2),
   `autoPROC.xml` and `fast_dp.xml` store fractions. `ispyb::parse` takes the unit from the file.
 
+### 2.10 SSH key renegotiation (found 2026-10-27)
+
+- A frames download died at frame ~172 of a XALOC run: right when ~1 GiB had been transferred. russh rekeys
+  after 1 GiB by default, and **the session drops whenever russh rekeys mid-transfer** (reproduced against ALBA
+  with a 16 MiB limit: dies on the 3rd frame, with ChaCha20 and with AES-GCM alike; `live_rekey` test).
+- Fix: prefer AES-GCM (OpenSSH servers rekey AES-GCM only after 64 GB, ChaCha20 after ~1 GB) and raise the
+  client's rekey limit to 32 GiB (time limit 24 h). Downloads also survive a dropped session: the download loop
+  asks the command loop (`ConnectionLost`), which logs in again with the in-memory credentials, and the file is
+  retried (3 tries). `ALBA_WATCH_REKEY_MB=16` forces drops to test this.
+
 ## 3. Gentle-scraping rules (hard requirements)
 
 1. **Read-only by construction.** The SFTP wrapper type exposes only `read_dir`, `stat` and `open_read`.
