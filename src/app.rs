@@ -1073,7 +1073,7 @@ impl App {
         let p = Position::new(m.column, m.row);
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                let double = self.is_double_click(p);
+                let double = self.register_click(p);
                 if let Some((_, b)) = hit.badges.iter().find(|(r, _)| r.contains(p)) {
                     match b {
                         Badge::Poll => self.cycle_poll(),
@@ -1145,7 +1145,8 @@ impl App {
         }
     }
 
-    fn is_double_click(&mut self, p: Position) -> bool {
+    /// Records the click; `true` when it completes a double-click with the previous one.
+    fn register_click(&mut self, p: Position) -> bool {
         let now = Instant::now();
         let double = self.last_click.is_some_and(|(t, x, y)| {
             now.duration_since(t) < Duration::from_millis(450) && y == p.y && x.abs_diff(p.x) <= 2
