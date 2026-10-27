@@ -16,7 +16,7 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::{Position, Rect};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -157,20 +157,76 @@ pub struct Hit {
 }
 
 pub struct Active {
-    pub id: u64,
     pub label: String,
     pub done: u64,
     pub total: Option<u64>,
     pub started: Instant,
 }
 
+/// One frames dataset: a progress bar, and one console line when it starts and ends.
+pub struct Group {
+    pub id: u64,
+    pub label: String,
+    pub files: usize,
+    pub bytes: u64,
+    pub done_files: usize,
+    pub done_bytes: u64,
+    pub failed: usize,
+    pub cancelled: usize,
+    pub first_error: Option<String>,
+    pub started: Option<Instant>,
+}
+
+impl Group {
+    fn settled(&self) -> usize {
+        self.done_files + self.failed + self.cancelled
+    }
+}
+
 #[derive(Default)]
 pub struct Downloads {
     pub queued: usize,
-    pub active: Option<Active>,
+    /// Files being transferred right now, by job id.
+    pub active: BTreeMap<u64, Active>,
     pub done: usize,
     pub failed: usize,
     pub bytes: u64,
+    /// Frames datasets, in queue order.
+    pub groups: Vec<Group>,
+    /// Job id → frames dataset.
+    pub job_group: HashMap<u64, u64>,
+    next_group: u64,
+}
+
+impl Downloads {
+    /// Bytes of a dataset done so far, counting files still in flight.
+    pub fn group_progress(&self, g: &Group) -> u64 {
+        g.done_bytes
+            + self
+                .active
+                .iter()
+                .filter(|(id, _)| self.job_group.get(id) == Some(&g.id))
+                .map(|(_, a)| a.done)
+                .sum::<u64>()
+    }
+
+    /// Combined speed of the files in flight, bytes per second.
+    pub fn speed(&self) -> f64 {
+        self.active
+            .values()
+            .map(|a| a.done as f64 / a.started.elapsed().as_secs_f64().max(0.2))
+            .sum()
+    }
+}
+
+/// `6:51`, `1:02:03`.
+pub fn clock(secs: f64) -> String {
+    let s = secs.max(0.0).round() as u64;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
 }
 
 pub struct App {
@@ -452,8 +508,17 @@ impl App {
             AppEvent::Input(Event::Mouse(m)) => self.on_mouse(m),
             AppEvent::Input(_) => {}
             AppEvent::Remote(e) => {
-                let trace: String = format!("{e:?}").chars().take(300).collect();
-                self.console.log_only(&trace);
+                let quiet = match &e {
+                    RemoteEvent::Download(DownloadEvent::Progress { .. }) => true,
+                    RemoteEvent::Download(
+                        DownloadEvent::Started { id, .. } | DownloadEvent::Finished { id, .. },
+                    ) => self.downloads.job_group.contains_key(id),
+                    _ => false,
+                };
+                if !quiet {
+                    let trace: String = format!("{e:?}").chars().take(300).collect();
+                    self.console.log_only(&trace);
+                }
                 self.on_remote(e);
             }
             AppEvent::Console(e) => self.on_console(e),
@@ -770,18 +835,26 @@ impl App {
     fn on_download(&mut self, d: DownloadEvent) {
         match d {
             DownloadEvent::Started { id, label, total } => {
-                self.downloads.active = Some(Active {
+                self.downloads.active.insert(
                     id,
-                    label,
-                    done: 0,
-                    total,
-                    started: Instant::now(),
-                });
+                    Active {
+                        label,
+                        done: 0,
+                        total,
+                        started: Instant::now(),
+                    },
+                );
+                if let Some(gid) = self.downloads.job_group.get(&id).copied()
+                    && let Some(g) = self.downloads.groups.iter_mut().find(|g| g.id == gid)
+                    && g.started.is_none()
+                {
+                    g.started = Some(Instant::now());
+                    let msg = format!("↓ frames {}: started, {} files, {}", g.label, g.files, human_bytes(g.bytes));
+                    self.console.push(LineKind::Info, msg);
+                }
             }
             DownloadEvent::Progress { id, done, total } => {
-                if let Some(a) = &mut self.downloads.active
-                    && a.id == id
-                {
+                if let Some(a) = self.downloads.active.get_mut(&id) {
                     a.done = done;
                     a.total = total;
                 }
@@ -794,16 +867,24 @@ impl App {
             } => {
                 self.downloads.queued = self.downloads.queued.saturating_sub(1);
                 self.downloads.done += 1;
-                if self.downloads.active.as_ref().is_some_and(|a| a.id == id) {
-                    self.downloads.active = None;
-                }
-                if skipped {
-                    self.console
-                        .push(LineKind::Info, format!("= {label} (already here)"));
-                } else {
+                self.downloads.active.remove(&id);
+                if !skipped {
                     self.downloads.bytes += bytes;
-                    self.console
-                        .push(LineKind::Good, format!("↓ {label}  {}", human_bytes(bytes)));
+                }
+                match self.downloads.job_group.remove(&id) {
+                    Some(gid) => {
+                        if let Some(g) = self.downloads.groups.iter_mut().find(|g| g.id == gid) {
+                            g.done_files += 1;
+                            g.done_bytes += bytes;
+                        }
+                        self.finish_group(gid);
+                    }
+                    None if skipped => self
+                        .console
+                        .push(LineKind::Info, format!("= {label} (already here)")),
+                    None => self
+                        .console
+                        .push(LineKind::Good, format!("↓ {label}  {}", human_bytes(bytes))),
                 }
                 if self.downloads.queued == 0 {
                     self.status = Some(("downloads finished".into(), LineKind::Good, Instant::now()));
@@ -813,15 +894,62 @@ impl App {
             DownloadEvent::Failed { id, label, message } => {
                 self.downloads.queued = self.downloads.queued.saturating_sub(1);
                 self.downloads.failed += 1;
-                if self.downloads.active.as_ref().is_some_and(|a| a.id == id) {
-                    self.downloads.active = None;
+                self.downloads.active.remove(&id);
+                match self.downloads.job_group.remove(&id) {
+                    Some(gid) => {
+                        if let Some(g) = self.downloads.groups.iter_mut().find(|g| g.id == gid) {
+                            if message == "cancelled" {
+                                g.cancelled += 1;
+                            } else {
+                                g.failed += 1;
+                                g.first_error.get_or_insert(format!("{label}: {message}"));
+                            }
+                        }
+                        self.finish_group(gid);
+                    }
+                    None => self.say(LineKind::Error, format!("✗ {label}: {message}")),
                 }
-                self.say(LineKind::Error, format!("✗ {label}: {message}"));
                 if self.downloads.queued == 0 {
                     self.local.refresh();
                 }
             }
         }
+    }
+
+    /// When every file of a frames dataset is settled: its one closing console line.
+    fn finish_group(&mut self, gid: u64) {
+        let Some(i) = self.downloads.groups.iter().position(|g| g.id == gid) else {
+            return;
+        };
+        if self.downloads.groups[i].settled() < self.downloads.groups[i].files {
+            return;
+        }
+        let g = self.downloads.groups.remove(i);
+        let took = g.started.map(|t| clock(t.elapsed().as_secs_f64())).unwrap_or_default();
+        if g.cancelled > 0 {
+            self.say(
+                LineKind::Warn,
+                format!("frames {}: cancelled after {}/{} files", g.label, g.done_files, g.files),
+            );
+        } else if g.failed == 0 {
+            self.say(
+                LineKind::Good,
+                format!("✓ frames {}: done, {} files, {} in {took}", g.label, g.files, human_bytes(g.done_bytes)),
+            );
+        } else {
+            self.say(
+                LineKind::Warn,
+                format!(
+                    "frames {}: {}/{} downloaded, {} failed (first: {})",
+                    g.label,
+                    g.done_files,
+                    g.files,
+                    g.failed,
+                    g.first_error.unwrap_or_default()
+                ),
+            );
+        }
+        self.local.refresh();
     }
 
     fn on_console(&mut self, e: ConsoleEvent) {
@@ -1537,7 +1665,7 @@ impl App {
             let tag = download::solve_tag(solve, run, multi);
             let dir = download::solve_dir(&download::sample_dir(&cwd, &info.name), &tag, date, &info.name);
             let what = solve.kind.label().to_string();
-            let Some(mut batch) = self.plan_folder(&dir, &files, date, &info.name, &what, run.run) else {
+            let Some(mut batch) = self.plan_folder(&dir, &files, date, &info.name, &what, run.run, true) else {
                 continue;
             };
             total += files.iter().filter_map(|f| f.size).sum::<u64>();
@@ -1545,7 +1673,7 @@ impl App {
             jobs.append(&mut batch);
             self.marks.remove(&solve.key());
         }
-        self.enqueue(jobs, total, &folders);
+        self.enqueue(jobs, total, &folders, true);
     }
 
     /// Jobs for `files` into `dir`, recording their origin in `dir/.alba_source.json`.
@@ -1557,6 +1685,7 @@ impl App {
         sample: &str,
         what: &str,
         run: u32,
+        priority: bool,
     ) -> Option<Vec<DownloadJob>> {
         let mut sources = download::read_sources(dir);
         let mut taken = HashSet::new();
@@ -1576,7 +1705,7 @@ impl App {
                     downloaded_at: now_secs(),
                 },
             );
-            jobs.push(self.job(f, dir.join(&name), format!("{folder}/{name}")));
+            jobs.push(self.job(f, dir.join(&name), format!("{folder}/{name}"), priority));
         }
         if let Err(e) = download::write_sources(dir, &sources) {
             self.say(LineKind::Error, format!("cannot create {}: {e}", dir.display()));
@@ -1585,7 +1714,7 @@ impl App {
         Some(jobs)
     }
 
-    fn job(&mut self, f: &RemoteFile, local: PathBuf, label: String) -> DownloadJob {
+    fn job(&mut self, f: &RemoteFile, local: PathBuf, label: String, priority: bool) -> DownloadJob {
         let id = self.next_job;
         self.next_job += 1;
         DownloadJob {
@@ -1594,10 +1723,13 @@ impl App {
             local,
             size: f.size,
             label: label.replace('\\', "/"),
+            priority,
         }
     }
 
-    fn enqueue(&mut self, jobs: Vec<DownloadJob>, total: u64, folders: &[String]) {
+    /// `announce`: a console line; frames only get a status message (their datasets
+    /// announce themselves when they start and end).
+    fn enqueue(&mut self, jobs: Vec<DownloadJob>, total: u64, folders: &[String], announce: bool) {
         if jobs.is_empty() {
             return;
         }
@@ -1609,10 +1741,12 @@ impl App {
         } else {
             String::new()
         };
-        self.say(
-            LineKind::Info,
-            format!("queued {n} file(s){size} into {}", folders.join(", ")),
-        );
+        let msg = format!("queued {n} file(s){size} into {}", folders.join(", "));
+        if announce {
+            self.say(LineKind::Info, msg);
+        } else {
+            self.status = Some((msg, LineKind::Info, Instant::now()));
+        }
     }
 
     fn request_frames(&mut self, date: &str, info: &SampleInfo) {
@@ -1672,7 +1806,7 @@ impl App {
         });
     }
 
-    fn enqueue_frames(&mut self, date: &str, sample: &str, files: Vec<RemoteFile>) {
+    pub(crate) fn enqueue_frames(&mut self, date: &str, sample: &str, files: Vec<RemoteFile>) {
         let Some(info) = self.info(date, sample).cloned() else {
             return;
         };
@@ -1691,14 +1825,34 @@ impl App {
                 continue;
             }
             let dir = download::solve_dir(&download::sample_dir(&cwd, sample), &download::frames_tag(r, multi), date, sample);
-            let Some(mut batch) = self.plan_folder(&dir, &mine, date, sample, "frames", r.run) else {
+            let Some(mut batch) = self.plan_folder(&dir, &mine, date, sample, "frames", r.run, false) else {
                 continue;
             };
-            total += mine.iter().filter_map(|f| f.size).sum::<u64>();
+            let bytes = mine.iter().filter_map(|f| f.size).sum::<u64>();
+            total += bytes;
+            let d = &mut self.downloads;
+            let gid = d.next_group;
+            d.next_group += 1;
+            let folder = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            d.groups.push(Group {
+                id: gid,
+                label: format!("{sample}/{folder}"),
+                files: batch.len(),
+                bytes,
+                done_files: 0,
+                done_bytes: 0,
+                failed: 0,
+                cancelled: 0,
+                first_error: None,
+                started: None,
+            });
+            for j in &batch {
+                d.job_group.insert(j.id, gid);
+            }
             folders.push(folder_label(&cwd, &dir));
             jobs.append(&mut batch);
         }
-        self.enqueue(jobs, total, &folders);
+        self.enqueue(jobs, total, &folders, false);
     }
 
     pub fn cancel_downloads(&mut self) {
@@ -1763,6 +1917,7 @@ mod live {
                 known_hosts: Some(std::env::temp_dir().join("alba_watch_live_known_hosts")),
                 beamlines: vec!["bl13".into(), "bl06".into()],
                 remote_root: None,
+                parallel_downloads: 3,
             },
             tx.clone(),
         );
@@ -1820,6 +1975,7 @@ mod live {
             let info = app.info(&date, &sample).cloned().expect("scanned");
             let best = crate::rank::best(&info);
             println!("best: {best:?}");
+            let mut return_after_frames = false;
             if let Some(n) = std::env::var("ALBA_FRAMES_N").ok().and_then(|v| v.parse::<usize>().ok()) {
                 app.request_frames(&date, &info);
                 let t = Instant::now();
@@ -1833,14 +1989,47 @@ mod live {
                     app.enqueue_frames(&date, &sample, files.into_iter().take(n).collect());
                 }
                 let t = Instant::now();
+                // optionally queue the best solve right behind the frames: it must not wait
+                if std::env::var("ALBA_DOWNLOAD").is_ok()
+                    && let Some((key, _)) = best.clone()
+                {
+                    let lines = app.console.lines.len();
+                    std::thread::sleep(Duration::from_millis(500));
+                    while let Ok(ev) = rx.try_recv() {
+                        app.handle(ev);
+                    }
+                    app.marks.insert(key);
+                    app.download_solves(&date, &info);
+                    let q = Instant::now();
+                    while q.elapsed() < Duration::from_secs(120)
+                        && !app.console.lines.iter().skip(lines).any(|l| l.text.starts_with("↓ ") && !l.text.starts_with("↓ frames"))
+                    {
+                        if let Ok(ev) = rx.recv_timeout(Duration::from_millis(100)) {
+                            app.handle(ev);
+                        }
+                    }
+                    println!(
+                        "priority download finished {:.1}s after queueing, frames still in flight: {} of {n} done",
+                        q.elapsed().as_secs_f64(),
+                        n - app.downloads.groups.first().map_or(0, |g| g.files - g.done_files)
+                    );
+                }
                 while t.elapsed() < Duration::from_secs(300) && app.downloads.queued > 0 {
                     if let Ok(ev) = rx.recv_timeout(Duration::from_millis(200)) {
                         app.handle(ev);
                     }
                 }
-                println!("frames: done {} failed {} queued {}", app.downloads.done, app.downloads.failed, app.downloads.queued);
+                println!(
+                    "frames: done {} failed {} queued {} in {:.1}s",
+                    app.downloads.done,
+                    app.downloads.failed,
+                    app.downloads.queued,
+                    t.elapsed().as_secs_f64()
+                );
+                return_after_frames = true;
             }
             if std::env::var("ALBA_DOWNLOAD").is_ok()
+                && !return_after_frames
                 && let Some((key, _)) = best
             {
                 app.marks.insert(key);
@@ -1866,7 +2055,13 @@ mod live {
         }
         app.shutdown();
         std::thread::sleep(Duration::from_millis(500));
-        std::fs::remove_dir_all(&base).ok();
+        // ALBA_KEEP=1 leaves the downloads behind, e.g. to compare a run with forced
+        // session drops (resumed files) against a clean one
+        if std::env::var("ALBA_KEEP").is_ok() {
+            println!("kept: {}", base.display());
+        } else {
+            std::fs::remove_dir_all(&base).ok();
+        }
     }
 }
 
@@ -1891,6 +2086,7 @@ mod trash_check {
                 known_hosts: None,
                 beamlines: vec!["bl13".into(), "bl06".into()],
                 remote_root: None,
+                parallel_downloads: 3,
             },
             tx.clone(),
         );
@@ -1939,6 +2135,7 @@ mod poll_tests {
                 known_hosts: None,
                 beamlines: vec!["bl13".into(), "bl06".into()],
                 remote_root: None,
+                parallel_downloads: 3,
             },
             tx.clone(),
         );

@@ -66,6 +66,7 @@ fn main() -> Result<()> {
             known_hosts: config::Config::known_hosts_path(),
             beamlines: cfg.beamlines.clone(),
             remote_root: cfg.remote_root.clone(),
+            parallel_downloads: cfg.parallel_downloads,
         },
         tx.clone(),
     );

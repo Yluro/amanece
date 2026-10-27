@@ -26,9 +26,11 @@ pub fn draw(f: &mut Frame, app: &App) {
         (area.height / 4).clamp(9, 13)
     }
     .min(area.height.saturating_sub(10).max(4));
-    let [main, console, status] = Layout::vertical([
+    let transfer_h = if app.downloads.groups.is_empty() { 0 } else { 1 };
+    let [main, console, transfer, status] = Layout::vertical([
         Constraint::Min(8),
         Constraint::Length(console_h),
+        Constraint::Length(transfer_h),
         Constraint::Length(1),
     ])
     .areas(area);
@@ -53,6 +55,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_alba(f, app, alba_a);
     draw_stats(f, app, stats_a);
     draw_console(f, app, console);
+    if transfer_h > 0 {
+        draw_transfer(f, app, transfer);
+    }
     draw_status(f, app, status);
     if let Some(d) = &app.dialog {
         draw_dialog(f, app, d);
@@ -840,6 +845,58 @@ fn draw_console(f: &mut Frame, app: &App, area: Rect) {
 
 // ------------------------------------------------------------------ status bar
 
+/// Progress bar of the frames dataset being downloaded, above the status bar.
+fn draw_transfer(f: &mut Frame, app: &App, area: Rect) {
+    let d = &app.downloads;
+    let Some(g) = d.groups.iter().find(|g| g.started.is_some()).or_else(|| d.groups.first()) else {
+        return;
+    };
+    let done = d.group_progress(g);
+    let frac = if g.bytes > 0 {
+        done as f64 / g.bytes as f64
+    } else if g.files > 0 {
+        g.done_files as f64 / g.files as f64
+    } else {
+        0.0
+    }
+    .clamp(0.0, 1.0);
+    let left = format!(" ↓ frames {} ", g.label);
+    let mut right = format!(
+        " {}/{} files · {} / {}",
+        g.done_files,
+        g.files,
+        human_bytes(done),
+        human_bytes(g.bytes)
+    );
+    match g.started {
+        Some(t) => {
+            let speed = done as f64 / t.elapsed().as_secs_f64().max(0.5);
+            right.push_str(&format!(" · {}/s", human_bytes(speed as u64)));
+            if speed > 1.0 {
+                let eta = g.bytes.saturating_sub(done) as f64 / speed;
+                right.push_str(&format!(" · {} left", crate::app::clock(eta)));
+            }
+        }
+        None => right.push_str(" · waiting"),
+    }
+    if g.failed > 0 {
+        right.push_str(&format!(" · {} failed", g.failed));
+    }
+    if d.groups.len() > 1 {
+        right.push_str(&format!(" · +{} queued", d.groups.len() - 1));
+    }
+    right.push(' ');
+    let bar_w = (area.width as usize).saturating_sub(left.chars().count() + right.chars().count());
+    let filled = ((frac * bar_w as f64).round() as usize).min(bar_w);
+    let line = Line::from(vec![
+        Span::raw(left).fg(ACCENT).bold(),
+        Span::raw("█".repeat(filled)).fg(ACCENT),
+        Span::raw("░".repeat(bar_w - filled)).fg(Color::DarkGray),
+        Span::raw(right).fg(Color::Gray),
+    ]);
+    f.render_widget(Paragraph::new(line).bg(BAR_BG), area);
+}
+
 fn badge(text: String, fg: Color, bg: Color) -> Span<'static> {
     Span::styled(
         format!(" {text} "),
@@ -857,18 +914,21 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let mut right: Vec<Span> = Vec::new();
     let d = &app.downloads;
     if d.queued > 0 {
-        let mut s = format!("↓ {} queued", d.queued);
-        if let Some(a) = &d.active {
-            let secs = a.started.elapsed().as_secs_f64().max(0.1);
-            let speed = human_bytes((a.done as f64 / secs) as u64);
-            let pct = a
-                .total
-                .filter(|t| *t > 0)
-                .map(|t| format!(" {}%", a.done * 100 / t))
-                .unwrap_or_default();
-            let name = a.label.rsplit('/').next().unwrap_or(&a.label);
-            s.push_str(&format!(" · {name}{pct} {speed}/s"));
-        }
+        let waiting = d.queued.saturating_sub(d.active.len());
+        let speed = human_bytes(d.speed() as u64);
+        let s = match d.active.values().collect::<Vec<_>>().as_slice() {
+            [] => format!("↓ {waiting} queued"),
+            [a] => {
+                let pct = a
+                    .total
+                    .filter(|t| *t > 0)
+                    .map(|t| format!(" {}%", a.done * 100 / t))
+                    .unwrap_or_default();
+                let name = a.label.rsplit('/').next().unwrap_or(&a.label);
+                format!("↓ {name}{pct} · {speed}/s · {waiting} queued")
+            }
+            many => format!("↓ {} files · {speed}/s · {waiting} queued", many.len()),
+        };
         right.push(badge(s, Color::Black, ACCENT));
         right.push(Span::raw(" "));
     }
@@ -1069,7 +1129,7 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
             f.render_widget(Paragraph::new(lines).block(dialog_block(title)), r);
         }
         Dialog::Help => {
-            let r = centered(80, 43, area);
+            let r = centered(80, 44, area);
             f.render_widget(Clear, r);
             f.render_widget(
                 Paragraph::new(help_lines()).block(dialog_block("Keys (any key closes)")),
@@ -1111,7 +1171,8 @@ fn help_lines() -> Vec<Line<'static>> {
         row("◆ green", "ALBA sample already downloaded (from this beamtime) here"),
         row("◆ yellow", "only a local folder with the same name exists here"),
         row("d", "download marked solves into xia2chem_r3/, ednaproc_r3/ … in the Local folder"),
-        row("F", "download ticked raw-frame runs (asks first)"),
+        row("F", "download ticked raw-frame runs (asks first; progress bar above the status bar)"),
+        row("", "HKL/log downloads skip ahead of frames and start at once"),
         sec("Console (a terminal in the Local panel's folder)"),
         row("Enter", "run; a bare program name gets the selected file"),
         row("", "while a program runs (SADABS…), Enter sends your answer"),
@@ -1153,6 +1214,7 @@ mod tests {
                 known_hosts: None,
                 beamlines: vec!["bl13".into()],
                 remote_root: None,
+                parallel_downloads: 3,
             },
             tx.clone(),
         );
@@ -1383,6 +1445,44 @@ mod tests {
         app.local.cd(base.join("JSG285b"));
         let _ = render(&app, 170, 42);
         assert_eq!(style_at(&app, 170, 42, "JSG285b ", "◆"), Some(Color::Green));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn frames_get_a_progress_bar_and_two_console_lines() {
+        use crate::event::AppEvent;
+        use crate::remote::{DownloadEvent, RemoteEvent};
+        let base = std::env::temp_dir().join(format!("alba_watch_bar_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        let files: Vec<RemoteFile> = (1..=3)
+            .map(|i| RemoteFile::new(format!("/r/manually-mounted_3_000{i}.cbf"), Some(100)))
+            .collect();
+        let lines_before = app.console.lines.len();
+        app.enqueue_frames("20251211", "JSG285b", files);
+        assert_eq!(app.downloads.groups.len(), 1);
+        let mut ids: Vec<u64> = app.downloads.job_group.keys().copied().collect();
+        ids.sort();
+        let ev = |d| AppEvent::Remote(RemoteEvent::Download(d));
+        let label = |i: u64| format!("frames_r3/manually-mounted_3_000{i}.cbf");
+        app.handle(ev(DownloadEvent::Started { id: ids[0], label: label(1), total: Some(100) }));
+        app.handle(ev(DownloadEvent::Progress { id: ids[0], done: 50, total: Some(100) }));
+        let screen = render(&app, 170, 42);
+        assert!(screen.contains("frames JSG285b/frames_r3"), "{screen}");
+        assert!(screen.contains("0/3 files") && screen.contains("█"));
+        app.handle(ev(DownloadEvent::Finished { id: ids[0], label: label(1), bytes: 100, skipped: false }));
+        app.handle(ev(DownloadEvent::Started { id: ids[1], label: label(2), total: Some(100) }));
+        app.handle(ev(DownloadEvent::Finished { id: ids[1], label: label(2), bytes: 100, skipped: false }));
+        app.handle(ev(DownloadEvent::Started { id: ids[2], label: label(3), total: Some(100) }));
+        app.handle(ev(DownloadEvent::Failed { id: ids[2], label: label(3), message: "boom".into() }));
+        assert!(app.downloads.groups.is_empty());
+        let new: Vec<&str> = app.console.lines.iter().skip(lines_before).map(|l| l.text.as_str()).collect();
+        assert_eq!(new.len(), 2, "{new:?}");
+        assert!(new[0].contains("started, 3 files"));
+        assert!(new[1].contains("2/3 downloaded, 1 failed") && new[1].contains("boom"));
+        // the bar is gone once the dataset is done
+        let screen = render(&app, 170, 42);
+        assert!(!screen.contains("█") && !screen.contains("files ·"), "{screen}");
         std::fs::remove_dir_all(&base).ok();
     }
 

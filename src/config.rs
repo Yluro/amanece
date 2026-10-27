@@ -67,6 +67,9 @@ pub struct Config {
     pub external_window: Vec<String>,
     pub max_requests_per_second: f64,
     pub burst: u32,
+    /// Frames downloaded at a time over the one connection (1–4). HKL/log downloads
+    /// always get a slot of their own on top.
+    pub parallel_downloads: usize,
     /// Beamline folders searched for the proposal (`/bl13/projects/cycle*/...`):
     /// bl13 = XALOC, bl06 = XAIRA.
     pub beamlines: Vec<String>,
@@ -88,6 +91,7 @@ impl Default for Config {
             external_window: vec!["xprep".into()],
             max_requests_per_second: 3.0,
             burst: 6,
+            parallel_downloads: 3,
             beamlines: vec!["bl13".into(), "bl06".into()],
             remote_root: None,
         }
@@ -119,6 +123,9 @@ external_window = ["xprep"]
 # SFTP politeness: sustained requests per second (max 5) and burst size
 max_requests_per_second = 3.0
 burst = 6
+# frames downloaded at a time over the one connection (1-4); HKL/log downloads
+# always get a slot of their own on top and never wait behind frames
+parallel_downloads = 3
 
 # Where the beamtime folders (YYYYMMDD) live. Normally found automatically:
 # either the login folder itself, or /<beamline>/projects/cycle*/<account digits>-<pi>

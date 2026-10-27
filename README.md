@@ -26,7 +26,10 @@ Each panel shows its keys on its bottom border; `?` lists them all. In short:
   A green ◆ next to a sample: it's already downloaded (from this beamtime) into the Local folder;
   yellow ◆: only a local folder with the same name exists.
 - **Stats**: every solve with its statistics, ★ on the best one. `Space` marks, `d` downloads,
-  `F` downloads raw frames (asks first).
+  `F` downloads raw frames (asks first). Frames download a few files at a time (`parallel_downloads`
+  in the config, default 3) with a progress bar above the status bar; more frame datasets wait their
+  turn. HKL/log downloads (`d`) jump the queue and start right away, even while frames are
+  downloading. If the connection drops, it reconnects and continues where each file stopped.
 - **Console**: a terminal (Windows ConPTY). `:` to type. Commands run in the Local folder and a
   bare program name gets the selected file: with `XDS_ASCII.HKL` selected, `xprep` runs
   `xprep XDS_ASCII.HKL`. Interactive console programs work: while SADABS (or any program) runs,
@@ -54,4 +57,7 @@ sound, `q` quits (asks first).
 cargo test
 # live checks against the real server (a few dozen read-only requests):
 ALBA_USER=… ALBA_PASS=… cargo test live_ -- --ignored --nocapture
+# downloads under forced session drops (resume); ALBA_KEEP=1 keeps the files to compare
+ALBA_USER=… ALBA_PASS=… ALBA_DATE=… ALBA_SAMPLE=… ALBA_FRAMES_N=9 ALBA_DOWNLOAD=1 ALBA_WATCH_REKEY_MB=16 \
+  cargo test --release live_app_flow -- --ignored --nocapture
 ```

@@ -61,9 +61,15 @@ pub struct Entry {
     pub mtime: Option<u32>,
 }
 
+/// File opens per second for downloads (browsing/scanning keeps the main limiter).
+const DOWNLOAD_OPENS_PER_SECOND: f64 = 10.0;
+
 pub struct ReadOnlySftp {
     inner: SftpSession,
     limiter: Arc<Limiter>,
+    /// Separate budget for download opens, so frames can use a fast link while
+    /// listings stay at a few requests per second. Counts into the same total.
+    downloads: Arc<Limiter>,
     /// The account's login folder. App paths (`/20251211/...`) are relative to it.
     root: String,
     /// Proposal folders holding beamtimes, relative to `root` (`""` = the root itself).
@@ -72,9 +78,11 @@ pub struct ReadOnlySftp {
 
 impl ReadOnlySftp {
     pub fn new(inner: SftpSession, limiter: Arc<Limiter>) -> Self {
+        let downloads = Arc::new(Limiter::new(DOWNLOAD_OPENS_PER_SECOND, 10, limiter.count.clone()));
         ReadOnlySftp {
             inner,
             limiter,
+            downloads,
             root: "/".into(),
             proposals: vec![String::new()],
         }
@@ -238,7 +246,16 @@ impl ReadOnlySftp {
     }
 
     pub async fn open_read(&self, path: &str) -> Result<RemoteReader> {
-        self.limiter.acquire().await;
+        self.open_with(&self.limiter, path).await
+    }
+
+    /// Opens a file to download, on the download budget.
+    pub async fn open_download(&self, path: &str) -> Result<RemoteReader> {
+        self.open_with(&self.downloads, path).await
+    }
+
+    async fn open_with(&self, limiter: &Limiter, path: &str) -> Result<RemoteReader> {
+        limiter.acquire().await;
         let file = self
             .inner
             .open(self.full(path))
@@ -266,6 +283,12 @@ pub struct RemoteReader {
 impl RemoteReader {
     pub async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.file.read(buf).await
+    }
+
+    /// Continue reading from byte `pos` (resuming a download).
+    pub async fn seek(&mut self, pos: u64) -> std::io::Result<u64> {
+        use tokio::io::AsyncSeekExt;
+        self.file.seek(std::io::SeekFrom::Start(pos)).await
     }
 
     pub async fn close(self) {

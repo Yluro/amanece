@@ -1,5 +1,7 @@
-//! Background tokio tasks owning the single SSH connection: one command loop for
-//! listings/scans and one sequential download loop. The UI talks to them through
+//! Background tokio tasks sharing the single SSH connection: one command loop for
+//! listings/scans, and download workers. HKL/log downloads go to a priority queue that
+//! every worker serves first, plus an express worker that serves only it, so they start
+//! at once even while frames fill the bulk workers. The UI talks to them through
 //! `RemoteHandle` and receives `RemoteEvent`s on its std channel.
 
 use super::scan;
@@ -16,10 +18,14 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+/// Upper bound for `parallel_downloads`.
+pub const MAX_PARALLEL_DOWNLOADS: usize = 4;
+
 /// Pause between background scans ("fetch all stats", poll rescans).
 const BACKGROUND_GAP: Duration = Duration::from_secs(3);
 const MAX_BACKOFF: Duration = Duration::from_secs(600);
-/// Tries per file when the session drops under a download (reconnecting in between).
+/// Tries in a row without any new bytes before a file is given up (reconnecting in
+/// between). Tries that move the download forward don't count: it resumes from `.part`.
 const DOWNLOAD_ATTEMPTS: usize = 3;
 
 /// Answer to `RemoteCmd::ConnectionLost`.
@@ -40,6 +46,8 @@ pub struct DownloadJob {
     pub local: PathBuf,
     pub size: Option<u64>,
     pub label: String,
+    /// HKL/logs: jump ahead of bulk downloads (frames) and get a slot of their own.
+    pub priority: bool,
 }
 
 #[derive(Debug)]
@@ -62,8 +70,12 @@ pub enum RemoteCmd {
     Download(Vec<DownloadJob>),
     CancelDownloads,
     Reconnect,
-    /// From the download loop after a failed file: did the session die? Reconnect if so.
-    ConnectionLost(tokio::sync::oneshot::Sender<Recovery>),
+    /// From a download worker after a failed file: did the session it used (`seen`,
+    /// see `Shared::conn_gen`) die? Reconnect if so.
+    ConnectionLost {
+        seen: u64,
+        reply: tokio::sync::oneshot::Sender<Recovery>,
+    },
     Shutdown,
 }
 
@@ -115,6 +127,8 @@ pub struct Settings {
     pub known_hosts: Option<PathBuf>,
     pub beamlines: Vec<String>,
     pub remote_root: Option<String>,
+    /// Bulk download workers (frames); clamped to 1..=MAX_PARALLEL_DOWNLOADS.
+    pub parallel_downloads: usize,
 }
 
 pub struct RemoteHandle {
@@ -129,11 +143,27 @@ impl RemoteHandle {
     }
 }
 
+struct Queued {
+    generation: u64,
+    job: DownloadJob,
+}
+
+#[derive(Default)]
+struct Queues {
+    priority: VecDeque<Queued>,
+    bulk: VecDeque<Queued>,
+}
+
 #[derive(Default)]
 struct Shared {
     sftp: Mutex<Option<Arc<ReadOnlySftp>>>,
     /// Bumped by CancelDownloads; jobs from older generations are dropped.
     generation: AtomicU64,
+    /// Bumped on every (re)connect, so a worker can tell "my session died" from
+    /// "another worker already reconnected".
+    conn_gen: AtomicU64,
+    queues: Mutex<Queues>,
+    wake: tokio::sync::Notify,
 }
 
 impl Shared {
@@ -146,24 +176,56 @@ impl Shared {
             *g = s;
         }
     }
+
+    fn install(&self, s: Arc<ReadOnlySftp>) {
+        self.set(Some(s));
+        self.conn_gen.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn push(&self, generation: u64, jobs: Vec<DownloadJob>) {
+        if let Ok(mut q) = self.queues.lock() {
+            for job in jobs {
+                let item = Queued { generation, job };
+                if item.job.priority {
+                    q.priority.push_back(item);
+                } else {
+                    q.bulk.push_back(item);
+                }
+            }
+        }
+        self.wake.notify_waiters();
+    }
+
+    /// Next job: priority first; bulk only for workers that take it.
+    fn take(&self, priority_only: bool) -> Option<Queued> {
+        let mut q = self.queues.lock().ok()?;
+        q.priority
+            .pop_front()
+            .or_else(|| if priority_only { None } else { q.bulk.pop_front() })
+    }
+
+    fn drain(&self) -> Vec<Queued> {
+        let Ok(mut q) = self.queues.lock() else {
+            return Vec::new();
+        };
+        let mut all: Vec<Queued> = q.priority.drain(..).collect();
+        all.extend(q.bulk.drain(..));
+        all
+    }
 }
 
 pub fn spawn(rt: &tokio::runtime::Runtime, settings: Settings, events: std::sync::mpsc::Sender<AppEvent>) -> RemoteHandle {
     let (tx, rx) = unbounded_channel();
-    let (dl_tx, dl_rx) = unbounded_channel();
     let requests = Arc::new(AtomicU64::new(0));
     let limiter = Arc::new(Limiter::new(settings.rate, settings.burst, requests.clone()));
     let shared = Arc::new(Shared::default());
-    rt.spawn(command_loop(
-        rx,
-        tx.clone(),
-        dl_tx,
-        shared.clone(),
-        settings,
-        limiter,
-        events.clone(),
-    ));
-    rt.spawn(download_loop(dl_rx, tx.clone(), shared, events));
+    let workers = settings.parallel_downloads.clamp(1, MAX_PARALLEL_DOWNLOADS);
+    rt.spawn(command_loop(rx, tx.clone(), shared.clone(), settings, limiter, events.clone()));
+    for _ in 0..workers {
+        rt.spawn(download_worker(false, tx.clone(), shared.clone(), events.clone()));
+    }
+    // the express slot: only priority jobs, so they never wait behind frames
+    rt.spawn(download_worker(true, tx.clone(), shared, events));
     RemoteHandle { tx, requests }
 }
 
@@ -181,7 +243,6 @@ struct Background {
 async fn command_loop(
     mut rx: UnboundedReceiver<RemoteCmd>,
     self_tx: UnboundedSender<RemoteCmd>,
-    dl_tx: UnboundedSender<(u64, DownloadJob)>,
     shared: Arc<Shared>,
     settings: Settings,
     limiter: Arc<Limiter>,
@@ -233,7 +294,7 @@ async fn command_loop(
                 match session::connect(&target, &user, &password).await {
                     Ok((c, host_key)) => {
                         let root = c.sftp.describe();
-                        shared.set(Some(c.sftp.clone()));
+                        shared.install(c.sftp.clone());
                         conn = Some(c);
                         creds = Some((user.clone(), password));
                         backoff = Duration::from_secs(30);
@@ -259,7 +320,7 @@ async fn command_loop(
                 match session::connect(&target, &user, &password).await {
                     Ok((c, host_key)) => {
                         let root = c.sftp.describe();
-                        shared.set(Some(c.sftp.clone()));
+                        shared.install(c.sftp.clone());
                         conn = Some(c);
                         backoff = Duration::from_secs(30);
                         emit(&events, RemoteEvent::Connected { user, host_key, root });
@@ -278,10 +339,23 @@ async fn command_loop(
             }
             RemoteCmd::CancelDownloads => {
                 shared.generation.fetch_add(1, Ordering::SeqCst);
+                for q in shared.drain() {
+                    emit(
+                        &events,
+                        RemoteEvent::Download(DownloadEvent::Failed {
+                            id: q.job.id,
+                            label: q.job.label,
+                            message: "cancelled".into(),
+                        }),
+                    );
+                }
             }
-            RemoteCmd::ConnectionLost(reply) => {
+            RemoteCmd::ConnectionLost { seen, reply } => {
                 if conn.as_ref().is_some_and(|c| !c.handle.is_closed()) {
-                    let _ = reply.send(Recovery::Alive);
+                    // alive: either the error was about the file, or another worker
+                    // already reconnected after the session this one used had died
+                    let replaced = shared.conn_gen.load(Ordering::SeqCst) != seen;
+                    let _ = reply.send(if replaced { Recovery::Reconnected } else { Recovery::Alive });
                     continue;
                 }
                 shared.set(None);
@@ -301,7 +375,7 @@ async fn command_loop(
                 match session::connect(&target, &user, &password).await {
                     Ok((c, host_key)) => {
                         let root = c.sftp.describe();
-                        shared.set(Some(c.sftp.clone()));
+                        shared.install(c.sftp.clone());
                         conn = Some(c);
                         backoff = Duration::from_secs(30);
                         emit(&events, RemoteEvent::Connected { user, host_key, root });
@@ -321,10 +395,7 @@ async fn command_loop(
                 }
             }
             RemoteCmd::Download(jobs) => {
-                let generation = shared.generation.load(Ordering::SeqCst);
-                for j in jobs {
-                    let _ = dl_tx.send((generation, j));
-                }
+                shared.push(shared.generation.load(Ordering::SeqCst), jobs);
             }
             RemoteCmd::ScanSample {
                 date,
@@ -469,13 +540,20 @@ async fn run_op(sftp: &ReadOnlySftp, op: RemoteCmd, events: &std::sync::mpsc::Se
     Ok(())
 }
 
-async fn download_loop(
-    mut rx: UnboundedReceiver<(u64, DownloadJob)>,
+/// One download worker. `priority_only`: the express slot, which never takes bulk jobs.
+async fn download_worker(
+    priority_only: bool,
     cmd_tx: UnboundedSender<RemoteCmd>,
     shared: Arc<Shared>,
     events: std::sync::mpsc::Sender<AppEvent>,
 ) {
-    while let Some((generation, job)) = rx.recv().await {
+    loop {
+        // registered before looking, so a push in between still wakes us
+        let notified = shared.wake.notified();
+        let Some(Queued { generation, job }) = shared.take(priority_only) else {
+            notified.await;
+            continue;
+        };
         let fail = |message: String| {
             emit(
                 &events,
@@ -490,7 +568,10 @@ async fn download_loop(
             fail("cancelled".into());
             continue;
         }
-        for attempt in 1..=DOWNLOAD_ATTEMPTS {
+        let mut stuck = 0;
+        loop {
+            let seen = shared.conn_gen.load(Ordering::SeqCst);
+            let before = part_len(&job.local);
             let Some(sftp) = shared.get() else {
                 fail("not connected".into());
                 break;
@@ -498,28 +579,50 @@ async fn download_loop(
             let Err(e) = download_one(&sftp, &job, generation, &shared, &events).await else {
                 break;
             };
-            if generation != shared.generation.load(Ordering::SeqCst) || attempt == DOWNLOAD_ATTEMPTS {
+            stuck = if part_len(&job.local) > before { 0 } else { stuck + 1 };
+            if generation != shared.generation.load(Ordering::SeqCst) || stuck >= DOWNLOAD_ATTEMPTS {
+                discard_part(&job.local);
                 fail(format!("{e:#}"));
                 break;
             }
-            // Did the session die under us? The command loop checks and reconnects.
+            // Did the session die under us? The command loop checks and reconnects once,
+            // however many workers ask.
             let (tx, answer) = tokio::sync::oneshot::channel();
-            if cmd_tx.send(RemoteCmd::ConnectionLost(tx)).is_err() {
+            if cmd_tx.send(RemoteCmd::ConnectionLost { seen, reply: tx }).is_err() {
                 fail(format!("{e:#}"));
                 break;
             }
             match answer.await {
-                Ok(Recovery::Reconnected) => emit(
-                    &events,
-                    RemoteEvent::Notice(format!("connection restored, retrying {}", job.label)),
-                ),
+                Ok(Recovery::Reconnected) => {
+                    if job.priority {
+                        emit(
+                            &events,
+                            RemoteEvent::Notice(format!("connection restored, retrying {}", job.label)),
+                        );
+                    }
+                }
                 _ => {
+                    discard_part(&job.local);
                     fail(format!("{e:#}"));
                     break;
                 }
             }
         }
     }
+}
+
+fn part_path(local: &std::path::Path) -> PathBuf {
+    let mut name = local.file_name().unwrap_or_default().to_os_string();
+    name.push(".part");
+    local.with_file_name(name)
+}
+
+fn part_len(local: &std::path::Path) -> u64 {
+    std::fs::metadata(part_path(local)).map(|m| m.len()).unwrap_or(0)
+}
+
+fn discard_part(local: &std::path::Path) {
+    let _ = std::fs::remove_file(part_path(local));
 }
 
 async fn download_one(
@@ -544,7 +647,7 @@ async fn download_one(
         );
         return Ok(());
     }
-    let mut reader = sftp.open_read(&job.remote).await?;
+    let mut reader = sftp.open_download(&job.remote).await?;
     let total = reader.size.or(job.size);
     if let (Some(want), Some(have)) = (total, local_len)
         && want == have
@@ -573,12 +676,27 @@ async fn download_one(
     if let Some(dir) = job.local.parent() {
         tokio::fs::create_dir_all(dir).await?;
     }
-    let mut part_name = job.local.file_name().unwrap_or_default().to_os_string();
-    part_name.push(".part");
-    let part = job.local.with_file_name(part_name);
-    let mut out = tokio::fs::File::create(&part).await?;
+    let part = part_path(&job.local);
+    // resume what an earlier try (cut by a dropped session) already wrote
+    let mut done = part_len(&job.local);
+    if total.is_some_and(|t| done > t) {
+        done = 0;
+    }
+    if done > 0 && reader.seek(done).await.is_err() {
+        done = 0;
+    }
+    let mut out = if done > 0 {
+        tokio::fs::OpenOptions::new().append(true).open(&part).await?
+    } else {
+        tokio::fs::File::create(&part).await?
+    };
+    if done > 0 {
+        emit(
+            events,
+            RemoteEvent::Download(DownloadEvent::Progress { id: job.id, done, total }),
+        );
+    }
     let mut buf = vec![0u8; 256 * 1024];
-    let mut done: u64 = 0;
     let mut last = Instant::now();
     let result: Result<()> = async {
         loop {
@@ -605,10 +723,9 @@ async fn download_one(
     .await;
     drop(out);
     reader.close().await;
-    if let Err(e) = result {
-        let _ = tokio::fs::remove_file(&part).await;
-        return Err(e);
-    }
+    // a failed try keeps its .part so the next one resumes (the worker discards it when
+    // it gives up or the download is cancelled)
+    result?;
     if let Some(t) = total
         && t != done
     {
@@ -626,4 +743,42 @@ async fn download_one(
         }),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(id: u64, priority: bool) -> DownloadJob {
+        DownloadJob {
+            id,
+            remote: format!("/r/{id}"),
+            local: PathBuf::from(format!("{id}")),
+            size: None,
+            label: format!("{id}"),
+            priority,
+        }
+    }
+
+    #[test]
+    fn priority_jobs_jump_the_queue() {
+        let s = Shared::default();
+        s.push(0, vec![job(1, false), job(2, false), job(3, false)]);
+        s.push(0, vec![job(9, true)]);
+        // the express slot only takes priority jobs
+        assert_eq!(s.take(true).map(|q| q.job.id), Some(9));
+        assert!(s.take(true).is_none());
+        // bulk workers: priority first, then frames in order
+        s.push(0, vec![job(10, true)]);
+        let order: Vec<u64> = std::iter::from_fn(|| s.take(false).map(|q| q.job.id)).collect();
+        assert_eq!(order, vec![10, 1, 2, 3]);
+    }
+
+    #[test]
+    fn cancel_drains_both_queues() {
+        let s = Shared::default();
+        s.push(0, vec![job(1, false), job(2, true)]);
+        assert_eq!(s.drain().len(), 2);
+        assert!(s.take(false).is_none());
+    }
 }

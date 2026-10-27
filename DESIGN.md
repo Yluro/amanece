@@ -169,7 +169,10 @@ Gotchas:
 - Fix: prefer AES-GCM (OpenSSH servers rekey AES-GCM only after 64 GB, ChaCha20 after ~1 GB) and raise the
   client's rekey limit to 32 GiB (time limit 24 h). Downloads also survive a dropped session: the download loop
   asks the command loop (`ConnectionLost`), which logs in again with the in-memory credentials, and the file is
-  retried (3 tries). `ALBA_WATCH_REKEY_MB=16` forces drops to test this.
+  retried. A retry resumes from the `.part` already on disk (remote seek + local append), and only tries that
+  brought no new bytes count: 3 of those in a row and the file fails (its `.part` is removed then, or on cancel).
+  `ALBA_WATCH_REKEY_MB=16` forces drops to test this: AS514 (9 frames + a 10.7 MB HKL, many drops) completes
+  and every file's SHA-256 matches a clean run (`ALBA_KEEP=1` keeps the live test's downloads).
 
 ### 2.11 Download speed (measured 2026-10-27)
 
@@ -178,7 +181,22 @@ Gotchas:
   (Debug build: 8.5 → 11.1 MB/s, so parallelism only hid debug-mode overhead.)
 - The cap is the PC's link: the Intel I219-V (gigabit) negotiated **100 Mbps** ≈ 11.5 MB/s of payload. Parallel
   downloads can't help there; a gigabit link could. Re-run `live_bench` with `ALBA_PAR=1/3` on a faster network
-  before adding parallel downloads.
+  to see what they give.
+
+### 2.12 Parallel downloads and priority (2026-10-27)
+
+- **Two queues in the worker**: *express* (HKL/log downloads from the Stats panel, `d`) and *bulk* (raw
+  frames, `F`). `parallel_downloads` bulk workers (config, default 3, clamped to 1–4) take express jobs
+  first and bulk jobs otherwise; one more worker only ever takes express jobs, so an HKL starts at once even
+  while every bulk slot is busy with frames. Live: the autoPROC HKL of AS514 (10.7 MB) arrived 3.6 s after
+  queueing while 9 frames were in flight.
+- All of it runs over the one SSH connection (separate SFTP file handles). Download file opens have their own
+  limiter (10/s, burst 10) and still count in the request total; browsing keeps the 3/s limiter.
+- If several workers lose the session at once, the command loop reconnects once: each worker sends the
+  connection generation it saw (`ConnectionLost { seen }`), and a newer generation means "already reconnected".
+- **Frames UI**: each run folder queued with `F` is a dataset with a one-row progress bar above the status bar
+  (files, bytes, speed, ETA, failures, other datasets queued). The console gets two lines per dataset (started,
+  then done / failed / cancelled), not one per frame; HKL and log downloads still get a line per file.
 
 ## 3. Gentle-scraping rules (hard requirements)
 
@@ -191,8 +209,10 @@ Gotchas:
 5. **Cache** in `<base>/.alba_watch/cache.json`. Finished solves never change, so their stats are never fetched again.
    Unfinished solves are re-checked only by polling (1 `stat` of the marker each).
 6. **Max 3 login attempts per launch**, then exit, to stay clear of lockouts.
-7. **Downloads are sequential**, one file at a time, to `*.part` then renamed locally. Skip if the local file exists
-   with the same size. Raw frames only after a confirm dialog showing the total size.
+7. **Downloads**: at most `parallel_downloads` (default 3, max 4) frames at a time plus one HKL/log slot (§2.12),
+   file opens ≤ 10/s, over the same single connection. Each goes to `*.part`, then is renamed locally; a dropped
+   session resumes the `.part`. Skip if the local file exists with the same size. Raw frames only after a
+   confirm dialog showing the total size.
 8. Never list `RAW_DATA/` unless frames are requested; never list autoPROC's `<id>/` working dir.
 
 ## 4. Decisions (from the Q&A on 2026-10-22)
@@ -260,7 +280,8 @@ src/
 ├── remote/
 │   ├── session.rs     russh connect + password/keyboard-interactive auth, TOFU host-key check
 │   ├── sftp.rs        ReadOnlySftp newtype (read_dir / stat / open_read only)
-│   ├── worker.rs      tokio task: job queue, rate limiter, reconnect/backoff, progress events
+│   ├── worker.rs      command loop (listing, reconnect/backoff) + download workers (express/bulk queues,
+│   │                  resume, progress events)
 │   ├── layout.rs      path building + discovery for both layouts, regexes, test-sample detection
 │   └── ispyb.rs       AutoProcContainer parser + unit normalisation
 ├── download.rs        job → local path mapping, .part/rename, skip-existing, provenance file
