@@ -46,8 +46,9 @@ mod live {
           println!("flat={flat}");
           for sample in list.split(',') {
             let info = scan::scan_sample(&sftp, &date, sample, flat, None, |_| {}).await.unwrap();
-            println!("{sample}:");
+            println!("{sample}:  test_shots_only={} unprocessed={}", info.test_shots_only(), info.unprocessed());
             for r in &info.runs {
+                println!("  run {} prefix {} characterisation={} solves={}", r.run, r.prefix, r.characterisation, r.solves.len());
                 for s in &r.solves {
                     let o = s.stats.as_ref().and_then(|st| st.overall.clone()).unwrap_or_default();
                     println!(
@@ -63,6 +64,12 @@ mod live {
                         s.note
                     );
                 }
+            }
+            if std::env::var("ALBA_FRAMES").is_ok() {
+                let runs: Vec<(String, u32)> = info.runs.iter().map(|r| (r.prefix.clone(), r.run)).collect();
+                let frames = scan::list_frames(&sftp, &date, sample, &runs).await.unwrap();
+                let total: u64 = frames.iter().filter_map(|f| f.size).sum();
+                println!("  frames: {} files, {} bytes, e.g. {:?}", frames.len(), total, frames.first().map(|f| f.name()));
             }
           }
             println!("total requests: {}", count.load(Ordering::Relaxed));

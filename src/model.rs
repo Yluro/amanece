@@ -129,7 +129,8 @@ pub struct Run {
     /// MXCuBE file prefix (e.g. `manually-mounted`, or the sample name in old layouts).
     pub prefix: String,
     pub run: u32,
-    /// True when the run only has an EDNA characterisation (test shots), no solves.
+    /// Test shots only (EDNA characterisation / XAIRA testxtal), no data collection.
+    /// A run with neither this flag nor solves is a dataset nobody processed.
     pub characterisation: bool,
     pub solves: Vec<Solve>,
 }
@@ -163,6 +164,16 @@ impl SampleInfo {
 
     pub fn has_data(&self) -> bool {
         self.solves().next().is_some()
+    }
+
+    /// Only test shots: no data collection at all.
+    pub fn test_shots_only(&self) -> bool {
+        !self.runs.is_empty() && self.runs.iter().all(|r| r.characterisation)
+    }
+
+    /// Has a collected dataset that no pipeline processed.
+    pub fn unprocessed(&self) -> bool {
+        !self.has_data() && self.runs.iter().any(|r| !r.characterisation && r.solves.is_empty())
     }
 
     pub fn has_running(&self) -> bool {

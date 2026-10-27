@@ -185,7 +185,15 @@ pub async fn scan_sample(
         }
     }
     for (prefix, r) in &char_runs {
-        run_mut(&mut info, prefix, *r);
+        run_mut(&mut info, prefix, *r).characterisation = true;
+    }
+    // No processing folders: datasets that were collected but never processed still get a
+    // run (from RAW_DATA/<sample>/<dataset>/), so their frames can be downloaded.
+    if solve_dirs.is_empty()
+        && let Ok(raw) = sftp.list(&layout::raw_sample_dir(date, sample)).await
+    {
+        let dirs: Vec<String> = raw.into_iter().filter(|e| e.is_dir).map(|e| e.name).collect();
+        add_unprocessed_runs(&mut info, &dirs);
     }
     normalise(&mut info);
     progress(&info);
@@ -297,12 +305,71 @@ fn run_mut<'a>(info: &'a mut SampleInfo, prefix: &str, run: u32) -> &'a mut Run 
     info.runs.last_mut().expect("just pushed")
 }
 
+/// Raw dataset folders without any processing become runs: `ref-…` ones are test shots,
+/// the rest datasets nobody processed. Folders that already have a run are skipped.
+fn add_unprocessed_runs(info: &mut SampleInfo, raw_dirs: &[String]) {
+    for name in raw_dirs {
+        if name.starts_with('.') || name == "gallery" || info.runs.iter().any(|r| r.prefix == *name) {
+            continue;
+        }
+        run_mut(info, name, 1).characterisation = name.starts_with("ref-");
+    }
+}
+
 fn normalise(info: &mut SampleInfo) {
     info.runs
         .sort_by(|a, b| a.prefix.cmp(&b.prefix).then(a.run.cmp(&b.run)));
     for r in &mut info.runs {
-        r.characterisation = r.solves.is_empty();
+        // a run with solves is a data collection, even if it was characterised first
+        if !r.solves.is_empty() {
+            r.characterisation = false;
+        }
         r.solves.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.n.cmp(&b.n)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info() -> SampleInfo {
+        SampleInfo {
+            name: "S".into(),
+            runs: Vec::new(),
+            scanned_at: 0,
+        }
+    }
+
+    #[test]
+    fn unprocessed_dataset_gets_a_run() {
+        // Sample-21-10 on XAIRA: empty PROCESSED_DATA folder, one raw dataset
+        let mut i = info();
+        add_unprocessed_runs(&mut i, &["BSample-21X10_01".into()]);
+        normalise(&mut i);
+        assert_eq!(i.runs.len(), 1);
+        assert!(!i.runs[0].characterisation && i.runs[0].solves.is_empty());
+        assert!(i.unprocessed() && !i.test_shots_only());
+    }
+
+    #[test]
+    fn test_shots_stay_test_shots() {
+        // Sample-18-05: only a characterisation (testxtal) run, raw has just the ref- folder
+        let mut i = info();
+        run_mut(&mut i, "ref-BSample-18X05_01", 1).characterisation = true;
+        add_unprocessed_runs(&mut i, &["ref-BSample-18X05_01".into(), "gallery".into()]);
+        normalise(&mut i);
+        assert_eq!(i.runs.len(), 1);
+        assert!(i.test_shots_only() && !i.unprocessed());
+    }
+
+    #[test]
+    fn solves_win_over_characterisation() {
+        let mut i = info();
+        let r = run_mut(&mut i, "p", 2);
+        r.characterisation = true;
+        r.solves.push(Solve::new(SolveKind::Xia2Chem, "/d", 1));
+        normalise(&mut i);
+        assert!(!i.runs[0].characterisation);
     }
 }
 

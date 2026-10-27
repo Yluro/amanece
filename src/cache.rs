@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const VERSION: u32 = 1;
+/// Bumped when scan results change meaning, so old caches are rebuilt.
+const VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Cache {

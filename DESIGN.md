@@ -186,7 +186,7 @@ Gotchas:
 | Console | *(changed 2026-10-23)* A terminal: console programs run in a Windows pseudo-console (ConPTY via `portable-pty`, screen kept by `vt100`), so interactive programs such as SADABS work; while one runs, each typed line + Enter is its answer, Ctrl-C interrupts (twice: kill), and its output stays in the log as text when it exits. A bare program name gets the selected file (`xprep XDS_ASCII.HKL`, `shelxt <name>`). Windows GUI programs (XPREP) start directly in their own window. |
 | Polling | *(changed 2026-10-23)* Manual, 10 min, 2 min, 30 s, 5 s (hard floor 5 s). Each poll re-lists the newest and the open beamtime (1–2 small requests); the beamtime list and the rescans of new/running samples happen at most once a minute (per sample), whatever the rate. |
 | Notification | Optional sound each time a new **named** (non-test) sample appears. |
-| Test samples | Names containing `test`, or samples with only characterisation runs, are hidden; one key shows them. Never trigger the sound. |
+| Test samples | *(changed 2026-10-27)* Only samples **named** `test…` are hidden (`t` shows them): that is known from the listing, so rows never vanish while scanning. Samples with test shots only are shown dimmed as "test shots"; datasets with no processing at all (e.g. XAIRA Sample-21-10) show as "not processed" with a frames row built from `RAW_DATA/<sample>/<dataset>/`. The highlight follows the sample when rows change. Never trigger the sound. |
 | Raw frames | Runs listed in the stats panel, full sweeps pre-selected, characterisation runs not; confirm dialog with total GB. |
 
 ## 5. UI

@@ -307,7 +307,9 @@ fn sample_item(app: &App, date: &str, name: &str, width: usize) -> ListItem<'sta
                 right.push(status_glyph(s.status));
             }
         }
-        Some(_) => right.push(Span::raw("char").fg(Color::DarkGray)),
+        Some(info) if info.unprocessed() => right.push(Span::raw("not processed").fg(Color::Yellow)),
+        Some(info) if info.test_shots_only() => right.push(Span::raw("test shots").fg(Color::DarkGray)),
+        Some(_) => right.push(Span::raw("empty").fg(Color::DarkGray)),
         None => right.push(Span::raw("·").fg(Color::DarkGray)),
     }
     if scanning {
@@ -383,7 +385,8 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     let rows = App::stats_rows(info);
     if rows.is_empty() {
         f.render_widget(
-            Paragraph::new("No processing results in this sample folder.").fg(Color::DarkGray),
+            Paragraph::new("Nothing found for this sample: no processing folders and no raw datasets.")
+                .fg(Color::DarkGray),
             inner,
         );
         return;
@@ -460,8 +463,17 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
                 .images()
                 .map(|(a, b)| format!("images {a}–{b}, ≈ {} at 6.2 MB/frame", human_bytes((u64::from(b - a) + 1) * 6_230_000)))
                 .unwrap_or_else(|| "frame count known once listed".into());
+            let what = if r.characterisation {
+                Line::from("test shots only: no data collection").fg(Color::DarkGray)
+            } else if r.solves.is_empty() {
+                Line::from("not processed by ALBA's pipelines: download the frames to process them yourself")
+                    .fg(Color::Yellow)
+            } else {
+                Line::from("")
+            };
             vec![
                 Line::from(format!("Raw frames of run {} (prefix {})", r.run, r.prefix)).bold(),
+                what,
                 Line::from(imgs),
                 Line::from(""),
                 Line::from("Space ticks/unticks the run. F lists the ticked runs and asks before downloading.")
@@ -1047,7 +1059,7 @@ fn help_lines() -> Vec<Line<'static>> {
         row("p", "polling: manual → 10 min → 2 min → 30 s → 5 s"),
         row("n", "new-sample sound on/off"),
         row("L", "include logs in downloads on/off"),
-        row("t", "show/hide test and characterisation-only samples"),
+        row("t", "show/hide samples named \"test…\" (test-shot-only samples are dimmed)"),
         row("X", "cancel queued downloads"),
         row("q", "quit"),
         sec("Local (left)"),
@@ -1246,6 +1258,49 @@ mod tests {
         assert!(screen.contains("Expert mode (Y or N) [N]:"), "{screen}");
         assert!(screen.contains("running: type the answer"));
         app.console.kill();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn scans_never_remove_rows_and_selection_follows_the_sample() {
+        use crate::event::AppEvent;
+        use crate::remote::RemoteEvent;
+        let base = std::env::temp_dir().join(format!("alba_watch_rows_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        let selected = |app: &App| app.selected_sample().map(|s| s.1);
+        assert_eq!(selected(&app).as_deref(), Some("JSG285b"));
+        let rows = app.alba_rows().len();
+
+        // JSG285 turns out to hold only test shots: it stays in the list, dimmed
+        let shots = SampleInfo {
+            name: "JSG285".into(),
+            scanned_at: 0,
+            runs: vec![Run { prefix: "p".into(), run: 1, characterisation: true, solves: vec![] }],
+        };
+        app.handle(AppEvent::Remote(RemoteEvent::SampleScanned { date: "20251211".into(), info: shots }));
+        assert_eq!(app.alba_rows().len(), rows);
+        assert_eq!(selected(&app).as_deref(), Some("JSG285b"));
+        // a dataset nobody processed
+        let raw = SampleInfo {
+            name: "JSG285-2".into(),
+            scanned_at: 0,
+            runs: vec![Run { prefix: "d".into(), run: 1, characterisation: false, solves: vec![] }],
+        };
+        app.handle(AppEvent::Remote(RemoteEvent::SampleScanned { date: "20251211".into(), info: raw }));
+        let screen = render(&app, 170, 42);
+        assert!(screen.contains("test shots") && screen.contains("not processed"));
+
+        // a new sample listed above the highlighted one: the highlight stays on JSG285b
+        let names = ["AAA1", "JSG285", "JSG285-2", "JSG285b", "KS347test"].map(String::from).to_vec();
+        app.handle(AppEvent::Remote(RemoteEvent::Samples {
+            date: "20251211".into(),
+            names,
+            flat: false,
+            from_poll: true,
+        }));
+        assert_eq!(app.alba_rows().len(), rows + 1);
+        assert_eq!(selected(&app).as_deref(), Some("JSG285b"));
         std::fs::remove_dir_all(&base).ok();
     }
 

@@ -332,11 +332,20 @@ impl App {
         self.cache.experiments.get(date)?.infos.get(sample)
     }
 
+    /// Shown dimmed: named "test…", or only test shots once scanned. Only the name-based
+    /// ones are hidden (by default), so scanning never removes rows from the list.
     pub fn is_test_sample(&self, date: &str, name: &str) -> bool {
-        layout::is_test_name(name)
-            || self
-                .info(date, name)
-                .is_some_and(|i| !i.has_data() && i.runs.iter().any(|r| r.characterisation))
+        layout::is_test_name(name) || self.info(date, name).is_some_and(SampleInfo::test_shots_only)
+    }
+
+    /// After the rows changed, put the highlight back on the same beamtime or sample.
+    fn reselect(&mut self, prev: Option<AlbaRow>) {
+        if let Some(prev) = prev
+            && let Some(i) = self.alba_rows().iter().position(|r| *r == prev)
+        {
+            self.alba_sel = i;
+        }
+        self.clamp_alba();
     }
 
     /// Rows of the ALBA panel, like a folder listing: the beamtimes, or the samples
@@ -348,7 +357,7 @@ impl App {
         let mut rows = vec![AlbaRow::Up];
         if let Some(names) = self.cache.experiments.get(date).and_then(|e| e.samples.as_ref()) {
             for n in names {
-                if self.show_test || !self.is_test_sample(date, n) {
+                if self.show_test || !layout::is_test_name(n) {
                     rows.push(AlbaRow::Sample {
                         date: date.clone(),
                         name: n.clone(),
@@ -598,6 +607,7 @@ impl App {
                 self.conn = Conn::Reconnecting(Some(in_secs));
             }
             RemoteEvent::Experiments { ids, home, top } => {
+                let prev = self.selected_row();
                 if ids.is_empty() {
                     let mut shown: Vec<String> = top.iter().take(15).cloned().collect();
                     if top.len() > 15 {
@@ -666,7 +676,7 @@ impl App {
                         self.list_samples(&d, false);
                     }
                 }
-                self.clamp_alba();
+                self.reselect(prev);
             }
             RemoteEvent::ExperimentsFailed(message) => {
                 self.alba_note = Some(format!("Listing beamtimes failed: {message}"));
@@ -678,6 +688,7 @@ impl App {
                 flat,
                 from_poll,
             } => {
+                let prev = self.selected_row();
                 names.sort_by_key(|n| n.to_lowercase());
                 let baseline = self.listed_this_session.insert(date.clone());
                 let exp = self.cache.experiment_mut(&date);
@@ -726,7 +737,7 @@ impl App {
                         }
                     }
                 }
-                self.clamp_alba();
+                self.reselect(prev);
             }
             RemoteEvent::SampleProgress { date, info } => {
                 self.store_info(&date, info);
@@ -852,10 +863,11 @@ impl App {
             KeyCode::Char('n') => self.toggle_sound(),
             KeyCode::Char('L') => self.toggle_logs(),
             KeyCode::Char('t') => {
+                let prev = self.selected_row();
                 self.show_test = !self.show_test;
                 let s = if self.show_test { "shown" } else { "hidden" };
-                self.say(LineKind::Info, format!("test / characterisation-only samples {s}"));
-                self.clamp_alba();
+                self.say(LineKind::Info, format!("samples named \"test…\" {s}"));
+                self.reselect(prev);
             }
             KeyCode::Char('X') => {
                 if self.downloads.queued > 0 {
