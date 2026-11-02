@@ -1199,7 +1199,8 @@ fn help_lines() -> Vec<Line<'static>> {
 
 pub mod splash {
     //! Easter egg: the "Pasión en el bancal" scene of *Amanece, que no es poco* (released on
-    //! 17 January 1989), narrated and typed out over an ASCII still, like a videogame dialog.
+    //! 17 January 1989), narrated and typed out over a still drawn in coloured half blocks,
+    //! like a videogame dialog.
     //! Pops up on 17 January, or when the hidden corner of the screen is clicked.
 
     use ratatui::Frame;
@@ -1211,7 +1212,8 @@ pub mod splash {
     use std::time::{Duration, Instant};
 
     /// The still: one terminal row per line (`splash.txt`) and the colour of each cell as
-    /// raw RGB bytes (`splash.bin`), both made by asciify-engine from a frame.
+    /// raw RGB bytes (`splash.bin`), both made by asciify-engine from a frame. The popup is
+    /// drawn from the colours; the characters only matter for art without them.
     /// Any size will do: it is resampled to the popup (see `Still`).
     const ART: &str = include_str!("splash.txt");
     const ART_RGB: &[u8] = include_bytes!("splash.bin");
@@ -1394,8 +1396,6 @@ pub mod splash {
     const ART_RAMP: &str = " .,:;-~=+*xX#%@";
     /// Fallback for art made with other characters: the usual ASCII-art order, light to dense.
     const DENSITY: &str = " .'`^\",:;Il!i><~+_-=?][}{1)(|/tfjrxnuvczXYUJCLQ0OZSmwqpdbkhao*#MW&8%B@$";
-    /// What the popup is drawn with.
-    const RAMP: &[char] = &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
     /// Where the visible window of the still starts when it has to be cropped vertically:
     /// near the top, since the dialog box covers the bottom.
     const CROP_TOP: f32 = 0.15;
@@ -1442,8 +1442,8 @@ pub mod splash {
             Still { w, h, cells, rgb }
         }
 
-        /// The still scaled to fill `cols` x `rows` (cropping what does not fit), averaging
-        /// the source cells under each target cell.
+        /// The still scaled to fill `cols` x `rows` (cropping what does not fit), two pixels
+        /// per cell: `▀` in the colour of the top half on the colour of the bottom one.
         fn render(&self, cols: u16, rows: u16) -> Vec<Line<'static>> {
             let (cols, rows) = (cols as usize, rows as usize);
             let (sw, sh) = (self.w as f32, self.h as f32);
@@ -1455,13 +1455,14 @@ pub mod splash {
             (0..rows)
                 .map(|ty| {
                     let ya = y0 + ty as f32 * step_y;
+                    let mid = ya + step_y / 2.0;
                     Line::from(
                         (0..cols)
                             .map(|tx| {
                                 let xa = x0 + tx as f32 * step_x;
-                                let (v, rgb) = self.average(xa, ya, xa + step_x, ya + step_y);
-                                let i = ((v.powf(0.85) * RAMP.len() as f32) as usize).min(RAMP.len() - 1);
-                                Span::styled(RAMP[i].to_string(), Style::new().fg(tint(i, rgb)))
+                                let top = self.pixel(xa, ya, xa + step_x, mid);
+                                let bottom = self.pixel(xa, mid, xa + step_x, ya + step_y);
+                                Span::styled("▀", Style::new().fg(top).bg(bottom))
                             })
                             .collect::<Vec<_>>(),
                     )
@@ -1469,49 +1470,52 @@ pub mod splash {
                 .collect()
         }
 
-        /// Mean brightness and colour of the source cells in the rectangle; the colour leans
-        /// to the bright cells so a lit shirt is not muddied by the shadow next to it.
+        fn pixel(&self, xa: f32, ya: f32, xb: f32, yb: f32) -> Color {
+            let (v, rgb) = self.average(xa, ya, xb, yb);
+            shade(v, rgb)
+        }
+
+        /// Mean brightness and colour of the source cells under the rectangle, each weighted
+        /// by how much of it the rectangle covers (half a cell is often less than a source row).
         fn average(&self, xa: f32, ya: f32, xb: f32, yb: f32) -> (f32, Option<[f32; 3]>) {
             let x_from = (xa.floor().max(0.0) as usize).min(self.w - 1);
             let y_from = (ya.floor().max(0.0) as usize).min(self.h - 1);
             let x_to = (xb.ceil() as usize).clamp(x_from + 1, self.w);
             let y_to = (yb.ceil() as usize).clamp(y_from + 1, self.h);
+            let cover = |a: f32, b: f32, i: usize| (b.min(i as f32 + 1.0) - a.max(i as f32)).max(0.0) + 1e-3;
             let (mut sum, mut weights, mut colour) = (0.0, 0.0, [0.0; 3]);
             for y in y_from..y_to {
                 for x in x_from..x_to {
                     let i = y * self.w + x;
-                    sum += self.cells[i];
+                    let wt = cover(xa, xb, x) * cover(ya, yb, y);
+                    weights += wt;
+                    sum += self.cells[i] * wt;
                     if let Some(c) = self.rgb.get(i) {
-                        let wt = self.cells[i] + 0.1;
-                        weights += wt;
                         for k in 0..3 {
                             colour[k] += c[k] * wt;
                         }
                     }
                 }
             }
-            let rgb = (weights > 0.0).then(|| colour.map(|c| c / weights));
-            (sum / ((x_to - x_from) * (y_to - y_from)) as f32, rgb)
+            let rgb = (!self.rgb.is_empty()).then(|| colour.map(|c| c / weights));
+            (sum / weights, rgb)
         }
     }
 
-    /// The cell's own colour, brightened (the frame is a night scene, dark on a dark screen).
+    /// The colour of one pixel. The stored colours already are the picture; averaging only
+    /// washes them out a little, so they are pushed back from their grey.
     /// Art without colour gets a grey that is warm at the bright end.
-    fn tint(i: usize, rgb: Option<[f32; 3]>) -> Color {
-        if i == 0 {
-            return Color::Reset;
-        }
-        let lift = |c: f32| (c.powf(0.75) * 1.15).clamp(0.0, 1.0);
+    fn shade(v: f32, rgb: Option<[f32; 3]>) -> Color {
+        let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0) as u8;
         match rgb {
             Some(c) => {
-                // Averaging and the lift wash colours out: push them back from their grey.
                 let grey = 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
-                let [r, g, b] = c.map(|v| (lift((grey + (v - grey) * 1.8).max(0.0)) * 255.0) as u8);
-                Color::Rgb(r.max(40), g.max(40), b.max(40))
+                let [r, g, b] = c.map(|x| byte(grey + (x - grey) * 1.25));
+                Color::Rgb(r, g, b)
             }
             None => {
-                let t = i as u16 * 255 / (RAMP.len() as u16 - 1);
-                Color::Rgb((50 + t * 3 / 4).min(255) as u8, (55 + t * 2 / 3) as u8, (50 + t / 2) as u8)
+                let t = v.powf(0.85);
+                Color::Rgb(byte(0.05 + t * 0.95), byte(0.05 + t * 0.85), byte(0.05 + t * 0.7))
             }
         }
     }
@@ -1629,6 +1633,19 @@ pub mod splash {
             assert!(out.iter().all(|l| l.spans.len() == 10));
             let mono = Still::parse("", &[]);
             assert_eq!(mono.render(5, 2).len(), 2);
+        }
+
+        #[test]
+        fn each_cell_is_two_pixels_tall() {
+            // bright row over dark row, shrunk to a single terminal row
+            let out = Still::parse("@@@@\n....", &[]).render(2, 1);
+            let cell = &out[0].spans[0];
+            assert_eq!(cell.content, "▀");
+            let red = |c: Option<Color>| match c {
+                Some(Color::Rgb(r, _, _)) => r,
+                other => panic!("not an RGB colour: {other:?}"),
+            };
+            assert!(red(cell.style.fg) > red(cell.style.bg));
         }
 
         #[test]
