@@ -2013,7 +2013,11 @@ fn open_with_default_app(path: &std::path::Path) {
             .creation_flags(0x0800_0000)
             .spawn();
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(path).spawn();
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = std::process::Command::new("xdg-open").arg(path).spawn();
     }
