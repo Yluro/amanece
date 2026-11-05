@@ -235,6 +235,9 @@ pub fn clock(secs: f64) -> String {
 pub struct App {
     pub cfg: Config,
     pub config_path: Option<PathBuf>,
+    /// The config folder, also holding the caches and the log.
+    pub state_dir: Option<PathBuf>,
+    /// Launch folder: only where the Local panel starts (and `b` returns to).
     pub base: PathBuf,
     pub focus: Focus,
     prev_focus: Focus,
@@ -295,7 +298,9 @@ impl App {
         user: Option<String>,
         offline: bool,
     ) -> App {
-        let cache = Cache::load(&base, &cfg.host);
+        let state_dir = config_path.as_ref().and_then(|p| p.parent()).map(PathBuf::from);
+        let user = user.filter(|u| !u.trim().is_empty());
+        let cache = Cache::load_startup(state_dir.as_deref(), &cfg.host, user.as_deref(), &base);
         let mut app = App {
             poll_mode: cfg.poll_mode,
             show_test: cfg.show_test,
@@ -303,6 +308,7 @@ impl App {
             include_logs: cfg.include_logs,
             local: LocalPanel::new(base.clone()),
             config_path,
+            state_dir,
             base,
             focus: Focus::Alba,
             prev_focus: Focus::Alba,
@@ -339,18 +345,22 @@ impl App {
             quit: false,
             cfg,
         };
-        app.console
-            .open_log(&crate::cache::state_dir(&app.base).join("amanece.log"));
+        if let Some(dir) = &app.state_dir {
+            app.console.open_log(&Config::log_path(dir));
+        }
         app.console.push(
             LineKind::Info,
             format!(
-                "amanece {} · base {} · press ? for keys",
+                "amanece {} · local folder {} · press ? for keys",
                 env!("CARGO_PKG_VERSION"),
                 app.base.display()
             ),
         );
-        if let Some(p) = &app.config_path {
-            app.console.push(LineKind::Info, format!("config: {}", p.display()));
+        if let Some(dir) = &app.state_dir {
+            app.console.push(
+                LineKind::Info,
+                format!("config, cache and log: {}", dir.display()),
+            );
         }
         if !app.cache.dates.is_empty() {
             app.console.push(
@@ -388,6 +398,36 @@ impl App {
             busy: false,
             error: None,
         }));
+    }
+
+    /// After a login: switch to that account's cache, or claim the one shown before
+    /// logging in (empty, or carried over from an old version's `.amanece/` folder).
+    fn use_account_cache(&mut self, user: &str) {
+        let key = crate::cache::account_key(user, &self.cfg.host);
+        match self.cache.account.as_deref() {
+            Some(k) if k == key => {}
+            None => {
+                self.cache.account = Some(key);
+                self.cache_dirty = true;
+            }
+            Some(_) => {
+                self.save_cache();
+                self.cache = Cache::load_account(self.state_dir.as_deref(), &self.cfg.host, &key);
+                self.alba_date = None;
+                self.alba_sel = 0;
+                self.stats_sel = 0;
+                self.marks.clear();
+                self.frame_marks.clear();
+                self.pending_notify.clear();
+                self.listed_this_session.clear();
+                self.last_rescan.clear();
+                self.scanning.clear();
+                self.experiments_listed = false;
+                let n = self.cache.dates.len();
+                self.console
+                    .push(LineKind::Info, format!("another account: its cached listing has {n} beamtimes"));
+            }
+        }
     }
 
     pub fn info(&self, date: &str, sample: &str) -> Option<&SampleInfo> {
@@ -562,7 +602,9 @@ impl App {
     }
 
     pub fn save_cache(&mut self) {
-        if let Err(e) = self.cache.save(&self.base) {
+        if let Some(dir) = &self.state_dir
+            && let Err(e) = self.cache.save(dir)
+        {
             self.console
                 .push(LineKind::Error, format!("cannot save cache: {e}"));
         }
@@ -616,6 +658,7 @@ impl App {
                 if matches!(self.dialog, Some(Dialog::Login(_))) {
                     self.dialog = None;
                 }
+                self.use_account_cache(&user);
                 match host_key {
                     HostKey::Added { fingerprint } => self.console.push(
                         LineKind::Info,
@@ -1145,7 +1188,7 @@ impl App {
         }
     }
 
-    /// Records the click; `true` when it completes a double-click with the previous one.
+    /// Records the click; `true` when it completes a double click with the previous one.
     fn register_click(&mut self, p: Position) -> bool {
         let now = Instant::now();
         let double = self.last_click.is_some_and(|(t, x, y)| {

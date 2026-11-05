@@ -1,8 +1,9 @@
-//! `config.toml` in the user config dir. Never holds credentials.
+//! `config.toml` in the user config dir. Never holds credentials. The same folder
+//! holds amanece's other files: `known_hosts`, the caches and `amanece.log`.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Polls never run more often than this, whatever the config says.
@@ -150,6 +151,11 @@ impl Config {
             }
         }
         Some(dir)
+    }
+
+    /// Console log, mirrored line by line.
+    pub fn log_path(dir: &Path) -> PathBuf {
+        dir.join("amanece.log")
     }
 
     pub fn known_hosts_path() -> Option<PathBuf> {

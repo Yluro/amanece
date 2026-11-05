@@ -206,7 +206,8 @@ Gotchas:
 3. **One request queue**, processed sequentially, rate-limited (3 req/s sustained, burst 6; config can lower it, never above 5 req/s). Scanning one sample costs ≈ 26 requests (~7 s); the status bar shows the running total.
 4. **Lazy:** login lists `/` (1 request). Expanding a date lists its `RESULTS/` (1). Selecting a sample discovers its
    solves and fetches their stats XMLs (≈ 10–15 requests, ~60 KB). "Fetch all stats" walks samples at ≤ 1 sample / 3 s.
-5. **Cache** in `<base>/.amanece/cache.json`. Finished solves never change, so their stats are never fetched again.
+5. **Cache** in the config dir, one `cache-<hash of user@host>.json` per account *(changed 2026-11-05; was
+   `<launch>/.amanece/cache.json`, still read once so an upgrade fetches nothing again)*. Finished solves never change, so their stats are never fetched again.
    Unfinished solves are re-checked only by polling (1 `stat` of the marker each).
 6. **Max 3 login attempts per launch**, then exit, to stay clear of lockouts.
 7. **Downloads**: at most `parallel_downloads` (default 3, max 4) frames at a time plus one HKL/log slot (§2.12),
@@ -248,7 +249,7 @@ Gotchas:
  poll: slow 10m (next 07:42) · ♪ on · queue 2 · ↓ 12.3 MB/s · ? help
 ```
 
-- **Local (left):** directory browser rooted at the launch dir but free to navigate; marks folders that hold
+- **Local (left):** directory browser that starts in the launch dir (its only use) and is free to navigate; marks folders that hold
   downloaded solves. Its current dir is the console's working dir.
 - **ALBA (middle):** dates → samples only. Per-sample glyphs: one per solve (✓ done, … running, ✗ failed).
 - **Stats (right):** solves of the selected sample (all runs), Enter on a row expands overall/inner/outer shells.
@@ -274,8 +275,9 @@ Keys (draft): `Tab`/`Shift-Tab` cycle panels · `↑↓`/`jk` move · `Enter` op
 src/
 ├── main.rs            CLI (clap), terminal setup/teardown, event loop
 ├── app.rs             App state, focus, key dispatch, messages from workers
-├── config.rs          %APPDATA%\amanece\config.toml (poll mode, sound, external_window…; never credentials)
-├── cache.rs           <base>/.amanece/cache.json
+├── config.rs          %APPDATA%\amanece\config\config.toml (poll mode, sound, external_window…; never credentials);
+│                      the same dir holds known_hosts, the caches and amanece.log
+├── cache.rs           <config dir>/cache-<account hash>.json
 ├── local.rs           local directory model
 ├── remote/
 │   ├── session.rs     russh connect + password/keyboard-interactive auth, TOFU host-key check
@@ -294,7 +296,7 @@ UI thread never blocks: workers talk to `App` over `tokio::mpsc` channels.
 
 Crates (pin current versions at implementation time): `ratatui` + `crossterm`, `tokio`, `russh` + `russh-sftp`
 (pure Rust, works on the MSVC toolchain, supports the server's ECDSA host key), `quick-xml`, `serde`/`serde_json`/`toml`,
-`regex`, `clap`, `directories`, `anyhow`, `tracing` (file log in `.amanece/`), `windows-sys` (sound).
+`regex`, `clap`, `directories`, `anyhow`, `tracing` (file log `amanece.log` in the config dir), `windows-sys` (sound).
 
 Data model sketch:
 

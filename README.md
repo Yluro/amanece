@@ -2,7 +2,8 @@
 
 Terminal UI for the ALBA BL13-XALOC/BL6-XAIRA autoprocessing results: browse your beamtimes over SFTP,
 compare the statistics of every solve (xia2chem, ednaproc, autoPROC, xia2), download the HKL
-files you pick into the folder you launched from, and run any commands (SHELXT, XPREP,...) on them.
+files you pick into the Local panel's folder (it starts where you launched it), and run any commands
+(SHELXT, XPREP,...) on them.
 
 Read-only, gentle and safe by design: one SFTP connection, rate-limited requests, and credentials are never stored. 
 See [DESIGN.md](DESIGN.md).
@@ -59,6 +60,8 @@ cd <folder where the data should go>
 amanece                    # or: amanece --user u2025xxxxxxx
 ```
 
+The launch folder is only where the Local panel starts; amanece writes none of its own files there.
+
 Each panel shows its keys on its bottom border; `?` lists them all. In short:
 
 - **Local** (left): browse folders, `N` makes a new folder, `Supr` moves the selected file or folder
@@ -90,10 +93,19 @@ sound, `q` quits (asks first).
 ## Files it writes locally
 
 - `.alba_source.json` in each download folder – which server file each download came from
-- `<launch folder>/.amanece/cache.json` – listings and stats already fetched
-- `<launch folder>/.amanece/amanece.log` – console log (useful for bug reports)
-- `%APPDATA%\amanece\config\config.toml` – settings (poll intervals, sound, `remote_root`, …)
-- `%APPDATA%\amanece\config\known_hosts` – the server's pinned host key
+
+Everything else goes in one folder, `%APPDATA%\amanece\config\` on Windows (`~/.config/amanece/`
+on Linux, `~/Library/Application Support/amanece/` on macOS).
+
+- `config.toml` – settings (poll intervals, sound, `remote_root`, …)
+- `known_hosts` – the server's pinned host key
+- `cache-<id>.json` – listings and stats already fetched, one file per account (`<id>` is a hash,
+  not the username)
+- `amanece.log` – console log (useful for bug reports)
+
+Older versions kept the cache and log in `.amanece/` inside the launch folder. amanece still reads
+an old cache from there (so nothing is fetched again) but never writes there. Once you have logged
+in with this version, you can delete those folders.
 
 ## Tests
 

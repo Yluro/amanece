@@ -21,8 +21,9 @@ use ratatui::crossterm::event as ct;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
-/// Browse ALBA BL13-XALOC autoprocessing results over SFTP and fetch HKL files
-/// into the current directory.
+/// Browse ALBA BL13-XALOC autoprocessing results over SFTP and fetch HKL files.
+/// The Local panel starts in the current directory; amanece's own files (config,
+/// cache, log) live in the user config folder, never in the current directory.
 #[derive(Parser)]
 #[command(version)]
 struct Args {
