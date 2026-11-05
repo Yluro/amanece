@@ -1090,6 +1090,11 @@ impl App {
             KeyCode::Char('n') => self.toggle_sound(),
             KeyCode::Char('L') => self.toggle_logs(),
             KeyCode::Char('O') => self.open_state_dir(),
+            KeyCode::Char('E') => {
+                let dir = self.local.cwd.clone();
+                open_with_default_app(&dir);
+                self.say(LineKind::Info, format!("opening {} in the file explorer", dir.display()));
+            }
             KeyCode::Char('t') => {
                 let prev = self.selected_row();
                 self.show_test = !self.show_test;

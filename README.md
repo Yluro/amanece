@@ -91,7 +91,8 @@ Each panel shows its keys on its bottom border; `?` lists them all. In short:
 
 `Tab` cycles panels, `p` cycles polling (manual → 10 min → 2 min → 30 s → 5 s; the fast rates only
 re-list the open beamtime, sample rescans stay at most once a minute), `n` toggles the new-sample
-sound, `O` opens amanece's own folder (config, cache, log), `q` quits (asks first).
+sound, `E` opens the Local folder in the file explorer, `O` opens amanece's own folder (config,
+cache, log), `q` quits (asks first).
 
 ## Files it writes locally
 
