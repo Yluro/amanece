@@ -370,7 +370,7 @@ impl App {
         if let Some(dir) = &app.state_dir {
             app.console.push(
                 LineKind::Info,
-                format!("config, cache and log: {}", dir.display()),
+                format!("config, cache and log: {} (O opens it)", dir.display()),
             );
         }
         if !app.cache.dates.is_empty() {
@@ -450,6 +450,18 @@ impl App {
                 self.console
                     .push(LineKind::Info, format!("another account: its cached listing has {n} beamtimes"));
             }
+        }
+    }
+
+    /// Opens the folder with config.toml, the caches and amanece.log in Explorer.
+    fn open_state_dir(&mut self) {
+        match self.state_dir.clone() {
+            Some(dir) => {
+                let _ = std::fs::create_dir_all(&dir);
+                open_with_default_app(&dir);
+                self.say(LineKind::Info, format!("opening {}", dir.display()));
+            }
+            None => self.say(LineKind::Warn, "no config folder (no user profile found)"),
         }
     }
 
@@ -1077,6 +1089,7 @@ impl App {
             KeyCode::Char('p') => self.cycle_poll(),
             KeyCode::Char('n') => self.toggle_sound(),
             KeyCode::Char('L') => self.toggle_logs(),
+            KeyCode::Char('O') => self.open_state_dir(),
             KeyCode::Char('t') => {
                 let prev = self.selected_row();
                 self.show_test = !self.show_test;

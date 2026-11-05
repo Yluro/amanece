@@ -91,14 +91,14 @@ Each panel shows its keys on its bottom border; `?` lists them all. In short:
 
 `Tab` cycles panels, `p` cycles polling (manual → 10 min → 2 min → 30 s → 5 s; the fast rates only
 re-list the open beamtime, sample rescans stay at most once a minute), `n` toggles the new-sample
-sound, `q` quits (asks first).
+sound, `O` opens amanece's own folder (config, cache, log), `q` quits (asks first).
 
 ## Files it writes locally
 
 - `.alba_source.json` in each download folder – which server file each download came from
 
 Everything else goes in one folder, `%APPDATA%\amanece\config\` on Windows (`~/.config/amanece/`
-on Linux, `~/Library/Application Support/amanece/` on macOS).
+on Linux, `~/Library/Application Support/amanece/` on macOS). Press `O` in the app to open it.
 
 - `config.toml` – settings (poll intervals, sound, `remote_root`, …)
 - `known_hosts` – the server's pinned host key

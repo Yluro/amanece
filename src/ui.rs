@@ -1181,6 +1181,7 @@ fn help_lines() -> Vec<Line<'static>> {
         row("L", "include logs in downloads on/off"),
         row("t", "show/hide samples named \"test…\" (test-shot-only samples are dimmed)"),
         row("X", "cancel queued downloads"),
+        row("O", "open amanece's folder (config.toml, cache, amanece.log)"),
         row("q", "quit"),
         sec("Local (left)"),
         row("Enter / →", "open folder        Backspace / ←  parent"),
