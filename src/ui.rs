@@ -1073,13 +1073,25 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                     Span::styled(format!(" {value:<36}"), style),
                 ])
             };
+            let tick = format!("[{}] Remember username", if l.remember { "x" } else { " " });
+            let tick_style = if l.field == 2 {
+                Style::new().fg(Color::White).bg(Color::Rgb(40, 60, 80))
+            } else {
+                Style::new().fg(Color::Gray)
+            };
+            let mut remember = vec![Span::raw(format!("  {:<10} ", "")), Span::styled(tick.clone(), tick_style)];
+            if l.field == 2 {
+                remember.push(Span::raw("  Space toggles").fg(Color::DarkGray));
+            }
             let mut lines = vec![
                 Line::from(format!("  {}:{}", app.cfg.host, app.cfg.port)).fg(Color::DarkGray),
                 Line::from(""),
                 field("Username", l.user.clone(), l.field == 0),
                 field("Password", "•".repeat(l.pass.chars().count()), l.field == 1),
-                Line::from(""),
+                Line::from(remember),
             ];
+            // the box itself is clickable
+            app.hit.borrow_mut().login_remember = Rect::new(r.x + 1 + 13, r.y + 5, tick.chars().count() as u16, 1);
             if l.busy {
                 lines.push(Line::from("  connecting…").yellow());
             } else if let Some(e) = &l.error {
@@ -1088,17 +1100,23 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                 lines.push(Line::from(""));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from("  Enter connect · Tab switch field · Esc work offline").fg(Color::DarkGray));
-            lines.push(Line::from("  Nothing is saved to disk.").fg(Color::DarkGray));
+            lines.push(Line::from("  Enter connect · Tab next field · Esc work offline").fg(Color::DarkGray));
+            let note = if l.remember {
+                "  Only the username is saved, never the password."
+            } else {
+                "  Nothing is saved to disk."
+            };
+            lines.push(Line::from(note).fg(Color::DarkGray));
             f.render_widget(
                 Paragraph::new(lines).block(dialog_block("Connect to ALBA")),
                 r,
             );
             if !l.busy {
-                let (y, len) = if l.field == 0 {
-                    (r.y + 3, l.user.chars().count())
-                } else {
-                    (r.y + 4, l.pass.chars().count())
+                let (y, len) = match l.field {
+                    0 => (r.y + 3, l.user.chars().count()),
+                    1 => (r.y + 4, l.pass.chars().count()),
+                    // inside the [ ]
+                    _ => (r.y + 5, 1),
                 };
                 f.set_cursor_position((r.x + 1 + 12 + 1 + len as u16, y));
             }
@@ -1760,6 +1778,31 @@ mod tests {
             }
         }
         panic!("{needle} not on screen");
+    }
+
+    #[test]
+    fn login_remember_box_renders_and_toggles_by_click() {
+        let base = std::env::temp_dir().join(format!("amanece_ui_login_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        app.dialog = Some(crate::app::Dialog::Login(crate::app::Login {
+            user: "u2025".into(),
+            pass: String::new(),
+            field: 1,
+            remember: false,
+            busy: false,
+            error: None,
+        }));
+        let screen = render(&app, 120, 40);
+        println!("{screen}");
+        assert!(screen.contains("[ ] Remember username") && screen.contains("Nothing is saved to disk."));
+        let (x, y) = find(&screen, "[ ] Remember");
+        click(&mut app, x + 1, y);
+        let screen = render(&app, 120, 40);
+        println!("{screen}");
+        assert!(screen.contains("[x] Remember username  Space toggles"));
+        assert!(screen.contains("Only the username is saved, never the password."));
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

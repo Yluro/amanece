@@ -67,7 +67,9 @@ pub enum Conn {
 pub struct Login {
     pub user: String,
     pub pass: String,
+    /// 0 username, 1 password, 2 the "remember username" box.
     pub field: usize,
+    pub remember: bool,
     pub busy: bool,
     pub error: Option<String>,
 }
@@ -157,6 +159,8 @@ pub struct Hit {
     pub badges: Vec<(Rect, Badge)>,
     /// Top-right corner of the screen: the hidden button.
     pub egg: Rect,
+    /// The login dialog's "remember username" box.
+    pub login_remember: Rect,
 }
 
 pub struct Active {
@@ -235,7 +239,7 @@ pub fn clock(secs: f64) -> String {
 pub struct App {
     pub cfg: Config,
     pub config_path: Option<PathBuf>,
-    /// The config folder, also holding the caches and the log.
+    /// The config folder, also holding the caches, the log and the remembered username.
     pub state_dir: Option<PathBuf>,
     /// Launch folder: only where the Local panel starts (and `b` returns to).
     pub base: PathBuf,
@@ -246,6 +250,9 @@ pub struct App {
     pub egg: Option<Egg>,
     pub conn: Conn,
     pub login_attempts: u32,
+    /// Prefills the login dialog: `--user`, the remembered one, or the last login.
+    last_user: Option<String>,
+    remember_user: bool,
     pub local: LocalPanel,
     pub cache: Cache,
     cache_dirty: bool,
@@ -299,8 +306,10 @@ impl App {
         offline: bool,
     ) -> App {
         let state_dir = config_path.as_ref().and_then(|p| p.parent()).map(PathBuf::from);
-        let user = user.filter(|u| !u.trim().is_empty());
-        let cache = Cache::load_startup(state_dir.as_deref(), &cfg.host, user.as_deref(), &base);
+        let remembered = state_dir.as_deref().and_then(crate::config::remembered_user);
+        let remember_user = remembered.is_some();
+        let last_user = user.filter(|u| !u.trim().is_empty()).or(remembered);
+        let cache = Cache::load_startup(state_dir.as_deref(), &cfg.host, last_user.as_deref(), &base);
         let mut app = App {
             poll_mode: cfg.poll_mode,
             show_test: cfg.show_test,
@@ -316,6 +325,8 @@ impl App {
             egg: None,
             conn: Conn::Offline,
             login_attempts: 0,
+            last_user,
+            remember_user,
             cache,
             cache_dirty: false,
             cache_saved: Instant::now(),
@@ -372,7 +383,7 @@ impl App {
             app.console
                 .push(LineKind::Info, "offline mode: press C to connect");
         } else {
-            app.open_login(user.unwrap_or_default());
+            app.open_login();
         }
         app
     }
@@ -389,15 +400,27 @@ impl App {
         matches!(self.conn, Conn::Connected(_))
     }
 
-    fn open_login(&mut self, user: String) {
+    fn open_login(&mut self) {
+        let user = self.last_user.clone().unwrap_or_default();
         let field = if user.is_empty() { 0 } else { 1 };
         self.dialog = Some(Dialog::Login(Login {
             user,
             pass: String::new(),
             field,
+            remember: self.remember_user,
             busy: false,
             error: None,
         }));
+    }
+
+    /// Saves (`Some`) or forgets (`None`) the username for the next login dialog.
+    fn remember_login(&mut self, user: Option<&str>) {
+        let Some(dir) = self.state_dir.clone() else {
+            return;
+        };
+        if let Err(e) = crate::config::remember_user(&dir, user) {
+            self.say(LineKind::Warn, format!("cannot update the remembered username: {e}"));
+        }
     }
 
     /// After a login: switch to that account's cache, or claim the one shown before
@@ -655,9 +678,14 @@ impl App {
                 let first = !matches!(self.conn, Conn::Reconnecting(_));
                 self.conn = Conn::Connected(user.clone());
                 self.alba_note = None;
-                if matches!(self.dialog, Some(Dialog::Login(_))) {
+                if let Some(Dialog::Login(l)) = &self.dialog {
+                    let remember = l.remember;
                     self.dialog = None;
+                    if remember {
+                        self.remember_login(Some(&user));
+                    }
                 }
+                self.last_user = Some(user.clone());
                 self.use_account_cache(&user);
                 match host_key {
                     HostKey::Added { fingerprint } => self.console.push(
@@ -1068,7 +1096,7 @@ impl App {
                 } else if self.login_attempts >= MAX_LOGIN_ATTEMPTS {
                     self.say(LineKind::Error, "too many failed logins this session");
                 } else {
-                    self.open_login(String::new());
+                    self.open_login();
                 }
             }
             _ => match self.focus {
@@ -1110,6 +1138,15 @@ impl App {
             return;
         }
         if self.dialog.is_some() {
+            let p = Position::new(m.column, m.row);
+            if clicked
+                && let Some(Dialog::Login(l)) = &mut self.dialog
+                && !l.busy
+                && self.hit.borrow().login_remember.contains(p)
+            {
+                l.remember = !l.remember;
+                l.field = 2;
+            }
             return;
         }
         let hit = self.hit.borrow().clone();
@@ -1124,7 +1161,7 @@ impl App {
                         Badge::Logs => self.toggle_logs(),
                         Badge::Conn => {
                             if !self.connected() && self.login_attempts < MAX_LOGIN_ATTEMPTS {
-                                self.open_login(String::new());
+                                self.open_login();
                             }
                         }
                     }
@@ -1263,7 +1300,9 @@ impl App {
                         );
                         return;
                     }
-                    KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => l.field = 1 - l.field,
+                    KeyCode::Tab | KeyCode::Down => l.field = (l.field + 1) % 3,
+                    KeyCode::BackTab | KeyCode::Up => l.field = (l.field + 2) % 3,
+                    KeyCode::Char(' ') if l.field == 2 => l.remember = !l.remember,
                     KeyCode::Enter => {
                         if l.field == 0 && !l.user.is_empty() {
                             l.field = 1;
@@ -1271,26 +1310,26 @@ impl App {
                             l.busy = true;
                             l.error = None;
                             self.conn = Conn::Connecting;
+                            self.remember_user = l.remember;
+                            if !l.remember {
+                                self.remember_login(None);
+                            }
                             self.remote.send(RemoteCmd::Connect {
                                 user: l.user.trim().to_string(),
                                 password: std::mem::take(&mut l.pass),
                             });
                         }
                     }
-                    KeyCode::Backspace => {
-                        if l.field == 0 {
-                            l.user.pop();
-                        } else {
-                            l.pass.pop();
-                        }
-                    }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if l.field == 0 {
-                            l.user.push(c);
-                        } else {
-                            l.pass.push(c);
-                        }
-                    }
+                    KeyCode::Backspace => match l.field {
+                        0 => _ = l.user.pop(),
+                        1 => _ = l.pass.pop(),
+                        _ => {}
+                    },
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => match l.field {
+                        0 => l.user.push(c),
+                        1 => l.pass.push(c),
+                        _ => {}
+                    },
                     _ => {}
                 }
                 self.dialog = Some(Dialog::Login(l));
@@ -2250,5 +2289,119 @@ mod poll_tests {
         app.on_remote(poll());
         assert!(!app.scanning.contains(&key));
         std::fs::remove_dir_all(&base).ok();
+    }
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+
+    fn app_in(root: &std::path::Path, user: Option<String>) -> (App, tokio::runtime::Runtime) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let remote = crate::remote::spawn(
+            &rt,
+            crate::remote::Settings {
+                host: "127.0.0.1".into(),
+                port: 1,
+                rate: 1.0,
+                burst: 1,
+                known_hosts: None,
+                beamlines: vec!["bl13".into()],
+                remote_root: None,
+                parallel_downloads: 3,
+            },
+            tx.clone(),
+        );
+        let cfg = Config {
+            host: "127.0.0.1".into(),
+            ..Config::default()
+        };
+        let cfg_path = Some(root.join("config").join("config.toml"));
+        let app = App::new(cfg, cfg_path, root.join("launch"), remote, tx, user, false);
+        (app, rt)
+    }
+
+    fn connected(user: &str) -> RemoteEvent {
+        RemoteEvent::Connected {
+            user: user.into(),
+            host_key: HostKey::Known,
+            root: "/".into(),
+        }
+    }
+
+    fn typed(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+    }
+
+    fn login(app: &App) -> &Login {
+        match &app.dialog {
+            Some(Dialog::Login(l)) => l,
+            _ => panic!("no login dialog"),
+        }
+    }
+
+    #[test]
+    fn state_lives_in_the_config_folder_and_username_is_opt_in() {
+        let root = std::env::temp_dir().join(format!("amanece_login_flow_{}", std::process::id()));
+        let config = root.join("config");
+        let launch = root.join("launch");
+        std::fs::create_dir_all(&launch).unwrap();
+
+        // first run: nothing remembered; tick the box and log in as ua
+        let (mut app, _rt) = app_in(&root, None);
+        assert_eq!(login(&app).user, "");
+        assert!(!login(&app).remember);
+        typed(&mut app, "ua");
+        app.on_key(KeyEvent::from(KeyCode::Tab));
+        typed(&mut app, "p w");
+        app.on_key(KeyEvent::from(KeyCode::Tab));
+        typed(&mut app, " x");
+        assert!(login(&app).remember);
+        assert_eq!(login(&app).pass, "p w");
+        app.on_remote(connected("ua"));
+        assert!(app.dialog.is_none());
+        assert_eq!(crate::config::remembered_user(&config).as_deref(), Some("ua"));
+        let a = crate::cache::account_key("ua", "127.0.0.1");
+        assert_eq!(app.cache.account.as_deref(), Some(a.as_str()));
+        app.cache.set_dates(vec!["20251211".into()]);
+        app.save_cache();
+        assert!(config.join(format!("cache-{a}.json")).exists());
+        assert!(config.join("amanece.log").exists());
+
+        // another account in the same session gets its own (empty) cache
+        app.on_remote(connected("ub"));
+        assert!(app.cache.dates.is_empty());
+        assert_ne!(app.cache.account.as_deref(), Some(a.as_str()));
+        app.shutdown();
+        drop(app);
+
+        // next launch: prefilled, ticked, and ua's cache shown before login
+        let (mut app, _rt2) = app_in(&root, None);
+        assert_eq!(login(&app).user, "ua");
+        assert_eq!(login(&app).field, 1);
+        assert!(login(&app).remember);
+        assert_eq!(app.cache.dates, vec!["20251211"]);
+        // unticking forgets it as soon as the login is sent
+        app.on_key(KeyEvent::from(KeyCode::Tab));
+        app.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.on_key(KeyEvent::from(KeyCode::BackTab));
+        typed(&mut app, "pw");
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(login(&app).busy);
+        assert_eq!(crate::config::remembered_user(&config), None);
+        app.shutdown();
+
+        // --user still wins over a remembered name
+        crate::config::remember_user(&config, Some("ua")).unwrap();
+        let (app, _rt3) = app_in(&root, Some("uc".into()));
+        assert_eq!(login(&app).user, "uc");
+
+        // nothing was ever written into the launch folder
+        assert_eq!(std::fs::read_dir(&launch).unwrap().count(), 0);
+        drop(app);
+        std::fs::remove_dir_all(&root).ok();
     }
 }

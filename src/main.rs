@@ -27,7 +27,7 @@ use std::time::Duration;
 #[derive(Parser)]
 #[command(version)]
 struct Args {
-    /// Prefill the login username (nothing is ever stored)
+    /// Prefill the login username (overrides a remembered one; this flag stores nothing)
     #[arg(long)]
     user: Option<String>,
     /// SFTP host (default from config: userdata.cells.es)

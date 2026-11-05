@@ -1,5 +1,6 @@
 //! `config.toml` in the user config dir. Never holds credentials. The same folder
-//! holds amanece's other files: `known_hosts`, the caches and `amanece.log`.
+//! holds amanece's other files: `known_hosts`, the caches, `amanece.log` and, only
+//! when "remember username" is ticked at login, `login.toml` with the username.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -203,9 +204,60 @@ impl Config {
     }
 }
 
+const LOGIN_FILE: &str = "login.toml";
+
+#[derive(Serialize, Deserialize)]
+struct Remembered {
+    user: String,
+}
+
+/// The username saved by the login dialog's "remember username" box.
+pub fn remembered_user(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(LOGIN_FILE)).ok()?;
+    toml::from_str::<Remembered>(&text)
+        .ok()
+        .map(|r| r.user.trim().to_string())
+        .filter(|u| !u.is_empty())
+}
+
+/// Saves `Some(user)` for the next login dialog, or forgets the saved one (`None`).
+/// Only ever the username: the password is never written anywhere.
+pub fn remember_user(dir: &Path, user: Option<&str>) -> std::io::Result<()> {
+    let path = dir.join(LOGIN_FILE);
+    match user {
+        Some(user) => {
+            std::fs::create_dir_all(dir)?;
+            let body = toml::to_string(&Remembered { user: user.to_string() }).unwrap_or_default();
+            std::fs::write(
+                path,
+                format!(
+                    "# Written by amanece because \"remember username\" was ticked at login.\n\
+                     # Only the username, never the password. Untick the box to remove this file.\n{body}"
+                ),
+            )
+        }
+        None => match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remembers_and_forgets_the_username() {
+        let dir = std::env::temp_dir().join(format!("amanece_login_{}", std::process::id()));
+        assert_eq!(remembered_user(&dir), None);
+        remember_user(&dir, Some("u2025\"x")).unwrap();
+        assert_eq!(remembered_user(&dir).as_deref(), Some("u2025\"x"));
+        remember_user(&dir, None).unwrap();
+        remember_user(&dir, None).unwrap();
+        assert_eq!(remembered_user(&dir), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn template_parses_to_defaults() {

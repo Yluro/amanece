@@ -5,7 +5,8 @@ compare the statistics of every solve (xia2chem, ednaproc, autoPROC, xia2), down
 files you pick into the Local panel's folder (it starts where you launched it), and run any commands
 (SHELXT, XPREP,...) on them.
 
-Read-only, gentle and safe by design: one SFTP connection, rate-limited requests, and credentials are never stored. 
+Read-only, gentle and safe by design: one SFTP connection, rate-limited requests, and the password is
+never stored (the username only if you tick "Remember username" at login). 
 See [DESIGN.md](DESIGN.md).
 
 ## Installation
@@ -61,6 +62,8 @@ amanece                    # or: amanece --user u2025xxxxxxx
 ```
 
 The launch folder is only where the Local panel starts; amanece writes none of its own files there.
+Tick **Remember username** in the login dialog (`Tab` to it, `Space`, or click) to have the username
+prefilled next time. Only the username is saved, in `login.toml`; untick the box to forget it.
 
 Each panel shows its keys on its bottom border; `?` lists them all. In short:
 
@@ -102,6 +105,7 @@ on Linux, `~/Library/Application Support/amanece/` on macOS).
 - `cache-<id>.json` – listings and stats already fetched, one file per account (`<id>` is a hash,
   not the username)
 - `amanece.log` – console log (useful for bug reports)
+- `login.toml` – the username, only while "Remember username" is ticked
 
 Older versions kept the cache and log in `.amanece/` inside the launch folder. amanece still reads
 an old cache from there (so nothing is fetched again) but never writes there. Once you have logged

@@ -220,7 +220,7 @@ Gotchas:
 
 | Topic | Decision |
 |---|---|
-| Login | Dialog asks username + password at every launch. **Nothing is stored.** Try to connect; on failure show the error and re-prompt (max 3). `--user` flag may prefill the username. |
+| Login | Dialog asks username + password at every launch. **The password is never stored.** *(changed 2026-11-05)* A "Remember username" box, off by default, saves only the username in `<config dir>/login.toml` after a successful login; unticking it deletes the file. Try to connect; on failure show the error and re-prompt (max 3). `--user` flag may prefill the username. |
 | What to download | The stats panel lists **every solve** with its statistics; the user marks which to download. HKL files: xia2chem `shelxt.hkl`+`.ins`, ednaproc `ep_XDS_ASCII.HKL`, autoPROC `XDS_ASCII.HKL` (anom/noanom). Logs are an optional toggle. |
 | Local layout | *(changed 2026-10-23)* `<sample>/<program>/` inside the folder open in the Local panel, like the old notebook: `JSG285b/xia2chem_r3/`, `…/ednaproc_r3/`, `…/autoproc_noanom_r3/`, `…/frames_r3/`, with the server's file names. Already inside a folder named after the sample: no second level. A program folder holding files from another beamtime gets `<folder>_<date>`; nothing is overwritten. `.alba_source.json` in each program folder records the origin. |
 | Console | *(changed 2026-10-23)* A terminal: console programs run in a Windows pseudo-console (ConPTY via `portable-pty`, screen kept by `vt100`), so interactive programs such as SADABS work; while one runs, each typed line + Enter is its answer, Ctrl-C interrupts (twice: kill), and its output stays in the log as text when it exits. A bare program name gets the selected file (`xprep XDS_ASCII.HKL`, `shelxt <name>`). Windows GUI programs (XPREP) start directly in their own window. |
@@ -276,7 +276,7 @@ src/
 ├── main.rs            CLI (clap), terminal setup/teardown, event loop
 ├── app.rs             App state, focus, key dispatch, messages from workers
 ├── config.rs          %APPDATA%\amanece\config\config.toml (poll mode, sound, external_window…; never credentials);
-│                      the same dir holds known_hosts, the caches and amanece.log
+│                      the same dir holds known_hosts, the caches, amanece.log and login.toml
 ├── cache.rs           <config dir>/cache-<account hash>.json
 ├── local.rs           local directory model
 ├── remote/
@@ -323,7 +323,7 @@ struct Shell      { d_low: f64, d_high: f64, completeness: f64, multiplicity: f6
 
 ## 9. Still open (defaults in brackets)
 
-1. Username: "never store it" read as *nothing* written to disk, with an optional `--user` flag. [yes]
+1. Username: "never store it" read as *nothing* written to disk, with an optional `--user` flag. [yes; since 2026-11-05 also an opt-in "Remember username" box]
 2. Sound only on a new named sample, or also when its first solve finishes (~10–15 min later)? [new sample only]
 3. xia2chem files: keep `shelxt.hkl/.ins` or rename to `<sample>.hkl/.ins`? [keep original names]
 4. Same sample name in two beamtimes (e.g. `MR8`): suffix the solve folder with `_<date>` on collision? [yes]
