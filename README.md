@@ -119,9 +119,12 @@ Each panel shows its keys on its bottom border; `?` lists them all. In short:
   downloading. If the connection drops, it reconnects and continues where each file stopped.
   Every frame is checked against the MD5 checksum stored in its own CBF header, both after it
   arrives and when one already in the folder is skipped; a frame that fails is downloaded again.
-  In the Cell section, **Similar cells** lists the samples whose cell matches (code, beamtime date,
-  space group and their own a b c α β γ), closest first, from the unit-cell database (see below): the closest 5,
-  then `+N more`. `c` (or a click on `+N more`) lists them all, `c` again only the closest 5. When
+  In the Cell section, **Similar cells** lists the samples whose cell matches, from the unit-cell
+  database (see below), closest first: code, beamtime date, space group, their own a b c α β γ and
+  `sim%`, which is 100 minus the largest difference in % of the edge (an angle off by
+  `cell_match_deg` counts like an edge off by `cell_match_pct`): 100 for the same cell, 98.5 at the
+  default match limit. Long sample names are cut (…) so each sample stays on one row. It lists the
+  closest 5, then `+N more`. `c` (or a click on `+N more`) lists them all, `c` again only the closest 5. When
   the panel is too short for the whole list, it says so; `z` makes room.
 - **Console**: a terminal (Windows ConPTY). `:` to type. Commands run in the Local folder and a
   bare program name gets the selected file: with `XDS_ASCII.HKL` selected, `xprep` runs

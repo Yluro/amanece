@@ -450,7 +450,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     let row = rows.get(app.stats_sel);
     let mut limit = if app.cell_hits_all { usize::MAX } else { CELL_HITS };
     let (sections, table_h) = loop {
-        let (sections, hits) = details_sections(app, &date, info, row, limit);
+        let (sections, hits) = details_sections(app, &date, info, row, limit, width);
         let need: u16 = sections.iter().map(|s| GAP + s.height(width)).sum();
         let table_h = table_need.min(total.saturating_sub(need).max(table_min)).min(total);
         let shown = hits.min(limit);
@@ -600,9 +600,10 @@ fn details_sections(
     info: &SampleInfo,
     row: Option<&StatsRow>,
     limit: usize,
+    width: u16,
 ) -> (Vec<Section>, usize) {
     match row {
-        Some(StatsRow::Solve { run, solve }) => solve_sections(app, date, info, *run, *solve, limit),
+        Some(StatsRow::Solve { run, solve }) => solve_sections(app, date, info, *run, *solve, limit, width),
         Some(StatsRow::Frames { run }) => (vec![frames_section(&info.runs[*run])], 0),
         None => (Vec::new(), 0),
     }
@@ -831,6 +832,7 @@ fn solve_sections(
     run: usize,
     solve: usize,
     limit: usize,
+    width: u16,
 ) -> (Vec<Section>, usize) {
     let r = &info.runs[run];
     let s = &r.solves[solve];
@@ -906,7 +908,7 @@ fn solve_sections(
         let skip = crate::cells::sample_key(date, &info.name);
         let found = app.cells.matches(c, st.space_group.as_deref(), app.cfg.cell_tolerance(), Some(&skip));
         hits = found.len();
-        cell_lines.extend(cell_hit_lines(app, &found, limit));
+        cell_lines.extend(cell_hit_lines(app, &found, limit, usize::from(width)));
     }
     let mut cell_sec = Section::new(rule_title("Cell"), cell_lines);
     if hits > CELL_HITS {
@@ -965,9 +967,10 @@ fn solve_sections(
     (sections, hits)
 }
 
-/// A blank line, `Similar cells: 7 hits, closest first`, a column header and one line per
-/// hit (code, date, SG, a b c α β γ) up to `limit`, and how many are left out.
-fn cell_hit_lines(app: &App, found: &[crate::cells::Match], limit: usize) -> Vec<Line<'static>> {
+/// A blank line, `Similar cells: 7 hits`, a column header and one row per hit up to
+/// `limit` (closest first: code, date, SG, a b c α β γ, % similarity), each fitted to
+/// `width` by cutting the sample name, and how many are left out.
+fn cell_hit_lines(app: &App, found: &[crate::cells::Match], limit: usize, width: usize) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from("")];
     if found.is_empty() {
         lines.push(
@@ -977,37 +980,41 @@ fn cell_hit_lines(app: &App, found: &[crate::cells::Match], limit: usize) -> Vec
         return lines;
     }
     let n = found.len();
-    let head = if n == 1 { "Similar cells: 1 hit".to_string() } else { format!("Similar cells: {n} hits, closest first") };
+    let head = if n == 1 { "Similar cells: 1 hit".to_string() } else { format!("Similar cells: {n} hits") };
     lines.push(Line::from(head).fg(Color::LightMagenta).bold());
     let shown = &found[..n.min(limit)];
-    let code_w = shown.iter().map(|m| m.entry.code.chars().count()).max().unwrap_or(0).clamp(2, 16);
-    let sg_w = shown
-        .iter()
-        .map(|m| m.entry.sg.as_deref().map_or(1, |s| s.chars().count()))
-        .max()
-        .unwrap_or(1)
-        .clamp(2, 10);
+    // compact symbols (P 21 21 21 → P212121) leave more room for the name
+    let sg = |m: &crate::cells::Match| m.entry.sg.as_deref().map_or_else(|| "–".to_string(), |s| s.replace(' ', ""));
+    let sg_w = shown.iter().map(|m| sg(m).chars().count()).max().unwrap_or(1).clamp(2, 10);
+    // everything after the name: date, SG, a b c, α β γ, sim%, one space before each
+    let fixed = 9 + 1 + sg_w + 3 * 7 + 3 * 6 + 6;
+    let longest = shown.iter().map(|m| m.entry.code.chars().count()).max().unwrap_or(0);
+    let code_w = longest.max(2).min(width.saturating_sub(fixed).max(4));
     lines.push(
         Line::from(format!(
-            "  {:<code_w$}  {:<8}  {:<sg_w$}  {:>6} {:>6} {:>6}  {:>5} {:>5} {:>5}",
-            "ID", "date", "SG", "a", "b", "c", "α", "β", "γ"
+            "{:<code_w$} {:<8} {:<sg_w$} {:>6} {:>6} {:>6} {:>5} {:>5} {:>5} {:>5}",
+            "ID", "date", "SG", "a", "b", "c", "α", "β", "γ", "sim%"
         ))
         .fg(Color::DarkGray),
     );
+    let tol = app.cfg.cell_tolerance();
     for m in shown {
         let e = m.entry;
         let c = e.cell;
         let mut spans = vec![
-            Span::raw(format!("  {:<code_w$}", e.code)).fg(Color::LightMagenta).bold(),
-            Span::raw(format!("  {:<8}", e.date)),
-            Span::raw(format!("  {:<sg_w$}", e.sg.as_deref().unwrap_or("–"))).fg(Color::Gray),
+            Span::raw(format!("{:<code_w$}", truncate(&e.code, code_w))).fg(Color::LightMagenta).bold(),
+            Span::raw(format!(" {:<8}", e.date)),
+            Span::raw(format!(" {:<sg_w$}", sg(m))).fg(Color::Gray),
             Span::raw(format!(
-                "  {:>6.2} {:>6.2} {:>6.2}  {:>5.1} {:>5.1} {:>5.1}",
+                " {:>6.2} {:>6.2} {:>6.2} {:>5.1} {:>5.1} {:>5.1}",
                 c[0], c[1], c[2], c[3], c[4], c[5]
             )),
+            Span::raw(format!(" {:>5.1}", m.similarity_pct(tol))).bold(),
         ];
-        if let Some(note) = &e.note {
-            spans.push(Span::raw(format!("  {note}")).fg(Color::DarkGray));
+        // a hand-added cell's note, in whatever room is left
+        let room = width.saturating_sub(code_w + fixed + 2);
+        if let Some(note) = e.note.as_deref().filter(|_| room >= 4) {
+            spans.push(Span::raw(format!("  {}", truncate(note, room))).fg(Color::DarkGray));
         }
         lines.push(Line::from(spans));
     }
@@ -2354,9 +2361,10 @@ mod tests {
         let screen = render(&app, 170, 52);
         println!("{screen}");
         assert!(screen.contains("Similar cells: 1 hit"), "{screen}");
-        assert!(screen.contains("  ID      date      SG        a      b      c      α     β     γ"), "{screen}");
-        assert!(screen.contains("  JSG270  20250704  P 4   28.50  28.45  14.39   90.0  90.0  90.0"), "{screen}");
-        assert!(!screen.contains("NOT-IT") && !screen.contains("JSG285b  20251211"));
+        assert!(screen.contains("┃ID     date     SG      a      b      c     α     β     γ  sim%"), "{screen}");
+        // the cell is 0.05 Å longer on a: 99.8 % similar
+        assert!(screen.contains("┃JSG270 20250704 P4  28.50  28.45  14.39  90.0  90.0  90.0  99.8"), "{screen}");
+        assert!(!screen.contains("NOT-IT") && !screen.contains("JSG285b 20251211"));
         // nothing to expand: no key hint on the rule
         assert!(!screen.contains("c all"));
 
@@ -2366,9 +2374,12 @@ mod tests {
         }
         let screen = render(&app, 170, 52);
         println!("{screen}");
-        let at = |s: &str, code: &str| s.lines().position(|l| l.contains(&format!("  {code}  "))).unwrap();
-        assert!(screen.contains("Similar cells: 9 hits, closest first") && screen.contains("c all 9"));
+        let at = |s: &str, code: &str| s.lines().position(|l| l.contains(&format!("┃{code} "))).unwrap();
+        assert!(screen.contains("Similar cells: 9 hits") && screen.contains("c all 9"));
+        assert!(!screen.contains("closest first"));
         assert!(at(&screen, "JSG300") < at(&screen, "JSG301") && at(&screen, "JSG301") < at(&screen, "JSG304"));
+        // the same cell is 100 % similar
+        assert!(screen.lines().nth(at(&screen, "JSG300")).unwrap().contains(" 100.0"));
         assert!(!screen.contains("JSG305") && !screen.contains("JSG270"));
         assert!(screen.contains("+4 more · c lists them all"), "{screen}");
 
@@ -2392,6 +2403,23 @@ mod tests {
         assert!(screen.contains("+3 more: no room, z folds the shells"), "{screen}");
         key(&mut app, 'z');
         assert!(render(&app, 170, 52).contains("JSG307"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn long_sample_names_are_cut_to_keep_one_row_per_cell() {
+        let base = std::env::temp_dir().join(format!("amanece_longname_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        let mut long = app.info("20251211", "JSG285b").unwrap().clone();
+        long.name = "Sample-20-02-recrystallised-from-THF".into();
+        app.cells.record("20260711", &long);
+        let screen = render(&app, 170, 52);
+        println!("{screen}");
+        let row = screen.lines().find(|l| l.contains("┃Sample-20-02")).unwrap();
+        // the name is cut, the rest of the row stays on its line
+        assert!(row.contains("…") && !row.contains("THF"), "{row}");
+        assert!(row.contains("20260711 P4  28.45  28.45  14.39  90.0  90.0  90.0 100.0┃"), "{row}");
         std::fs::remove_dir_all(&base).ok();
     }
 

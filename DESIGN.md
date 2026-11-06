@@ -283,7 +283,10 @@ Gotchas:
 - The details under the Stats table were one 12-line paragraph that cut off the HKL line. They are now
   sections, each a titled rule (`Borders::TOP`) and its lines: the solve (`<pipeline> · run N · status`: HKL
   and logs on one line, note, ★ ranking, the Rmeas footnote; the images go on its rule), Cell (the SG, then
-  `a: … Å  α: …°` per line, a blank line and `Similar cells` with a column header, one row per hit), ▾ Shells and
+  `a: … Å  α: …°` per line, a blank line and `Similar cells` with a column header, one row per hit: code, date,
+  SG without spaces, a b c α β γ and `sim%` = `Match::similarity_pct` = 100 − score × `cell_match_pct`, i.e. the
+  largest deviation in % of its edge with angles weighted by the tolerance ratio; the code is cut with `…` so the
+  row fits the panel and never wraps), ▾ Shells and
   ▾ checkCIF (one line per alert). A blank row (`GAP`) goes above each section. Frames rows get one
   `Raw frames · run N` section.
 - Heights: each section is 1 + its wrapped line count (`Paragraph::line_count`, which needs ratatui's

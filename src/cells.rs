@@ -106,6 +106,15 @@ pub struct Match<'a> {
     pub score: f64,
 }
 
+impl Match<'_> {
+    /// 100 minus the largest deviation in % of its edge, where an angle off by
+    /// `angle_deg` counts as much as an edge off by `length_pct`: 100 for the same cell,
+    /// 100 − `length_pct` (98.5 by default) at the match limit.
+    pub fn similarity_pct(&self, tol: Tolerance) -> f64 {
+        100.0 - self.score * tol.length_pct
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct CellDb {
     entries: Vec<Entry>,
@@ -570,6 +579,20 @@ mod tests {
 
     fn matches(a: [f64; 6], sa: &str, b: [f64; 6], sb: &str) -> bool {
         same_lattice(&reduce(a, Some(sa)).unwrap(), &reduce(b, Some(sb)).unwrap(), TOL).is_some()
+    }
+
+    #[test]
+    fn similarity_is_100_minus_the_largest_deviation() {
+        let p = reduce([10.0, 12.0, 15.0, 90.0, 100.0, 90.0], Some("P 21/c")).unwrap();
+        let same = same_lattice(&p, &p, TOL).unwrap();
+        // b 0.6 % longer: 99.4 %
+        let q = reduce([10.0, 12.072, 15.0, 90.0, 100.0, 90.0], Some("P 21/c")).unwrap();
+        let off = same_lattice(&p, &q, TOL).unwrap();
+        let e = Entry { code: "x".into(), date: String::new(), beamline: None, sg: None, cell: [0.0; 6], from: None, note: None };
+        let sim = |score| Match { entry: &e, score }.similarity_pct(TOL);
+        assert!((sim(same) - 100.0).abs() < 1e-9);
+        assert!((sim(off) - 99.4).abs() < 0.01, "{}", sim(off));
+        assert!((sim(1.0) - 98.5).abs() < 1e-9);
     }
 
     #[test]
