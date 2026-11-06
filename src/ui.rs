@@ -1084,25 +1084,40 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                 let color = if l.field == 0 { Color::Gray } else { Color::DarkGray };
                 user_row.spans.push(Span::raw(hint).fg(color));
             }
-            let tick = format!("[{}] Remember username", if l.remember { "x" } else { " " });
-            let tick_style = if l.field == 2 {
-                Style::new().fg(Color::White).bg(Color::Rgb(40, 60, 80))
-            } else {
-                Style::new().fg(Color::Gray)
+            let mut pass_row = field("Password", "•".repeat(l.pass.chars().count()), l.field == 1);
+            if l.stored_pass {
+                pass_row.spans.push(Span::raw(" saved").fg(Color::DarkGray));
+            }
+            // the two boxes, each clickable
+            let tick_row = |what: &str, on: bool, field: usize| {
+                let tick = format!("[{}] Remember {what}", if on { "x" } else { " " });
+                let style = if l.field == field {
+                    Style::new().fg(Color::White).bg(Color::Rgb(40, 60, 80))
+                } else {
+                    Style::new().fg(Color::Gray)
+                };
+                let width = tick.chars().count() as u16;
+                let mut spans = vec![Span::raw(format!("  {:<10} ", "")), Span::styled(tick, style)];
+                if l.field == field {
+                    spans.push(Span::raw("  Space toggles").fg(Color::DarkGray));
+                }
+                (Line::from(spans), width)
             };
-            let mut remember = vec![Span::raw(format!("  {:<10} ", "")), Span::styled(tick.clone(), tick_style)];
-            if l.field == 2 {
-                remember.push(Span::raw("  Space toggles").fg(Color::DarkGray));
+            let (remember_user, w_user) = tick_row("username", l.remember, 2);
+            let (remember_pass, w_pass) = tick_row("password", l.remember_pass, 3);
+            {
+                let mut hit = app.hit.borrow_mut();
+                hit.login_remember = Rect::new(r.x + 1 + 13, r.y + 5, w_user, 1);
+                hit.login_remember_pass = Rect::new(r.x + 1 + 13, r.y + 6, w_pass, 1);
             }
             let mut lines = vec![
                 Line::from(format!("  {}:{}", app.cfg.host, app.cfg.port)).fg(Color::DarkGray),
                 Line::from(""),
                 user_row,
-                field("Password", "•".repeat(l.pass.chars().count()), l.field == 1),
-                Line::from(remember),
+                pass_row,
+                remember_user,
+                remember_pass,
             ];
-            // the box itself is clickable
-            app.hit.borrow_mut().login_remember = Rect::new(r.x + 1 + 13, r.y + 5, tick.chars().count() as u16, 1);
             if l.busy {
                 lines.push(Line::from("  connecting…").yellow());
             } else if let Some(e) = &l.error {
@@ -1118,10 +1133,12 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                 _ => "  Enter connect · Tab next field · Esc work offline",
             };
             lines.push(Line::from(help).fg(Color::DarkGray));
-            let note = if l.remember {
-                "  Only the username is saved, never the password."
+            let note = if l.remember_pass {
+                format!("  The password goes to {}.", crate::secret::store_name())
+            } else if l.remember {
+                "  Only the username is saved, not the password.".to_string()
             } else {
-                "  Nothing is saved to disk."
+                "  Nothing is saved to disk.".to_string()
             };
             lines.push(Line::from(note).fg(Color::DarkGray));
             f.render_widget(
@@ -1133,7 +1150,8 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                     0 => (r.y + 3, l.user.chars().count()),
                     1 => (r.y + 4, l.pass.chars().count()),
                     // inside the [ ]
-                    _ => (r.y + 5, 1),
+                    2 => (r.y + 5, 1),
+                    _ => (r.y + 6, 1),
                 };
                 f.set_cursor_position((r.x + 1 + 12 + 1 + len as u16, y));
             }
@@ -1809,6 +1827,8 @@ mod tests {
             pass: String::new(),
             field: 1,
             remember: false,
+            remember_pass: false,
+            stored_pass: false,
             busy: false,
             error: None,
         }));
@@ -1820,8 +1840,20 @@ mod tests {
         let screen = render(&app, 120, 40);
         println!("{screen}");
         assert!(screen.contains("[x] Remember username  Space toggles"));
-        assert!(screen.contains("Only the username is saved, never the password."));
+        assert!(screen.contains("Only the username is saved, not the password."));
         assert!(!screen.contains("←→"), "no hint without saved names");
+        // the password box ticks the username one too, and says where the password goes
+        let (x, y) = find(&screen, "[ ] Remember password");
+        click(&mut app, x + 1, y);
+        let screen = render(&app, 120, 40);
+        println!("{screen}");
+        assert!(screen.contains("[x] Remember username") && screen.contains("[x] Remember password  Space toggles"));
+        assert!(screen.contains(&format!("The password goes to {}.", crate::secret::store_name())));
+        // and unticking the username unticks the password
+        let (x, y) = find(&screen, "[x] Remember username");
+        click(&mut app, x + 1, y);
+        let screen = render(&app, 120, 40);
+        assert!(screen.contains("[ ] Remember username") && screen.contains("[ ] Remember password"));
 
         // remembered names: the field says which one it is, ←→ picks another
         use ratatui::crossterm::event::{Event, KeyCode, KeyEvent};
@@ -1830,7 +1862,8 @@ mod tests {
         let screen = render(&app, 120, 40);
         println!("{screen}");
         assert!(screen.contains("←→ 2/2"));
-        key(&mut app, KeyCode::Tab); // from the box to the username
+        key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::Tab); // from the username box, past the password box, to the username
         key(&mut app, KeyCode::Right);
         let screen = render(&app, 120, 40);
         assert!(screen.contains("u2024") && screen.contains("←→ 1/2"));

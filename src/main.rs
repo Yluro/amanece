@@ -13,6 +13,7 @@ mod notify;
 mod pty;
 mod rank;
 mod remote;
+mod secret;
 mod ui;
 
 use anyhow::Result;

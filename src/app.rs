@@ -67,11 +67,42 @@ pub enum Conn {
 pub struct Login {
     pub user: String,
     pub pass: String,
-    /// 0 username, 1 password, 2 the "remember username" box.
+    /// 0 username, 1 password, 2 the "remember username" box, 3 "remember password".
     pub field: usize,
     pub remember: bool,
+    pub remember_pass: bool,
+    /// `pass` was filled in from the credential store, not typed.
+    pub stored_pass: bool,
     pub busy: bool,
     pub error: Option<String>,
+}
+
+const LOGIN_FIELDS: usize = 4;
+
+impl Login {
+    /// Space (or a click) on one of the two boxes. A password is only remembered
+    /// together with its username.
+    pub fn toggle(&mut self, field: usize) {
+        match field {
+            2 => {
+                self.remember = !self.remember;
+                self.remember_pass &= self.remember;
+            }
+            3 => {
+                self.remember_pass = !self.remember_pass;
+                self.remember |= self.remember_pass;
+            }
+            _ => {}
+        }
+    }
+
+    /// The username was edited: a password filled in from the store was the old name's.
+    fn user_edited(&mut self) {
+        if self.stored_pass {
+            self.pass.clear();
+            self.stored_pass = false;
+        }
+    }
 }
 
 pub enum Pending {
@@ -159,8 +190,9 @@ pub struct Hit {
     pub badges: Vec<(Rect, Badge)>,
     /// Top-right corner of the screen: the hidden button.
     pub egg: Rect,
-    /// The login dialog's "remember username" box.
+    /// The login dialog's "remember username" and "remember password" boxes.
     pub login_remember: Rect,
+    pub login_remember_pass: Rect,
 }
 
 pub struct Active {
@@ -408,31 +440,62 @@ impl App {
     }
 
     fn open_login(&mut self) {
-        let user = self.last_user.clone().unwrap_or_default();
-        let field = if user.is_empty() { 0 } else { 1 };
-        let remember = self.is_saved(&user);
-        self.dialog = Some(Dialog::Login(Login {
-            user,
+        let mut l = Login {
+            user: String::new(),
             pass: String::new(),
-            field,
-            remember,
+            field: 0,
+            remember: false,
+            remember_pass: false,
+            stored_pass: false,
             busy: false,
             error: None,
-        }));
+        };
+        self.fill_login(&mut l, self.last_user.clone().unwrap_or_default());
+        l.field = if l.user.is_empty() { 0 } else { 1 };
+        self.dialog = Some(Dialog::Login(l));
+    }
+
+    /// Puts `user` in the login dialog with its two boxes, and its saved password if
+    /// it has one (passwords are only kept for remembered usernames).
+    fn fill_login(&self, l: &mut Login, user: String) {
+        l.remember = self.is_saved(&user);
+        let stored = if l.remember {
+            crate::secret::load(&user, &self.cfg.host)
+        } else {
+            None
+        };
+        l.remember_pass = stored.is_some();
+        l.stored_pass = stored.is_some();
+        l.pass = stored.unwrap_or_default();
+        l.user = user;
     }
 
     fn is_saved(&self, user: &str) -> bool {
         self.saved_users.iter().any(|u| u == user.trim())
     }
 
-    /// Puts the username first in the remembered list (`keep`) or forgets it.
+    /// Puts the username first in the remembered list (`keep`) or forgets it. A name
+    /// that leaves the list (forgotten, or the oldest past the limit) takes its saved
+    /// password with it.
     fn remember_login(&mut self, user: &str, keep: bool) {
         let Some(dir) = self.state_dir.clone() else {
             return;
         };
         match crate::config::remember_user(&dir, user, keep) {
-            Ok(users) => self.saved_users = users,
+            Ok(users) => {
+                let gone: Vec<String> = self.saved_users.iter().filter(|u| !users.contains(u)).cloned().collect();
+                self.saved_users = users;
+                for u in gone {
+                    self.forget_password(&u);
+                }
+            }
             Err(e) => self.say(LineKind::Warn, format!("cannot update the remembered usernames: {e}")),
+        }
+    }
+
+    fn forget_password(&mut self, user: &str) {
+        if let Err(e) = crate::secret::forget(user, &self.cfg.host) {
+            self.say(LineKind::Warn, format!("cannot remove the saved password of {}: {e}", user.trim()));
         }
     }
 
@@ -448,8 +511,7 @@ impl App {
             (None, true) => 0,
             (None, false) => n - 1,
         };
-        l.user = self.saved_users[i].clone();
-        l.remember = true;
+        self.fill_login(l, self.saved_users[i].clone());
     }
 
     /// After a login: switch to that account's cache, or claim the one shown before
@@ -719,11 +781,23 @@ impl App {
                 let first = !matches!(self.conn, Conn::Reconnecting(_));
                 self.conn = Conn::Connected(user.clone());
                 self.alba_note = None;
-                if let Some(Dialog::Login(l)) = &self.dialog {
+                if let Some(Dialog::Login(l)) = &mut self.dialog {
                     let remember = l.remember;
+                    let save_pass = l.remember_pass && !l.stored_pass;
+                    let pass = std::mem::take(&mut l.pass);
                     self.dialog = None;
                     if remember {
                         self.remember_login(&user, true);
+                    }
+                    // only now that the server accepted it, and only for a remembered name
+                    if remember && save_pass && self.is_saved(&user) {
+                        match crate::secret::save(&user, &self.cfg.host, &pass) {
+                            Ok(()) => self.console.push(
+                                LineKind::Info,
+                                format!("password of {user} saved in {}", crate::secret::store_name()),
+                            ),
+                            Err(e) => self.say(LineKind::Warn, format!("cannot save the password: {e}")),
+                        }
                     }
                 }
                 self.last_user = Some(user.clone());
@@ -751,9 +825,15 @@ impl App {
                 }
             }
             RemoteEvent::ConnectFailed { auth, message } => {
+                let mut rejected = None;
                 if let Some(Dialog::Login(l)) = &mut self.dialog {
                     l.busy = false;
                     l.pass.clear();
+                    // a saved password that no longer works is dropped, never retried
+                    if auth && l.stored_pass {
+                        l.stored_pass = false;
+                        rejected = Some(l.user.trim().to_string());
+                    }
                     if auth {
                         self.login_attempts += 1;
                         if self.login_attempts >= MAX_LOGIN_ATTEMPTS {
@@ -779,6 +859,13 @@ impl App {
                 } else {
                     self.conn = Conn::Lost(message.clone());
                     self.say(LineKind::Error, format!("connection lost: {message}"));
+                }
+                if let Some(user) = rejected {
+                    self.forget_password(&user);
+                    self.console.push(
+                        LineKind::Warn,
+                        format!("the server rejected the saved password of {user}; it was removed, type the new one"),
+                    );
                 }
             }
             RemoteEvent::Disconnected { message } => {
@@ -1199,14 +1286,18 @@ impl App {
         }
         if self.dialog.is_some() {
             let p = Position::new(m.column, m.row);
-            // the "remember username" box; the saved list only changes when a login is sent
+            // the two "remember" boxes; nothing is saved or forgotten until a login is sent
             if clicked
                 && let Some(Dialog::Login(l)) = &mut self.dialog
                 && !l.busy
-                && self.hit.borrow().login_remember.contains(p)
             {
-                l.remember = !l.remember;
-                l.field = 2;
+                let hit = self.hit.borrow();
+                for (rect, field) in [(hit.login_remember, 2), (hit.login_remember_pass, 3)] {
+                    if rect.contains(p) {
+                        l.toggle(field);
+                        l.field = field;
+                    }
+                }
             }
             return;
         }
@@ -1364,13 +1455,15 @@ impl App {
                     KeyCode::Left | KeyCode::Right if l.field == 0 => {
                         self.cycle_saved_user(&mut l, key.code == KeyCode::Right)
                     }
-                    KeyCode::Tab | KeyCode::Down => l.field = (l.field + 1) % 3,
-                    KeyCode::BackTab | KeyCode::Up => l.field = (l.field + 2) % 3,
-                    KeyCode::Char(' ') if l.field == 2 => l.remember = !l.remember,
-                    // forget the saved name shown, without logging in
+                    KeyCode::Tab | KeyCode::Down => l.field = (l.field + 1) % LOGIN_FIELDS,
+                    KeyCode::BackTab | KeyCode::Up => l.field = (l.field + LOGIN_FIELDS - 1) % LOGIN_FIELDS,
+                    KeyCode::Char(' ') if l.field >= 2 => l.toggle(l.field),
+                    // forget the saved name shown (and its password), without logging in
                     KeyCode::Delete if l.field == 0 && self.is_saved(&l.user) => {
                         self.remember_login(&l.user, false);
                         l.remember = false;
+                        l.remember_pass = false;
+                        l.user_edited();
                     }
                     KeyCode::Enter => {
                         if l.field == 0 && !l.user.is_empty() {
@@ -1380,22 +1473,48 @@ impl App {
                             l.error = None;
                             self.conn = Conn::Connecting;
                             if !l.remember {
+                                // forgets its saved password too
                                 self.remember_login(&l.user, false);
+                            } else if !l.remember_pass && self.is_saved(&l.user) {
+                                self.forget_password(&l.user);
                             }
+                            // kept until the server answers only when it is to be saved
+                            let password = if l.remember_pass {
+                                l.pass.clone()
+                            } else {
+                                std::mem::take(&mut l.pass)
+                            };
                             self.remote.send(RemoteCmd::Connect {
                                 user: l.user.trim().to_string(),
-                                password: std::mem::take(&mut l.pass),
+                                password,
                             });
                         }
                     }
                     KeyCode::Backspace => match l.field {
-                        0 => _ = l.user.pop(),
+                        0 => {
+                            l.user.pop();
+                            l.user_edited();
+                        }
+                        // a saved password is replaced as a whole, not edited
+                        1 if l.stored_pass => {
+                            l.pass.clear();
+                            l.stored_pass = false;
+                        }
                         1 => _ = l.pass.pop(),
                         _ => {}
                     },
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => match l.field {
-                        0 => l.user.push(c),
-                        1 => l.pass.push(c),
+                        0 => {
+                            l.user.push(c);
+                            l.user_edited();
+                        }
+                        1 => {
+                            if l.stored_pass {
+                                l.pass.clear();
+                                l.stored_pass = false;
+                            }
+                            l.pass.push(c);
+                        }
                         _ => {}
                     },
                     _ => {}
@@ -2492,6 +2611,7 @@ mod login_tests {
         app.on_key(KeyEvent::from(KeyCode::Up));
         // playing with the box changes nothing on disk
         app.on_key(KeyEvent::from(KeyCode::BackTab));
+        app.on_key(KeyEvent::from(KeyCode::BackTab));
         assert_eq!(login(&app).field, 2);
         for _ in 0..3 {
             app.on_key(KeyEvent::from(KeyCode::Char(' ')));
@@ -2499,6 +2619,7 @@ mod login_tests {
         assert!(!login(&app).remember);
         assert_eq!(saved(), ["ub", "ua"]);
         // Del in the username field forgets the name shown, without logging in
+        app.on_key(KeyEvent::from(KeyCode::Tab));
         app.on_key(KeyEvent::from(KeyCode::Tab));
         app.on_key(KeyEvent::from(KeyCode::Delete));
         assert_eq!(saved(), ["ub"]);
@@ -2508,6 +2629,7 @@ mod login_tests {
         // a login sent with the box unticked forgets that name too
         app.on_key(KeyEvent::from(KeyCode::Right));
         assert_eq!((login(&app).user.as_str(), login(&app).remember), ("ub", true));
+        app.on_key(KeyEvent::from(KeyCode::BackTab));
         app.on_key(KeyEvent::from(KeyCode::BackTab));
         app.on_key(KeyEvent::from(KeyCode::Char(' ')));
         app.on_key(KeyEvent::from(KeyCode::BackTab));
@@ -2533,4 +2655,110 @@ mod login_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    #[test]
+    fn password_is_opt_in_and_kept_only_in_the_credential_store() {
+        let root = std::env::temp_dir().join(format!("amanece_pass_flow_{}", std::process::id()));
+        let config = root.join("config");
+        std::fs::create_dir_all(root.join("launch")).unwrap();
+        let host = "127.0.0.1";
+        let stored = || crate::secret::load("pa", host);
+        let key = |app: &mut App, k| app.on_key(KeyEvent::from(k));
+
+        // first run: "remember password" ticks the username box too; saved only once
+        // the server accepted it
+        let (mut app, _rt) = app_in(&root, None);
+        typed(&mut app, "pa");
+        key(&mut app, KeyCode::Tab);
+        typed(&mut app, "s3cret");
+        key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(login(&app).field, 3);
+        key(&mut app, KeyCode::Char(' '));
+        assert!(login(&app).remember && login(&app).remember_pass);
+        key(&mut app, KeyCode::Enter);
+        assert!(login(&app).busy);
+        assert_eq!(stored(), None);
+        app.on_remote(connected("pa"));
+        assert_eq!(stored().as_deref(), Some("s3cret"));
+        assert_eq!(crate::config::remembered_users(&config), ["pa"]);
+        app.save_cache();
+        app.shutdown();
+        drop(app);
+        // never in a file
+        for f in std::fs::read_dir(&config).unwrap().flatten() {
+            let text = String::from_utf8_lossy(&std::fs::read(f.path()).unwrap()).to_string();
+            assert!(!text.contains("s3cret"), "{}", f.path().display());
+        }
+
+        // next launch: filled in, Enter is enough. The server rejects it (changed
+        // password): it is removed and not tried again
+        let (mut app, _rt2) = app_in(&root, None);
+        {
+            let l = login(&app);
+            assert_eq!((l.user.as_str(), l.pass.as_str(), l.field), ("pa", "s3cret", 1));
+            assert!(l.stored_pass && l.remember_pass);
+        }
+        key(&mut app, KeyCode::Enter);
+        assert!(login(&app).busy);
+        app.on_remote(RemoteEvent::ConnectFailed {
+            auth: true,
+            message: "authentication failed".into(),
+        });
+        assert!(!login(&app).busy && login(&app).pass.is_empty() && !login(&app).stored_pass);
+        assert_eq!(stored(), None);
+        assert_eq!(app.login_attempts, 1);
+        // the new one, typed with the box still ticked, is saved on success
+        assert!(login(&app).remember_pass);
+        typed(&mut app, "n3w");
+        key(&mut app, KeyCode::Enter);
+        app.on_remote(connected("pa"));
+        assert_eq!(stored().as_deref(), Some("n3w"));
+        app.shutdown();
+        drop(app);
+
+        // editing the username drops the filled-in password; picking the name brings it back
+        let (mut app, _rt3) = app_in(&root, None);
+        assert_eq!(login(&app).pass, "n3w");
+        key(&mut app, KeyCode::BackTab);
+        typed(&mut app, "x");
+        assert_eq!((login(&app).user.as_str(), login(&app).pass.as_str()), ("pax", ""));
+        key(&mut app, KeyCode::Right);
+        assert_eq!((login(&app).user.as_str(), login(&app).pass.as_str()), ("pa", "n3w"));
+        // typing into a filled-in password replaces it as a whole
+        key(&mut app, KeyCode::Tab);
+        typed(&mut app, "q");
+        assert_eq!(login(&app).pass, "q");
+        assert!(!login(&app).stored_pass);
+        key(&mut app, KeyCode::Backspace);
+        // unticking only the password box and logging in deletes it, keeps the name
+        key(&mut app, KeyCode::BackTab);
+        key(&mut app, KeyCode::Right);
+        assert_eq!(login(&app).pass, "n3w");
+        for _ in 0..3 {
+            key(&mut app, KeyCode::Tab);
+        }
+        assert_eq!(login(&app).field, 3);
+        key(&mut app, KeyCode::Char(' '));
+        assert!(login(&app).remember && !login(&app).remember_pass);
+        key(&mut app, KeyCode::Enter);
+        assert!(login(&app).busy);
+        assert_eq!(stored(), None);
+        app.on_remote(connected("pa"));
+        assert_eq!(stored(), None);
+        assert_eq!(crate::config::remembered_users(&config), ["pa"]);
+        app.shutdown();
+        drop(app);
+
+        // Del in the username field forgets the name and its password
+        crate::secret::save("pa", host, "z").unwrap();
+        let (mut app, _rt4) = app_in(&root, None);
+        assert_eq!(login(&app).pass, "z");
+        key(&mut app, KeyCode::BackTab);
+        key(&mut app, KeyCode::Delete);
+        assert!(crate::config::remembered_users(&config).is_empty());
+        assert_eq!(stored(), None);
+        assert!(login(&app).pass.is_empty() && !login(&app).remember_pass);
+        drop(app);
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

@@ -5,8 +5,9 @@ compare the statistics of every solve (xia2chem, ednaproc, autoPROC, xia2), down
 files you pick into the Local panel's folder (it starts where you launched it), and run any commands
 (SHELXT, XPREP,...) on them.
 
-Read-only, gentle and safe by design: one SFTP connection, rate-limited requests, and the password is
-never stored (usernames only if you tick "Remember username" at login). 
+Read-only, gentle and safe by design: one SFTP connection, rate-limited requests, and nothing about
+your login is stored unless you tick a box: "Remember username" saves the username, "Remember
+password" puts the password in the system's credential store (never in a file). 
 See [DESIGN.md](DESIGN.md).
 
 ## Installation
@@ -38,10 +39,12 @@ Unpack it and put `amanece` (`amanece.exe`) somewhere on your `PATH`. Each archi
   `xattr -d com.apple.quarantine amanece`.
 - **Linux**: glibc 2.35 or newer (Ubuntu 22.04 / Debian 12 or newer; the binaries are built on Ubuntu 22.04).
   The C and C++ runtimes (`libc`, `libgcc_s`) are on every normal install; `xdg-open` is used to open files.
+  "Remember password" needs a Secret Service keyring (GNOME Keyring or KWallet, normal on a desktop);
+  without one the password just isn't saved.
 
 ### Build from source
 
-You need [Rust](https://rustup.rs) (stable, 1.85 or newer, the crate uses edition 2024) and a C/C++
+You need [Rust](https://rustup.rs) (stable, 1.88 or newer) and a C/C++
 toolchain, because some dependencies (`ring`) compile C code:
 
 - **Windows**: *Visual Studio Build Tools* (or Visual Studio) with the **Desktop development with C++**
@@ -66,6 +69,14 @@ Tick **Remember username** in the login dialog (`Tab` to it, `Space`, or click) 
 prefilled next time. Up to 10 usernames are remembered: the last one used is prefilled and `←`/`→` in
 the username field picks another. Only usernames are saved, in `login.toml`. To forget one, pick it
 and press `Del` (or log in with the box unticked).
+
+**Remember password** (off by default) also keeps that account's password, in Windows Credential
+Manager, the macOS Keychain or the Linux Secret Service, under the name `amanece`; next time it is
+filled in and `Enter` connects. It is saved only after the server accepted it. If the server ever
+rejects a saved password (someone changed it), amanece deletes it and asks you to type the new one,
+so it never retries a wrong password on its own. Untick the box and log in, or press `Del` on the
+name, to remove it. Anyone using your unlocked computer account can log in with it, so think twice
+on a shared machine.
 
 Each panel shows its keys on its bottom border; `?` lists them all. In short:
 
@@ -111,6 +122,8 @@ on Linux, `~/Library/Application Support/amanece/` on macOS). Press `O` in the a
   not the username)
 - `amanece.log` – console log (useful for bug reports)
 - `login.toml` – the usernames that have "Remember username" ticked
+
+Saved passwords are not in this folder: they are in the system's credential store (see above).
 
 Older versions kept the cache and log in `.amanece/` inside the launch folder. amanece still reads
 an old cache from there (so nothing is fetched again) but never writes there. Once you have logged
