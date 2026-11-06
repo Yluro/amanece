@@ -239,6 +239,29 @@ Gotchas:
   Checked against a real cache on 2026-11-06 (256 solves): completeness A alerts are mostly single
   sweeps (kappa 0) that a second sweep would fill.
 
+### 2.15 Unit-cell database (2026-11-06)
+
+- Feature idea "known-cell match": know at the beamline that a crystal is something already measured (a
+  starting material, a ligand, the same compound from an earlier beamtime) before spending time on it.
+- `cells.toml` in the config dir, one `[[cell]]` per sample: `code` (sample name), `date` (YYYYMMDD),
+  `beamline` (when the beamtime id has one), `sg`, `cell`, `from` (pipeline) and an optional `note`. The cell
+  is the ★ solve's (`rank::best`), else any finished solve with a cell; `test…` samples are left out. Filled
+  from what amanece already has: every `cache-*.json` at startup, then every scan (`App::store_info`). No
+  server requests.
+- Hand-added cells have no `from`; amanece never changes an entry without one (deleting the line takes an
+  entry over). Saving re-reads the file and only writes back the entries amanece changed since the last save,
+  so hand edits and a second window survive. A file that doesn't parse is never written (warning at startup).
+- Matching is by lattice, not by numbers: centring from the SG symbol's first letter (or ednaproc's `#n`,
+  through the list of centred groups), conventional → primitive cell, Křivý–Gruber Niggli reduction with the
+  epsilon handling of Grosse-Kunstleve et al. 2004. The reduced cell is unstable near its boundaries (angles
+  near 90°, equal edges), so `same_lattice` also tries every basis of the other lattice built from the 13
+  short vectors (coefficients −1..1, determinant ±1, all four sign patterns) and keeps the closest. Tolerances
+  `cell_match_pct` (1.5 % per edge) and `cell_match_deg` (2° per angle); 50 cells all-vs-all take ~0.1 ms.
+- On the real cache (50 samples) it paired JSG331 (20261023) with XAIRA's Sample-20-02 (20260711), SGX215
+  (Pca2₁) with SGX215b (P2₁2₁2, axes swapped), and the six P2₁3 a ≈ 21.8 Å samples with each other.
+- Stats shows `≈ same cell: CODE DATE SG, …  +N more` under the cell line, closest first, without the sample
+  itself; or a grey "no match" line with the database size.
+
 ## 3. Gentle-scraping rules (hard requirements)
 
 1. **Read-only by construction.** The SFTP wrapper type exposes only `read_dir`, `stat` and `open_read`.
@@ -320,6 +343,7 @@ src/
 │                      the same dir holds known_hosts, the caches, amanece.log and login.toml
 ├── cache.rs           <config dir>/cache-<account hash>.json
 ├── cbf.rs             miniCBF self-check: binary section vs its Content-MD5 (§2.13)
+├── cells.rs           unit-cell database <config dir>/cells.toml, Niggli reduction, lattice matching (§2.15)
 ├── checkcif.rs        checkCIF-style alerts from the overall shell (§2.14)
 ├── rank.rs            ★ best-solve score, its per-criterion breakdown and the ranking (§2.7, §2.14)
 ├── local.rs           local directory model

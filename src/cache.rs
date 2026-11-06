@@ -94,6 +94,21 @@ impl Cache {
         .unwrap_or_else(|| Self::fresh(host))
     }
 
+    /// Every account's saved cache in `dir` (for the unit-cell database).
+    pub fn load_all(dir: Option<&Path>, host: &str) -> Vec<Cache> {
+        let Some(entries) = dir.and_then(|d| std::fs::read_dir(d).ok()) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with("cache-") && n.ends_with(".json")
+            })
+            .filter_map(|e| Self::read(&e.path(), host))
+            .collect()
+    }
+
     /// Writes the cache into `dir`; a cache no login has claimed yet is not saved.
     pub fn save(&self, dir: &Path) -> Result<()> {
         let Some(key) = &self.account else {
@@ -173,6 +188,8 @@ mod tests {
         assert_eq!(Cache::load_account(Some(&dir), "h", &a).dates, vec!["20251211"]);
         assert!(Cache::load_account(Some(&dir), "other-host", &a).dates.is_empty());
         assert!(Cache::load_account(Some(&dir), "h", &account_key("ub", "h")).dates.is_empty());
+        assert_eq!(Cache::load_all(Some(&dir), "h").len(), 1);
+        assert!(Cache::load_all(Some(&dir), "other-host").is_empty());
         // before login: the named account's, else the latest one
         assert_eq!(Cache::load_startup(Some(&dir), "h", Some("ua"), &launch).dates, vec!["20251211"]);
         assert_eq!(Cache::load_startup(Some(&dir), "h", None, &launch).account, Some(a));

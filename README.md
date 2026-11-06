@@ -105,6 +105,8 @@ Each panel shows its keys on its bottom border; `?` lists them all. In short:
   downloading. If the connection drops, it reconnects and continues where each file stopped.
   Every frame is checked against the MD5 checksum stored in its own CBF header, both after it
   arrives and when one already in the folder is skipped; a frame that fails is downloaded again.
+  Under the cell, **≈ same cell** lists the samples (code and beamtime date, with their space group)
+  whose cell matches, closest first, from the unit-cell database (see below).
 - **Console**: a terminal (Windows ConPTY). `:` to type. Commands run in the Local folder and a
   bare program name gets the selected file: with `XDS_ASCII.HKL` selected, `xprep` runs
   `xprep XDS_ASCII.HKL`. Interactive console programs work: while SADABS (or any program) runs,
@@ -141,6 +143,13 @@ on Linux, `~/Library/Application Support/amanece/` on macOS). Press `O` in the a
   not the username)
 - `amanece.log` – console log (useful for bug reports)
 - `login.toml` – the usernames that have "Remember username" ticked
+- `cells.toml` – the unit-cell database: one entry per scanned sample (code, beamtime date, space
+  group and cell of its ★ solve), from every account's cache. Add your own cells (starting materials,
+  ligands, salts) as `[[cell]]` entries with a `code`, an `sg` and a `cell = [a, b, c, α, β, γ]`;
+  amanece only updates the entries that have a `from` line. Cells are compared as Niggli-reduced
+  primitive lattices, so other settings (P2₁/c vs P2₁/n, C2/c vs P-1, swapped axes) still match.
+  The tolerances are `cell_match_pct` (edges, default 1.5 %) and `cell_match_deg` (angles, 2°) in
+  `config.toml`.
 
 Saved passwords are not in this folder: they are in the system's credential store (see above).
 
