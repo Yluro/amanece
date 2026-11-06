@@ -186,12 +186,23 @@ pub enum Badge {
     Update,
 }
 
+/// Parts of the Stats details that fold or expand (`c`, `z`, or a click on their title).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatsToggle {
+    /// Every same-cell hit instead of the closest few.
+    CellHits,
+    /// The shells table and the checkCIF alerts.
+    Details,
+}
+
 /// Screen layout from the last frame (written by `ui::draw`).
 #[derive(Debug, Clone, Default)]
 pub struct Hit {
     pub local: ListHit,
     pub alba: ListHit,
     pub stats: ListHit,
+    /// Clickable section titles under the Stats table.
+    pub stats_toggles: Vec<(Rect, StatsToggle)>,
     pub console: Rect,
     pub console_cols: u16,
     pub badges: Vec<(Rect, Badge)>,
@@ -305,6 +316,10 @@ pub struct App {
     pub alba_date: Option<String>,
     pub alba_sel: usize,
     pub stats_sel: usize,
+    /// Stats details: list every same-cell hit, not just the closest few (`c`).
+    pub cell_hits_all: bool,
+    /// Stats details: shells and checkCIF folded to their title line (`z`).
+    pub fold_details: bool,
     /// Marked solves, by `Solve::key()` (contains the full remote path).
     pub marks: HashSet<String>,
     /// Frame-run checkbox overrides, keyed `date/sample/prefix_run`.
@@ -390,6 +405,8 @@ impl App {
             alba_date: None,
             alba_sel: 0,
             stats_sel: 0,
+            cell_hits_all: false,
+            fold_details: false,
             marks: HashSet::new(),
             frame_marks: HashMap::new(),
             console: Console::default(),
@@ -1544,7 +1561,9 @@ impl App {
                     }
                 } else if hit.stats.area.contains(p) {
                     self.set_focus(Focus::Stats);
-                    if let Some(i) = hit.stats.row_at(p).filter(|i| *i < self.stats_len()) {
+                    if let Some((_, t)) = hit.stats_toggles.iter().find(|(r, _)| r.contains(p)) {
+                        self.toggle_details(*t);
+                    } else if let Some(i) = hit.stats.row_at(p).filter(|i| *i < self.stats_len()) {
                         self.stats_sel = i;
                         if double || p.x < hit.stats.rows.x + 3 {
                             self.toggle_stats_row(false);
@@ -2096,8 +2115,17 @@ impl App {
             KeyCode::Char('d') => self.download_solves(&date, &info),
             KeyCode::Char('F') => self.request_frames(&date, &info),
             KeyCode::Char('s') => self.rescan_selected(),
+            KeyCode::Char('c') => self.toggle_details(StatsToggle::CellHits),
+            KeyCode::Char('z') => self.toggle_details(StatsToggle::Details),
             KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::Alba,
             _ => {}
+        }
+    }
+
+    fn toggle_details(&mut self, t: StatsToggle) {
+        match t {
+            StatsToggle::CellHits => self.cell_hits_all = !self.cell_hits_all,
+            StatsToggle::Details => self.fold_details = !self.fold_details,
         }
     }
 

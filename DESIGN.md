@@ -259,7 +259,7 @@ Gotchas:
   `cell_match_pct` (1.5 % per edge) and `cell_match_deg` (2° per angle); 50 cells all-vs-all take ~0.1 ms.
 - On the real cache (50 samples) it paired JSG331 (20261023) with XAIRA's Sample-20-02 (20260711), SGX215
   (Pca2₁) with SGX215b (P2₁2₁2, axes swapped), and the six P2₁3 a ≈ 21.8 Å samples with each other.
-- Stats shows `≈ same cell: CODE DATE SG, …  +N more` under the cell line, closest first, without the sample
+- Stats lists them under the cell as `Similar cells` (one row each: code, date, SG, a b c α β γ; §2.17), closest first, without the sample
   itself; or a grey "no match" line with the database size.
 
 ### 2.16 Version check and self-update (2026-11-06)
@@ -278,6 +278,24 @@ Gotchas:
   says `v… · restart`. Any failure before the swap leaves the old exe untouched.
 - Platforms without a release archive (or a release missing this platform's archive or `.sha256`) get the
   release page in the browser instead.
+### 2.17 Stats details in sections (2026-11-06)
+
+- The details under the Stats table were one 12-line paragraph that cut off the HKL line. They are now
+  sections, each a titled rule (`Borders::TOP`) and its lines: the solve (`<pipeline> · run N · status`: HKL
+  and logs on one line, note, ★ ranking, the Rmeas footnote; the images go on its rule), Cell (the SG, then
+  `a: … Å  α: …°` per line, a blank line and `Similar cells` with a column header, one row per hit), ▾ Shells and
+  ▾ checkCIF (one line per alert). A blank row (`GAP`) goes above each section. Frames rows get one
+  `Raw frames · run N` section.
+- Heights: each section is 1 + its wrapped line count (`Paragraph::line_count`, which needs ratatui's
+  `unstable-rendered-line-info` feature). The table gets its rows + header, the details stack right under
+  it, and spare rows stay at the bottom. When the details don't fit, the table gives up rows down to
+  `TABLE_MIN` (header + 5, it scrolls), then the hit list shrinks (down to 1) and says `+N more: no room`;
+  whatever still doesn't fit is cut at the bottom.
+- `App::cell_hits_all` (`c`): all hits instead of `CELL_HITS` = 5; the rule shows `c all N` / `c closest 5`
+  only when there are more than 5. `App::fold_details` (`z`): Shells and checkCIF keep only their rule; a
+  folded checkCIF rule carries the alert badges (or "no alert"). Both are session state, not saved.
+- Clicks: `Hit::stats_toggles` holds the rules of foldable sections and the Cell section's last line
+  (`+N more`), rebuilt every frame.
 
 ## 3. Gentle-scraping rules (hard requirements)
 

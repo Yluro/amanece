@@ -1,18 +1,18 @@
 //! Rendering. Reads `App`, never mutates it.
 
-use crate::app::{AlbaRow, App, Badge, Conn, Dialog, Focus, ListHit, StatsRow};
+use crate::app::{AlbaRow, App, Badge, Conn, Dialog, Focus, ListHit, StatsRow, StatsToggle};
 use crate::checkcif::{self, Check, Level};
 use crate::config::PollMode;
 use crate::layout;
 use crate::console::LineKind;
-use crate::model::{SampleInfo, Shell, Solve, Status, human_bytes};
+use crate::model::{Run, SampleInfo, Shell, Solve, Status, human_bytes};
 use crate::rank::{self, Criterion};
 use crate::update;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap};
 use std::time::Instant;
 
 const ACCENT: Color = Color::Cyan;
@@ -402,6 +402,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         area,
         ..ListHit::default()
     };
+    app.hit.borrow_mut().stats_toggles.clear();
     let selected = app.selected_row();
     let Some(AlbaRow::Sample { date, name }) = selected.clone() else {
         let block = panel(title("Stats", focused), focused, &[]);
@@ -415,7 +416,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     let block = panel(
         title(format!("{name} · {}", layout::beamtime_label(&date)), focused),
         focused,
-        &[("␣", "mark"), ("d", "download"), ("F", "frames")],
+        &[("␣", "mark"), ("d", "download"), ("F", "frames"), ("c", "cell hits"), ("z", "fold")],
     );
     let Some(info) = app.info(&date, &name) else {
         let scanning = app.scanning.contains(&(date.clone(), name.clone()));
@@ -440,9 +441,25 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         );
         return;
     }
-    let details_h = 12.min(inner.height.saturating_sub(4));
-    let [table_a, details_a] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(details_h)]).areas(inner);
+    // The table gets the rows it has (usually 5–10) and the details the rest. When they
+    // don't fit, the table shrinks to TABLE_MIN rows, then the same-cell list gets shorter;
+    // whatever still doesn't fit is cut at the bottom (`z` folds shells and checkCIF).
+    let (total, width) = (inner.height, inner.width);
+    let table_need = rows.len() as u16 + 1;
+    let table_min = table_need.min(TABLE_MIN);
+    let row = rows.get(app.stats_sel);
+    let mut limit = if app.cell_hits_all { usize::MAX } else { CELL_HITS };
+    let (sections, table_h) = loop {
+        let (sections, hits) = details_sections(app, &date, info, row, limit);
+        let need: u16 = sections.iter().map(|s| GAP + s.height(width)).sum();
+        let table_h = table_need.min(total.saturating_sub(need).max(table_min)).min(total);
+        let shown = hits.min(limit);
+        if need <= total - table_h || shown <= 1 {
+            break (sections, table_h);
+        }
+        limit = shown - 1;
+    };
+    let table_a = Rect { height: table_h, ..inner };
 
     let header = Row::new(
         ["", "Solve", "Run", "", "SG", "d_min", "Rmrg%", "CC½", "Cmpl%", "I/σ", "Mult"]
@@ -504,39 +521,112 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         offset: state.offset(),
     };
 
-    let lines = match rows.get(app.stats_sel) {
-        Some(StatsRow::Solve { run, solve }) => solve_details(app, &date, info, *run, *solve, details_a.width as usize),
-        Some(StatsRow::Frames { run }) => {
-            let r = &info.runs[*run];
-            let imgs = r
-                .images()
-                .map(|(a, b)| format!("images {a}–{b}, ≈ {} at 6.2 MB/frame", human_bytes((u64::from(b - a) + 1) * 6_230_000)))
-                .unwrap_or_else(|| "frame count known once listed".into());
-            let what = if r.characterisation {
-                Line::from("test shots only: no data collection").fg(Color::DarkGray)
-            } else if r.solves.is_empty() {
-                Line::from("not processed by ALBA's pipelines: download the frames to process them yourself")
-                    .fg(Color::Yellow)
-            } else {
-                Line::from("")
-            };
-            vec![
-                Line::from(format!("Raw frames of run {} (prefix {})", r.run, r.prefix)).bold(),
-                what,
-                Line::from(imgs),
-                Line::from(""),
-                Line::from("Space ticks/unticks the run. F lists the ticked runs and asks before downloading.")
-                    .fg(Color::DarkGray),
-            ]
+    let mut toggles = Vec::new();
+    let mut y = table_a.bottom();
+    for s in &sections {
+        y += GAP;
+        if y >= inner.bottom() {
+            break;
         }
-        None => vec![],
-    };
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().borders(ratatui::widgets::Borders::TOP).border_style(Style::new().fg(Color::DarkGray)))
-            .wrap(Wrap { trim: false }),
-        details_a,
+        let full = s.height(width);
+        let r = Rect { y, height: full.min(inner.bottom() - y), ..inner };
+        if let Some(t) = s.toggle {
+            toggles.push((Rect { height: 1, ..r }, t));
+            if s.more_line && r.height == full {
+                toggles.push((Rect { y: r.bottom() - 1, height: 1, ..r }, t));
+            }
+        }
+        s.render(f, r);
+        y = r.bottom();
+    }
+    app.hit.borrow_mut().stats_toggles = toggles;
+}
+
+/// Rows the Stats table keeps when the details want more room: the header and 5 rows.
+const TABLE_MIN: u16 = 6;
+/// Blank rows above each details section.
+const GAP: u16 = 1;
+/// Same-cell hits listed until `c` lists all of them.
+const CELL_HITS: usize = 5;
+
+/// One part of the details under the Stats table: a rule with its title, then its lines.
+struct Section {
+    title: Vec<Span<'static>>,
+    /// Right end of the rule: the key that folds or expands it.
+    hint: Option<String>,
+    lines: Vec<Line<'static>>,
+    /// What a click on the title toggles…
+    toggle: Option<StatsToggle>,
+    /// …and on the last line ("+N more").
+    more_line: bool,
+}
+
+impl Section {
+    fn new(title: Vec<Span<'static>>, lines: Vec<Line<'static>>) -> Self {
+        Section { title, hint: None, lines, toggle: None, more_line: false }
+    }
+
+    fn body(&self) -> Paragraph<'static> {
+        Paragraph::new(self.lines.clone()).wrap(Wrap { trim: false })
+    }
+
+    /// Rule plus wrapped lines.
+    fn height(&self, width: u16) -> u16 {
+        1 + self.body().line_count(width) as u16
+    }
+
+    fn render(&self, f: &mut Frame, r: Rect) {
+        let mut block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::new().fg(Color::DarkGray))
+            .title(Line::from(self.title.clone()));
+        if let Some(h) = &self.hint {
+            block = block.title(Line::from(format!(" {h} ")).fg(Color::DarkGray).right_aligned());
+        }
+        f.render_widget(self.body().block(block), r);
+    }
+}
+
+/// ` Cell ` on a section's rule.
+fn rule_title(text: &str) -> Vec<Span<'static>> {
+    vec![Span::raw(format!(" {text} ")).fg(Color::Gray).bold()]
+}
+
+/// The sections under the table for the highlighted row, and how many same-cell hits the
+/// solve has (`limit` of them are listed).
+fn details_sections(
+    app: &App,
+    date: &str,
+    info: &SampleInfo,
+    row: Option<&StatsRow>,
+    limit: usize,
+) -> (Vec<Section>, usize) {
+    match row {
+        Some(StatsRow::Solve { run, solve }) => solve_sections(app, date, info, *run, *solve, limit),
+        Some(StatsRow::Frames { run }) => (vec![frames_section(&info.runs[*run])], 0),
+        None => (Vec::new(), 0),
+    }
+}
+
+fn frames_section(r: &Run) -> Section {
+    let imgs = r
+        .images()
+        .map(|(a, b)| format!("images {a}–{b}, ≈ {} at 6.2 MB/frame", human_bytes((u64::from(b - a) + 1) * 6_230_000)))
+        .unwrap_or_else(|| "frame count known once listed".into());
+    let mut lines = vec![Line::from(format!("prefix {}   {imgs}", r.prefix))];
+    if r.characterisation {
+        lines.push(Line::from("test shots only: no data collection").fg(Color::DarkGray));
+    } else if r.solves.is_empty() {
+        lines.push(
+            Line::from("not processed by ALBA's pipelines: download the frames to process them yourself")
+                .fg(Color::Yellow),
+        );
+    }
+    lines.push(
+        Line::from("Space ticks/unticks the run. F lists the ticked runs and asks before downloading.")
+            .fg(Color::DarkGray),
     );
+    Section::new(rule_title(&format!("Raw frames · run {}", r.run)), lines)
 }
 
 /// Overall Rmerge, or Rmeas marked with `*` when the pipeline reports no Rmerge.
@@ -613,19 +703,20 @@ fn alert_style(l: Level) -> Style {
     if l == Level::A { st.add_modifier(Modifier::BOLD) } else { st }
 }
 
-/// `checkCIF  A d_min 0.94 Å = sin θ/λ 0.532 < 0.550  …`, or that there is no alert.
-fn alert_line(alerts: &[checkcif::Alert]) -> Line<'static> {
+/// ` A ` in its level's colour.
+fn alert_badge(l: Level) -> Span<'static> {
+    Span::raw(format!(" {} ", l.letter())).fg(Color::Black).bg(alert_color(l)).bold()
+}
+
+/// One line per alert, ` A  d_min 0.94 Å = sin θ/λ 0.532 < 0.550`, or that there is none.
+fn alert_lines(alerts: &[checkcif::Alert]) -> Vec<Line<'static>> {
     if alerts.is_empty() {
-        return Line::from("checkCIF: no resolution, completeness or Rint alert").fg(Color::DarkGray);
+        return vec![Line::from("no resolution, completeness or Rint alert").fg(Color::DarkGray)];
     }
-    let mut spans = vec![Span::raw("checkCIF").fg(Color::Gray)];
-    for a in alerts {
-        let c = alert_color(a.level);
-        spans.push(Span::raw("  "));
-        spans.push(Span::raw(format!(" {} ", a.level.letter())).fg(Color::Black).bg(c).bold());
-        spans.push(Span::raw(format!(" {}", a.text())).fg(c));
-    }
-    Line::from(spans)
+    alerts
+        .iter()
+        .map(|a| Line::from(vec![alert_badge(a.level), Span::raw(format!(" {}", a.text())).fg(alert_color(a.level))]))
+        .collect()
 }
 
 /// The run number and solve with this key.
@@ -732,7 +823,15 @@ fn shell_line(label: &str, s: Option<&Shell>) -> Line<'static> {
     ))
 }
 
-fn solve_details(app: &App, date: &str, info: &SampleInfo, run: usize, solve: usize, width: usize) -> Vec<Line<'static>> {
+/// The solve (files, ★ ranking), its cell and same-cell hits, shells, checkCIF.
+fn solve_sections(
+    app: &App,
+    date: &str,
+    info: &SampleInfo,
+    run: usize,
+    solve: usize,
+    limit: usize,
+) -> (Vec<Section>, usize) {
     let r = &info.runs[run];
     let s = &r.solves[solve];
     let status = match s.status {
@@ -740,51 +839,14 @@ fn solve_details(app: &App, date: &str, info: &SampleInfo, run: usize, solve: us
         Status::Running => Span::raw("running").yellow(),
         Status::Failed => Span::raw("failed").red(),
     };
-    let head = vec![
-        Span::raw(format!("{} · run {} · ", s.kind.label(), r.run)).bold(),
-        status,
-    ];
-    let mut lines = vec![Line::from(head)];
-    if let Some(st) = &s.stats {
-        let cell = st
-            .cell
-            .map(|c| {
-                format!(
-                    "{:.3} {:.3} {:.3}  {:.2} {:.2} {:.2}",
-                    c[0], c[1], c[2], c[3], c[4], c[5]
-                )
-            })
-            .unwrap_or_else(|| "–".into());
-        let imgs = st
-            .images
-            .map(|(a, b)| format!("   images {a}–{b}"))
-            .unwrap_or_default();
-        lines.push(Line::from(format!(
-            "SG {}   cell {cell}{imgs}",
-            st.space_group.as_deref().unwrap_or("–")
-        )));
-        if let Some(c) = st.cell {
-            lines.push(cell_matches(app, date, &info.name, c, st.space_group.as_deref(), width));
-        }
-        lines.push(
-            Line::from(format!(
-                "{:<8} {:<13} {:>6} {:>5} {:>6} {:>7} {:>6} {:>6} {:>5}",
-                "shell", "d (Å)", "Cmpl%", "Mult", "I/σ", "Rmerge%", "Rmeas%", "Rpim%", "CC½"
-            ))
-            .fg(Color::Gray),
-        );
-        lines.push(shell_line("overall", st.overall.as_ref()));
-        lines.push(shell_line("inner", st.inner.as_ref()));
-        lines.push(shell_line("outer", st.outer.as_ref()));
-        if st.overall.is_some() && s.status != Status::Failed {
-            lines.push(alert_line(&alerts(app, s)));
-        }
-    } else {
-        lines.push(Line::from("no statistics yet").fg(Color::DarkGray));
+    let mut title = vec![Span::raw(format!(" {} · run {} · ", s.kind.label(), r.run)).fg(Color::Gray).bold()];
+    if let Some((a, b)) = s.stats.as_ref().and_then(|st| st.images) {
+        title.push(Span::raw(format!("images {a}–{b} · ")).fg(Color::Gray));
     }
-    lines.extend(ranking_lines(info, s));
+    title.extend([status.bold(), Span::raw(" ")]);
+    let mut files = Vec::new();
     if !s.hkl.is_empty() {
-        let files: Vec<String> = s
+        let names: Vec<String> = s
             .hkl
             .iter()
             .map(|f| match f.size {
@@ -792,17 +854,23 @@ fn solve_details(app: &App, date: &str, info: &SampleInfo, run: usize, solve: us
                 None => f.name().to_string(),
             })
             .collect();
-        lines.push(Line::from(format!("HKL: {}", files.join(", "))));
+        files.push(Span::raw(format!("HKL: {}", names.join(", "))));
     }
     if !s.logs.is_empty() {
         let state = if app.include_logs { "included" } else { "not included" };
-        lines.push(
-            Line::from(format!("logs: {} files, {state} (L toggles)", s.logs.len())).fg(Color::DarkGray),
-        );
+        if !files.is_empty() {
+            files.push(Span::raw("   "));
+        }
+        files.push(Span::raw(format!("Logs: {} files, {state} (L toggles)", s.logs.len())).fg(Color::DarkGray));
     }
+    if files.is_empty() {
+        files.push(Span::raw("no HKL or log files").fg(Color::DarkGray));
+    }
+    let mut lines = vec![Line::from(files)];
     if let Some(n) = &s.note {
         lines.push(Line::from(n.clone()).fg(Color::Yellow));
     }
+    lines.extend(ranking_lines(info, s));
     let rmeas_only = s
         .stats
         .as_ref()
@@ -811,41 +879,149 @@ fn solve_details(app: &App, date: &str, info: &SampleInfo, run: usize, solve: us
     if rmeas_only {
         lines.push(Line::from("* no Rmerge reported: the R column shows Rmeas").fg(Color::DarkGray));
     }
-    lines
+    let Some(st) = &s.stats else {
+        lines.push(Line::from("no statistics yet").fg(Color::DarkGray));
+        return (vec![Section::new(title, lines)], 0);
+    };
+    let mut sections = vec![Section::new(title, lines)];
+
+    // the space group, then one edge and its angle per line
+    let sg = st.space_group.clone().unwrap_or_else(|| "space group –".into());
+    let mut cell_lines = vec![Line::from(sg).bold()];
+    match st.cell {
+        Some(c) => {
+            for (i, (edge, angle)) in [("a", "α"), ("b", "β"), ("c", "γ")].into_iter().enumerate() {
+                cell_lines.push(Line::from(vec![
+                    Span::raw(format!("{edge}: ")).fg(Color::Gray),
+                    Span::raw(format!("{:>8.3} Å", c[i])),
+                    Span::raw(format!("     {angle}: ")).fg(Color::Gray),
+                    Span::raw(format!("{:>7.2}°", c[i + 3])),
+                ]));
+            }
+        }
+        None => cell_lines.push(Line::from("no cell yet").fg(Color::DarkGray)),
+    }
+    let mut hits = 0;
+    if let Some(c) = st.cell {
+        let skip = crate::cells::sample_key(date, &info.name);
+        let found = app.cells.matches(c, st.space_group.as_deref(), app.cfg.cell_tolerance(), Some(&skip));
+        hits = found.len();
+        cell_lines.extend(cell_hit_lines(app, &found, limit));
+    }
+    let mut cell_sec = Section::new(rule_title("Cell"), cell_lines);
+    if hits > CELL_HITS {
+        cell_sec.toggle = Some(StatsToggle::CellHits);
+        cell_sec.more_line = true;
+        cell_sec.hint = Some(if app.cell_hits_all {
+            format!("c closest {CELL_HITS}")
+        } else {
+            format!("c all {hits}")
+        });
+    }
+    sections.push(cell_sec);
+
+    // shells and checkCIF fold together
+    let fold = app.fold_details;
+    let arrow = if fold { "▸" } else { "▾" };
+    let hint = Some(if fold { "z unfold" } else { "z fold" }.to_string());
+    let shells = if fold {
+        Vec::new()
+    } else {
+        vec![
+            Line::from(format!(
+                "{:<8} {:<13} {:>6} {:>5} {:>6} {:>7} {:>6} {:>6} {:>5}",
+                "shell", "d (Å)", "Cmpl%", "Mult", "I/σ", "Rmerge%", "Rmeas%", "Rpim%", "CC½"
+            ))
+            .fg(Color::Gray),
+            shell_line("overall", st.overall.as_ref()),
+            shell_line("inner", st.inner.as_ref()),
+            shell_line("outer", st.outer.as_ref()),
+        ]
+    };
+    sections.push(Section {
+        title: rule_title(&format!("{arrow} Shells")),
+        hint: hint.clone(),
+        lines: shells,
+        toggle: Some(StatsToggle::Details),
+        more_line: false,
+    });
+    if st.overall.is_some() && s.status != Status::Failed {
+        let alerts = alerts(app, s);
+        let mut title = rule_title(&format!("{arrow} checkCIF"));
+        let lines = if fold {
+            if alerts.is_empty() {
+                title.push(Span::raw("no alert ").fg(Color::DarkGray));
+            }
+            for a in &alerts {
+                title.push(alert_badge(a.level));
+                title.push(Span::raw(" "));
+            }
+            Vec::new()
+        } else {
+            alert_lines(&alerts)
+        };
+        sections.push(Section { title, hint, lines, toggle: Some(StatsToggle::Details), more_line: false });
+    }
+    (sections, hits)
 }
 
-/// `≈ same cell: JSG241 20250704 P 21/c, AS268 20250704 P -1  +2 more` from the
-/// unit-cell database, on one line of `width`.
-fn cell_matches(app: &App, date: &str, name: &str, cell: [f64; 6], sg: Option<&str>, width: usize) -> Line<'static> {
-    let skip = crate::cells::sample_key(date, name);
-    let found = app.cells.matches(cell, sg, app.cfg.cell_tolerance(), Some(&skip));
+/// A blank line, `Similar cells: 7 hits, closest first`, a column header and one line per
+/// hit (code, date, SG, a b c α β γ) up to `limit`, and how many are left out.
+fn cell_hit_lines(app: &App, found: &[crate::cells::Match], limit: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from("")];
     if found.is_empty() {
-        return Line::from(format!("cell: no match in the unit-cell database ({} cells)", app.cells.len()))
-            .fg(Color::DarkGray);
+        lines.push(
+            Line::from(format!("Similar cells: none in the unit-cell database ({} cells)", app.cells.len()))
+                .fg(Color::DarkGray),
+        );
+        return lines;
     }
-    let lead = "≈ same cell: ";
-    let mut spans = vec![Span::raw(lead).fg(Color::LightMagenta).bold()];
-    let mut used = lead.chars().count();
-    for (i, m) in found.iter().enumerate() {
+    let n = found.len();
+    let head = if n == 1 { "Similar cells: 1 hit".to_string() } else { format!("Similar cells: {n} hits, closest first") };
+    lines.push(Line::from(head).fg(Color::LightMagenta).bold());
+    let shown = &found[..n.min(limit)];
+    let code_w = shown.iter().map(|m| m.entry.code.chars().count()).max().unwrap_or(0).clamp(2, 16);
+    let sg_w = shown
+        .iter()
+        .map(|m| m.entry.sg.as_deref().map_or(1, |s| s.chars().count()))
+        .max()
+        .unwrap_or(1)
+        .clamp(2, 10);
+    lines.push(
+        Line::from(format!(
+            "  {:<code_w$}  {:<8}  {:<sg_w$}  {:>6} {:>6} {:>6}  {:>5} {:>5} {:>5}",
+            "ID", "date", "SG", "a", "b", "c", "α", "β", "γ"
+        ))
+        .fg(Color::DarkGray),
+    );
+    for m in shown {
         let e = m.entry;
-        let sep = if i == 0 { "" } else { ", " };
-        let date = if e.date.is_empty() { String::new() } else { format!(" {}", e.date) };
-        let sg = e.sg.as_deref().map(|s| format!(" {s}")).unwrap_or_default();
-        let piece = sep.len() + e.code.chars().count() + date.len() + sg.chars().count();
-        let left = found.len() - i;
-        // room for "  +N more" unless this is the last one
-        let reserve = if left > 1 { format!("  +{} more", left - 1).len() } else { 0 };
-        if i > 0 && used + piece + reserve > width {
-            spans.push(Span::raw(format!("  +{left} more")).fg(Color::Gray));
-            break;
+        let c = e.cell;
+        let mut spans = vec![
+            Span::raw(format!("  {:<code_w$}", e.code)).fg(Color::LightMagenta).bold(),
+            Span::raw(format!("  {:<8}", e.date)),
+            Span::raw(format!("  {:<sg_w$}", e.sg.as_deref().unwrap_or("–"))).fg(Color::Gray),
+            Span::raw(format!(
+                "  {:>6.2} {:>6.2} {:>6.2}  {:>5.1} {:>5.1} {:>5.1}",
+                c[0], c[1], c[2], c[3], c[4], c[5]
+            )),
+        ];
+        if let Some(note) = &e.note {
+            spans.push(Span::raw(format!("  {note}")).fg(Color::DarkGray));
         }
-        used += piece;
-        spans.push(Span::raw(sep));
-        spans.push(Span::raw(e.code.clone()).fg(Color::LightMagenta).bold());
-        spans.push(Span::raw(date));
-        spans.push(Span::raw(sg).fg(Color::Gray));
+        lines.push(Line::from(spans));
     }
-    Line::from(spans)
+    let left = n - shown.len();
+    let wanted = if app.cell_hits_all { n } else { n.min(CELL_HITS) };
+    if shown.len() < wanted {
+        let tip = if app.fold_details { "" } else { ", z folds the shells" };
+        lines.push(Line::from(format!("  +{left} more: no room{tip}")).fg(Color::Gray));
+    } else if left > 0 {
+        lines.push(Line::from(format!("  +{left} more · c lists them all")).fg(Color::Gray));
+    } else if n > CELL_HITS {
+        lines.push(Line::from(format!("  c lists only the closest {CELL_HITS}")).fg(Color::DarkGray));
+    }
+    lines
 }
 
 fn date_summary(app: &App, date: &str) -> Vec<Line<'static>> {
@@ -1414,11 +1590,11 @@ fn help_lines() -> Vec<Line<'static>> {
         row("Backspace / ←", "back to the beamtime list    r  refresh listing"),
         row("s", "rescan sample      S  fetch stats for the whole beamtime"),
         sec("Stats"),
-        row("Space", "mark solve for download / tick a frames run"),
-        row("a", "mark all solves with HKL files"),
+        row("Space / a", "mark a solve or tick a frames run / mark all with HKL files"),
+        row("c / z", "all similar cells / fold shells and checkCIF (or click the title)"),
         row("★", "best solve: Cmpl 30 + CC½ 30 + inner R 20 + d_min 20 points"),
         row("alert colours", "checkCIF C yellow, B orange, A red; limits in config.toml"),
-        row("≈ same cell", "samples with a matching cell (code, date), from cells.toml"),
+        row("Similar cells", "samples with a matching cell (code, date), from cells.toml"),
         row("◆ green/yellow", "downloaded here (this beamtime) / only a same-name folder"),
         row("d", "download marked solves into xia2chem_r3/, ednaproc_r3/ …"),
         row("F", "download ticked frame runs (asks); HKL/logs go first"),
@@ -2158,7 +2334,7 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let mut app = demo_app(&base);
         let screen = render(&app, 170, 42);
-        assert!(screen.contains("cell: no match in the unit-cell database (0 cells)"), "{screen}");
+        assert!(screen.contains("Similar cells: none in the unit-cell database (0 cells)"), "{screen}");
 
         // JSG285b itself is in the database, but not listed as its own match
         let own = app.info("20251211", "JSG285b").unwrap().clone();
@@ -2175,20 +2351,92 @@ mod tests {
         };
         app.cells.record("bl13/projects/cycle2025-II/2025000000-pi/20250704", &other("JSG270", 0.05));
         app.cells.record("20250704", &other("NOT-IT", 2.0));
-        let screen = render(&app, 170, 42);
+        let screen = render(&app, 170, 52);
         println!("{screen}");
-        assert!(screen.contains("≈ same cell: JSG270 20250704 P 4"), "{screen}");
-        assert!(!screen.contains("NOT-IT") && !screen.contains("JSG285b 20251211"));
+        assert!(screen.contains("Similar cells: 1 hit"), "{screen}");
+        assert!(screen.contains("  ID      date      SG        a      b      c      α     β     γ"), "{screen}");
+        assert!(screen.contains("  JSG270  20250704  P 4   28.50  28.45  14.39   90.0  90.0  90.0"), "{screen}");
+        assert!(!screen.contains("NOT-IT") && !screen.contains("JSG285b  20251211"));
+        // nothing to expand: no key hint on the rule
+        assert!(!screen.contains("c all"));
 
-        // more than fit on the line
+        // more than the 5 listed: closest first, the rest counted
         for n in 0..8 {
             app.cells.record("20260101", &other(&format!("JSG30{n}"), 0.01 * f64::from(n)));
         }
+        let screen = render(&app, 170, 52);
+        println!("{screen}");
+        let at = |s: &str, code: &str| s.lines().position(|l| l.contains(&format!("  {code}  "))).unwrap();
+        assert!(screen.contains("Similar cells: 9 hits, closest first") && screen.contains("c all 9"));
+        assert!(at(&screen, "JSG300") < at(&screen, "JSG301") && at(&screen, "JSG301") < at(&screen, "JSG304"));
+        assert!(!screen.contains("JSG305") && !screen.contains("JSG270"));
+        assert!(screen.contains("+4 more · c lists them all"), "{screen}");
+
+        // c lists all of them, c again only the closest 5
+        key(&mut app, 'c');
+        let screen = render(&app, 170, 60);
+        println!("{screen}");
+        assert!(screen.contains("JSG307") && screen.contains("JSG270") && screen.contains("c closest 5"));
+        assert!(screen.contains("c lists only the closest 5"));
+        key(&mut app, 'c');
+        assert!(!render(&app, 170, 60).contains("JSG307"));
+
+        // a click on "+4 more" does the same
+        let (x, y) = find(&render(&app, 170, 52), "+4 more");
+        click(&mut app, x, y);
+        assert!(app.cell_hits_all && render(&app, 170, 60).contains("JSG307"));
+
+        // a shorter panel: the list gets shorter and says why; folding makes room
+        let screen = render(&app, 170, 52);
+        println!("{screen}");
+        assert!(screen.contains("+3 more: no room, z folds the shells"), "{screen}");
+        key(&mut app, 'z');
+        assert!(render(&app, 170, 52).contains("JSG307"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn stats_details_are_sections_that_fold() {
+        let base = std::env::temp_dir().join(format!("amanece_fold_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
         let screen = render(&app, 170, 42);
         println!("{screen}");
-        // closest first, the rest counted on the same line
-        let line = screen.lines().find(|l| l.contains("≈ same cell")).unwrap();
-        assert!(line.contains("≈ same cell: JSG300 20260101 P 4, JSG301 20260101 P 4  +7 more"), "{line}");
+        // the table takes only its rows; the details start right below it, after a blank row
+        let lines: Vec<&str> = screen.lines().collect();
+        let last_row = lines.iter().position(|l| l.contains("frames 720")).unwrap();
+        assert!(!lines[last_row + 1].contains("xia2chem"));
+        assert!(lines[last_row + 2].contains("xia2chem · run 3 · images 1–720 · done"), "{screen}");
+        assert!(screen.contains("HKL: shelxt.hkl (5.6 MB), shelxt.ins (514 B)"));
+        // the cell, one edge and its angle per line
+        assert!(screen.contains("a:   28.450 Å     α:   90.00°") && screen.contains("c:   14.390 Å     γ:   90.00°"));
+        for title in [" Cell ", "▾ Shells", "▾ checkCIF"] {
+            assert!(screen.contains(title), "{title}");
+        }
+        assert!(screen.contains("overall  12.84–0.73"));
+
+        // z folds shells and checkCIF to their titles, z again unfolds them
+        key(&mut app, 'z');
+        let screen = render(&app, 170, 42);
+        println!("{screen}");
+        assert!(!screen.contains("overall  12.84") && !screen.contains("Rint alert"));
+        assert!(screen.contains("▸ Shells") && screen.contains("▸ checkCIF no alert") && screen.contains("z unfold"));
+        // a folded checkCIF shows its alert levels on the title
+        app.stats_sel = 1;
+        let screen = render(&app, 170, 42);
+        assert!(screen.contains("▸ checkCIF  A"), "{screen}");
+        key(&mut app, 'z');
+        assert!(render(&app, 170, 42).contains("inner    "));
+
+        // a click on a section title folds too
+        let (x, y) = find(&render(&app, 170, 42), "▾ Shells");
+        click(&mut app, x, y);
+        assert!(app.fold_details);
+
+        // a frames row has its own section
+        app.stats_sel = 4;
+        let screen = render(&app, 170, 42);
+        assert!(screen.contains(" Raw frames · run 3 ") && screen.contains("prefix manually-mounted"), "{screen}");
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -2352,7 +2600,7 @@ mod tests {
             screens.push(render(&app, 170, 42).replace('\u{a0}', " "));
         }
         let [best, edna, autoproc] = &screens[..] else { unreachable!() };
-        assert!(best.contains("checkCIF: no resolution, completeness or Rint alert"));
+        assert!(best.contains("no resolution, completeness or Rint alert"));
         assert!(best.contains("★ best of 3: 94.8/100, next autoPROC noanom r3"));
         assert!(best.contains("Cmpl 30.0/30  CC½ 30.0/30  R inner 14.4/20  d_min 20.0/20  +0.5 xia2chem"));
         assert!(edna.contains(" A  d_min 0.94 Å = sin θ/λ 0.532 < 0.550"));
@@ -2375,7 +2623,7 @@ mod tests {
         app.dialog = Some(Dialog::Help);
         let screen = render(&app, 170, 46);
         assert!(screen.contains("★") && screen.contains("checkCIF C yellow, B orange, A red"));
-        assert!(screen.contains("≈ same cell"));
+        assert!(screen.contains("Similar cells") && screen.contains("fold shells and checkCIF"));
         assert!(screen.contains("U               update amanece"));
         // the last line still shows: the box holds 42 lines
         assert!(screen.contains("Windows GUI programs (xprep, shelxle, olex2…)"));

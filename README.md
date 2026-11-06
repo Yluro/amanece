@@ -97,13 +97,18 @@ Each panel shows its keys on its bottom border; `?` lists them all. In short:
   `Enter` opens one (the others are hidden), `Backspace` goes back.
   A green ◆ next to a sample: it's already downloaded (from this beamtime) into the Local folder;
   yellow ◆: only a local folder with the same name exists.
-- **Stats**: every solve with its statistics, ★ on the best one. The details under the table show
-  how the ★ was chosen: each solve's points for completeness (30), CC½ (30), inner-shell R (20) and
+- **Stats**: every solve with its statistics, ★ on the best one. The table takes only the rows it
+  has; under it, the highlighted solve's details come in sections: the solve (HKL and log files, and
+  the ★ ranking), **Cell** (space group, a b c and α β γ, and the similar cells), **Shells**
+  (overall, inner, outer) and **checkCIF** (alerts). `z` folds Shells and checkCIF to their title
+  lines (a folded checkCIF title still shows the alert levels) and `z` again unfolds them; clicking
+  either title does the same. The ranking shows how the ★ was chosen: each solve's points for completeness (30), CC½ (30), inner-shell R (20) and
   d_min (20), its place in the ranking, and for the others how far behind ★ they are and which
   criterion cost them most (or why a solve isn't ranked at all: failed, running, no HKL file).
   Values that would draw a checkCIF alert are coloured, yellow for C, orange for B and red for A:
   d_min (THETM01, sin θ/λ < 0.590 / 0.575 / 0.550), completeness (PLAT029, < 99 / 97 / 95 %) and
-  Rmerge as a stand-in for Rint (RINTA01, > 10 / 15 / 20 %). The details spell each alert out.
+  Rmerge as a stand-in for Rint (RINTA01, > 10 / 15 / 20 %). The checkCIF section spells each
+  alert out.
   These come from the pipeline's overall shell, so they are a warning at the beamline, not checkCIF
   itself: the completeness runs to the pipeline's d_min (checkCIF tests θ_full, usually higher), and
   checkCIF doesn't publish the PLAT029 limits (these are read off real reports). Change the limits
@@ -114,8 +119,10 @@ Each panel shows its keys on its bottom border; `?` lists them all. In short:
   downloading. If the connection drops, it reconnects and continues where each file stopped.
   Every frame is checked against the MD5 checksum stored in its own CBF header, both after it
   arrives and when one already in the folder is skipped; a frame that fails is downloaded again.
-  Under the cell, **≈ same cell** lists the samples (code and beamtime date, with their space group)
-  whose cell matches, closest first, from the unit-cell database (see below).
+  In the Cell section, **Similar cells** lists the samples whose cell matches (code, beamtime date,
+  space group and their own a b c α β γ), closest first, from the unit-cell database (see below): the closest 5,
+  then `+N more`. `c` (or a click on `+N more`) lists them all, `c` again only the closest 5. When
+  the panel is too short for the whole list, it says so; `z` makes room.
 - **Console**: a terminal (Windows ConPTY). `:` to type. Commands run in the Local folder and a
   bare program name gets the selected file: with `XDS_ASCII.HKL` selected, `xprep` runs
   `xprep XDS_ASCII.HKL`. Interactive console programs work: while SADABS (or any program) runs,
