@@ -1,6 +1,7 @@
 //! Application state and event handling. Rendering lives in `ui.rs`.
 
 use crate::cache::Cache;
+use crate::cells::CellDb;
 use crate::config::{Config, HEAVY_POLL_GAP, PollMode, interval_label};
 use crate::console::{Builtin, Console, ConsoleEvent, LineKind};
 use crate::download::{self, Source};
@@ -291,6 +292,8 @@ pub struct App {
     pub local: LocalPanel,
     pub cache: Cache,
     cache_dirty: bool,
+    /// Unit-cell database (`cells.toml`), filled from every scan.
+    pub cells: CellDb,
     cache_saved: Instant,
     /// Beamtime opened in the ALBA panel; `None` shows the beamtime list.
     pub alba_date: Option<String>,
@@ -349,6 +352,11 @@ impl App {
             .filter(|u| !u.trim().is_empty())
             .or_else(|| saved_users.first().cloned());
         let cache = Cache::load_startup(state_dir.as_deref(), &cfg.host, last_user.as_deref(), &base);
+        let mut cells = CellDb::load(state_dir.as_deref());
+        for c in Cache::load_all(state_dir.as_deref(), &cfg.host) {
+            cells.record_cache(&c);
+        }
+        cells.record_cache(&cache);
         let mut app = App {
             poll_mode: cfg.poll_mode,
             show_test: cfg.show_test,
@@ -368,6 +376,7 @@ impl App {
             saved_users,
             cache,
             cache_dirty: false,
+            cells,
             cache_saved: Instant::now(),
             alba_date: None,
             alba_sel: 0,
@@ -417,6 +426,13 @@ impl App {
                 LineKind::Info,
                 format!("loaded cached listing of {} beamtimes", app.cache.dates.len()),
             );
+        }
+        match &app.cells.error {
+            Some(e) => app.console.push(LineKind::Warn, format!("unit-cell database: {e}")),
+            None => app.console.push(
+                LineKind::Info,
+                format!("unit-cell database: {} cells ({})", app.cells.len(), crate::cells::FILE),
+            ),
         }
         if offline {
             app.console
@@ -527,6 +543,7 @@ impl App {
             Some(_) => {
                 self.save_cache();
                 self.cache = Cache::load_account(self.state_dir.as_deref(), &self.cfg.host, &key);
+                self.cells.record_cache(&self.cache);
                 self.alba_date = None;
                 self.alba_sel = 0;
                 self.stats_sel = 0;
@@ -632,6 +649,7 @@ impl App {
     }
 
     fn store_info(&mut self, date: &str, info: SampleInfo) {
+        self.cells.record(date, &info);
         let exp = self.cache.experiment_mut(date);
         exp.infos.insert(info.name.clone(), info);
         self.cache_dirty = true;
@@ -711,7 +729,7 @@ impl App {
             self.sel_changed = None;
             self.auto_scan_selected();
         }
-        if self.cache_dirty && self.cache_saved.elapsed() >= Duration::from_secs(2) {
+        if (self.cache_dirty || self.cells.dirty()) && self.cache_saved.elapsed() >= Duration::from_secs(2) {
             self.save_cache();
         }
     }
@@ -733,6 +751,12 @@ impl App {
         {
             self.console
                 .push(LineKind::Error, format!("cannot save cache: {e}"));
+        }
+        if let Some(dir) = &self.state_dir
+            && let Err(e) = self.cells.save(dir)
+        {
+            self.console
+                .push(LineKind::Warn, format!("unit-cell database not saved: {e}"));
         }
         self.cache_dirty = false;
         self.cache_saved = Instant::now();

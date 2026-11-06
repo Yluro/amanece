@@ -1,6 +1,7 @@
 mod app;
 mod cache;
 mod cbf;
+mod cells;
 mod config;
 mod console;
 mod download;

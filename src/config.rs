@@ -77,6 +77,10 @@ pub struct Config {
     pub beamlines: Vec<String>,
     /// Proposal folder on the server, if automatic detection doesn't find it.
     pub remote_root: Option<String>,
+    /// Unit-cell database: two reduced cells match within this many % on each edge…
+    pub cell_match_pct: f64,
+    /// …and this many degrees on each angle.
+    pub cell_match_deg: f64,
 }
 
 impl Default for Config {
@@ -96,6 +100,8 @@ impl Default for Config {
             parallel_downloads: 3,
             beamlines: vec!["bl13".into(), "bl06".into()],
             remote_root: None,
+            cell_match_pct: 1.5,
+            cell_match_deg: 2.0,
         }
     }
 }
@@ -134,6 +140,11 @@ parallel_downloads = 3
 # on each of these beamlines (bl13 = XALOC, bl06 = XAIRA)
 beamlines = ["bl13", "bl06"]
 # remote_root = "/bl13/projects/cycle2026-I/<account digits>-<pi>"
+
+# unit-cell database (cells.toml in this folder): the Stats panel lists the samples
+# whose reduced cell matches within this many % on each edge and degrees on each angle
+cell_match_pct = 1.5
+cell_match_deg = 2.0
 "#;
 
 impl Config {
@@ -193,6 +204,13 @@ impl Config {
 
     pub fn request_rate(&self) -> f64 {
         self.max_requests_per_second.clamp(0.2, MAX_REQUESTS_PER_SECOND)
+    }
+
+    pub fn cell_tolerance(&self) -> crate::cells::Tolerance {
+        crate::cells::Tolerance {
+            length_pct: self.cell_match_pct.clamp(0.1, 10.0),
+            angle_deg: self.cell_match_deg.clamp(0.1, 10.0),
+        }
     }
 
     pub fn is_external(&self, program: &str) -> bool {
@@ -313,6 +331,8 @@ mod tests {
         assert_eq!(cfg.port, 443);
         assert_eq!(cfg.poll_mode, PollMode::Manual);
         assert_eq!(cfg.external_window, vec!["xprep".to_string()]);
+        assert_eq!(cfg.cell_match_pct, Config::default().cell_match_pct);
+        assert_eq!(cfg.cell_match_deg, Config::default().cell_match_deg);
     }
 
     #[test]

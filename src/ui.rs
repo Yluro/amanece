@@ -438,7 +438,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         );
         return;
     }
-    let details_h = 11.min(inner.height.saturating_sub(4));
+    let details_h = 12.min(inner.height.saturating_sub(4));
     let [table_a, details_a] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(details_h)]).areas(inner);
 
@@ -503,7 +503,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let lines = match rows.get(app.stats_sel) {
-        Some(StatsRow::Solve { run, solve }) => solve_details(app, info, *run, *solve),
+        Some(StatsRow::Solve { run, solve }) => solve_details(app, &date, info, *run, *solve, details_a.width as usize),
         Some(StatsRow::Frames { run }) => {
             let r = &info.runs[*run];
             let imgs = r
@@ -602,7 +602,7 @@ fn shell_line(label: &str, s: Option<&Shell>) -> Line<'static> {
     ))
 }
 
-fn solve_details(app: &App, info: &SampleInfo, run: usize, solve: usize) -> Vec<Line<'static>> {
+fn solve_details(app: &App, date: &str, info: &SampleInfo, run: usize, solve: usize, width: usize) -> Vec<Line<'static>> {
     let r = &info.runs[run];
     let s = &r.solves[solve];
     let status = match s.status {
@@ -641,6 +641,9 @@ fn solve_details(app: &App, info: &SampleInfo, run: usize, solve: usize) -> Vec<
             "SG {}   cell {cell}{imgs}",
             st.space_group.as_deref().unwrap_or("–")
         )));
+        if let Some(c) = st.cell {
+            lines.push(cell_matches(app, date, &info.name, c, st.space_group.as_deref(), width));
+        }
         lines.push(
             Line::from(format!(
                 "{:<8} {:<13} {:>6} {:>5} {:>6} {:>7} {:>6} {:>6} {:>5}",
@@ -687,6 +690,40 @@ fn solve_details(app: &App, info: &SampleInfo, run: usize, solve: usize) -> Vec<
             .fg(Color::DarkGray),
     );
     lines
+}
+
+/// `≈ same cell: JSG241 20250704 P 21/c, AS268 20250704 P -1  +2 more` from the
+/// unit-cell database, on one line of `width`.
+fn cell_matches(app: &App, date: &str, name: &str, cell: [f64; 6], sg: Option<&str>, width: usize) -> Line<'static> {
+    let skip = crate::cells::sample_key(date, name);
+    let found = app.cells.matches(cell, sg, app.cfg.cell_tolerance(), Some(&skip));
+    if found.is_empty() {
+        return Line::from(format!("cell: no match in the unit-cell database ({} cells)", app.cells.len()))
+            .fg(Color::DarkGray);
+    }
+    let lead = "≈ same cell: ";
+    let mut spans = vec![Span::raw(lead).fg(Color::LightMagenta).bold()];
+    let mut used = lead.chars().count();
+    for (i, m) in found.iter().enumerate() {
+        let e = m.entry;
+        let sep = if i == 0 { "" } else { ", " };
+        let date = if e.date.is_empty() { String::new() } else { format!(" {}", e.date) };
+        let sg = e.sg.as_deref().map(|s| format!(" {s}")).unwrap_or_default();
+        let piece = sep.len() + e.code.chars().count() + date.len() + sg.chars().count();
+        let left = found.len() - i;
+        // room for "  +N more" unless this is the last one
+        let reserve = if left > 1 { format!("  +{} more", left - 1).len() } else { 0 };
+        if i > 0 && used + piece + reserve > width {
+            spans.push(Span::raw(format!("  +{left} more")).fg(Color::Gray));
+            break;
+        }
+        used += piece;
+        spans.push(Span::raw(sep));
+        spans.push(Span::raw(e.code.clone()).fg(Color::LightMagenta).bold());
+        spans.push(Span::raw(date));
+        spans.push(Span::raw(sg).fg(Color::Gray));
+    }
+    Line::from(spans)
 }
 
 fn date_summary(app: &App, date: &str) -> Vec<Line<'static>> {
@@ -1232,6 +1269,7 @@ fn help_lines() -> Vec<Line<'static>> {
         sec("Stats"),
         row("Space", "mark solve for download / tick a frames run"),
         row("a", "mark all solves with HKL files     ★ marks the best solve"),
+        row("≈ same cell", "samples with a matching cell (code, date), from cells.toml"),
         row("◆ green", "ALBA sample already downloaded (from this beamtime) here"),
         row("◆ yellow", "only a local folder with the same name exists here"),
         row("d", "download marked solves into xia2chem_r3/, ednaproc_r3/ … in the Local folder"),
@@ -1895,6 +1933,46 @@ mod tests {
             ratatui::crossterm::event::KeyEvent::from(ratatui::crossterm::event::KeyCode::Esc),
         )));
         assert!(!render(&app, w, h).contains("Pasión en el bancal"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn stats_lists_samples_with_the_same_cell() {
+        let base = std::env::temp_dir().join(format!("amanece_cells_ui_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        let screen = render(&app, 170, 42);
+        assert!(screen.contains("cell: no match in the unit-cell database (0 cells)"), "{screen}");
+
+        // JSG285b itself is in the database, but not listed as its own match
+        let own = app.info("20251211", "JSG285b").unwrap().clone();
+        app.cells.record("20251211", &own);
+        let other = |name: &str, da: f64| {
+            let mut i = own.clone();
+            i.name = name.into();
+            for s in i.runs.iter_mut().flat_map(|r| r.solves.iter_mut()) {
+                if let Some(c) = s.stats.as_mut().and_then(|st| st.cell.as_mut()) {
+                    c[0] += da;
+                }
+            }
+            i
+        };
+        app.cells.record("bl13/projects/cycle2025-II/2025000000-pi/20250704", &other("JSG270", 0.05));
+        app.cells.record("20250704", &other("NOT-IT", 2.0));
+        let screen = render(&app, 170, 42);
+        println!("{screen}");
+        assert!(screen.contains("≈ same cell: JSG270 20250704 P 4"), "{screen}");
+        assert!(!screen.contains("NOT-IT") && !screen.contains("JSG285b 20251211"));
+
+        // more than fit on the line
+        for n in 0..8 {
+            app.cells.record("20260101", &other(&format!("JSG30{n}"), 0.01 * f64::from(n)));
+        }
+        let screen = render(&app, 170, 42);
+        println!("{screen}");
+        // closest first, the rest counted on the same line
+        let line = screen.lines().find(|l| l.contains("≈ same cell")).unwrap();
+        assert!(line.contains("≈ same cell: JSG300 20260101 P 4, JSG301 20260101 P 4  +7 more"), "{line}");
         std::fs::remove_dir_all(&base).ok();
     }
 
