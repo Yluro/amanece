@@ -27,6 +27,15 @@ with one archive per platform:
 Unpack it and put `amanece` (`amanece.exe`) somewhere on your `PATH`. Each archive has a
 `.sha256` file next to it.
 
+### Updating
+
+The version is shown at the right end of the status bar. At startup and once a day amanece asks GitHub
+whether there is a newer release (one small request; nothing is downloaded). When there is, the version
+turns into a green `↑ v0.4.0`: press `U` (or click it) and say `y`, and amanece downloads this platform's
+archive, checks it against its `.sha256`, makes sure the new binary starts, and replaces its own file with
+it. Quit and start amanece again to use the new version. `o` in that dialog opens the release notes.
+`check_updates = false` in `config.toml` stops the automatic check; `U` still checks when you ask.
+
 **Requisites:**
 
 - **Windows**: Windows 10 version 1809 or newer (the console panel needs ConPTY). The C/C++ runtime
@@ -119,7 +128,7 @@ Each panel shows its keys on its bottom border; `?` lists them all. In short:
 `Tab` cycles panels, `p` cycles polling (manual → 10 min → 2 min → 30 s → 5 s; the fast rates only
 re-list the open beamtime, sample rescans stay at most once a minute), `n` toggles the new-sample
 sound, `E` opens the Local folder in the file explorer, `O` opens amanece's own folder (config,
-cache, log), `q` quits (asks first).
+cache, log), `U` updates amanece (see [Updating](#updating)), `q` quits (asks first).
 
 ## Files it writes locally
 

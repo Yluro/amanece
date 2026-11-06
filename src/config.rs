@@ -83,6 +83,8 @@ pub struct Config {
     pub cell_match_pct: f64,
     /// …and this many degrees on each angle.
     pub cell_match_deg: f64,
+    /// Ask GitHub for a newer amanece at startup and once a day (`U` updates).
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -105,6 +107,7 @@ impl Default for Config {
             checkcif: crate::checkcif::Limits::default(),
             cell_match_pct: 1.5,
             cell_match_deg: 2.0,
+            check_updates: true,
         }
     }
 }
@@ -148,6 +151,10 @@ beamlines = ["bl13", "bl06"]
 # whose reduced cell matches within this many % on each edge and degrees on each angle
 cell_match_pct = 1.5
 cell_match_deg = 2.0
+
+# ask GitHub for a newer amanece at startup and once a day (one small request;
+# nothing is downloaded until you press U and say yes)
+check_updates = true
 
 # checkCIF-style alerts in the Stats panel. Each list gives the limits for alert
 # levels C, B, A; a value past one turns its cell yellow (C), orange (B) or red (A).
@@ -347,6 +354,9 @@ mod tests {
         assert_eq!(cfg.checkcif, crate::checkcif::Limits::default());
         assert_eq!(cfg.cell_match_pct, Config::default().cell_match_pct);
         assert_eq!(cfg.cell_match_deg, Config::default().cell_match_deg);
+        assert!(cfg.check_updates);
+        // older config files without the key keep checking
+        assert!(toml::from_str::<Config>("port = 443").unwrap().check_updates);
     }
 
     #[test]

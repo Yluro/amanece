@@ -17,6 +17,7 @@ mod rank;
 mod remote;
 mod secret;
 mod ui;
+mod update;
 
 use anyhow::Result;
 use clap::Parser;
@@ -95,6 +96,7 @@ fn main() -> Result<()> {
     });
 
     let mut app = app::App::new(cfg, cfg_path, base, remote, tx, args.user, args.offline);
+    app.start_update_checks();
     if ui::splash::is_premiere_day() {
         app.egg = Some(ui::splash::Egg::new());
     }

@@ -13,6 +13,7 @@ use crate::model::{RemoteFile, SampleInfo, Solve, human_bytes, now_secs};
 use crate::notify;
 use crate::remote::session::HostKey;
 use crate::remote::{DownloadEvent, DownloadJob, RemoteCmd, RemoteEvent, RemoteHandle};
+use crate::update::{self, UpdateEvent};
 use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -27,6 +28,8 @@ pub const MAX_LOGIN_ATTEMPTS: u32 = 3;
 const SCAN_DEBOUNCE: Duration = Duration::from_millis(700);
 /// Re-scan a selected sample with running solves at most this often.
 const RESCAN_RUNNING_SECS: u64 = 60;
+/// Ask GitHub for a newer version this often while amanece stays open.
+const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(24 * 3600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -114,6 +117,8 @@ pub enum Pending {
         sample: String,
         files: Vec<RemoteFile>,
     },
+    /// Download this release and replace the running exe with it.
+    Update(update::Release),
     Quit,
 }
 
@@ -178,6 +183,7 @@ pub enum Badge {
     Poll,
     Sound,
     Logs,
+    Update,
 }
 
 /// Screen layout from the last frame (written by `ui::draw`).
@@ -330,6 +336,9 @@ pub struct App {
     experiments_listed: bool,
     pub hit: RefCell<Hit>,
     last_click: Option<(Instant, u16, u16)>,
+    /// The version widget at the right end of the status bar.
+    pub update: update::State,
+    next_update_check: Option<Instant>,
     pub quit: bool,
 }
 
@@ -401,6 +410,8 @@ impl App {
             experiments_listed: false,
             hit: RefCell::new(Hit::default()),
             last_click: None,
+            update: update::State::Idle,
+            next_update_check: None,
             quit: false,
             cfg,
         };
@@ -712,6 +723,7 @@ impl App {
                 self.on_remote(e);
             }
             AppEvent::Console(e) => self.on_console(e),
+            AppEvent::Update(e) => self.on_update(e),
         }
     }
 
@@ -731,6 +743,12 @@ impl App {
         }
         if (self.cache_dirty || self.cells.dirty()) && self.cache_saved.elapsed() >= Duration::from_secs(2) {
             self.save_cache();
+        }
+        if let Some(at) = self.next_update_check
+            && Instant::now() >= at
+            && !self.update.busy()
+        {
+            self.check_updates(false);
         }
     }
 
@@ -1197,6 +1215,164 @@ impl App {
         self.local.refresh();
     }
 
+    // ---------------------------------------------------------------- updates
+
+    /// The check at startup, then one a day (unless `check_updates = false`).
+    pub fn start_update_checks(&mut self) {
+        if self.cfg.check_updates {
+            self.check_updates(false);
+        }
+    }
+
+    fn check_updates(&mut self, manual: bool) {
+        if self.cfg.check_updates {
+            self.next_update_check = Some(Instant::now() + UPDATE_CHECK_EVERY);
+        }
+        if self.update.busy() {
+            return;
+        }
+        // a badge already up (a newer version, "restart") stays up while checking again
+        if matches!(
+            self.update,
+            update::State::Idle | update::State::UpToDate | update::State::CheckFailed(_)
+        ) {
+            self.update = update::State::Checking;
+        }
+        if manual {
+            self.say(LineKind::Info, "checking GitHub for a newer amanece…");
+        }
+        update::check(self.tx.clone(), manual);
+    }
+
+    fn on_update(&mut self, e: UpdateEvent) {
+        use update::State;
+        let installed = match &self.update {
+            State::Installed(v) => Some(v.clone()),
+            _ => None,
+        };
+        match e {
+            // a check that was under way when a download started: the download wins
+            UpdateEvent::Checked { .. } if matches!(self.update, State::Downloading { .. }) => {}
+            UpdateEvent::Checked { result, manual } => match result {
+                Ok(Some(r)) if installed.as_deref().is_some_and(|v| !update::is_newer(&r.version, v)) => {}
+                Ok(Some(r)) => {
+                    let known = matches!(&self.update, State::Available(a) if a.version == r.version);
+                    if manual || !known {
+                        self.say(
+                            LineKind::Good,
+                            format!(
+                                "amanece v{} is out (this is v{}): press U or click ↑ v{} in the status bar",
+                                r.version,
+                                update::CURRENT,
+                                r.version
+                            ),
+                        );
+                    }
+                    self.update = State::Available(r);
+                }
+                Ok(None) => {
+                    let text = format!("amanece v{} is the latest version", update::CURRENT);
+                    if manual {
+                        self.say(LineKind::Good, text);
+                    } else {
+                        self.console.log_only(&text);
+                    }
+                    if installed.is_none() {
+                        self.update = State::UpToDate;
+                    }
+                }
+                Err(e) => {
+                    let text = format!("cannot check for a newer amanece: {e}");
+                    if manual {
+                        self.say(LineKind::Warn, text);
+                    } else {
+                        self.console.log_only(&text);
+                    }
+                    if self.update == State::Checking {
+                        self.update = State::CheckFailed(e);
+                    }
+                }
+            },
+            UpdateEvent::Progress { done, total } => {
+                if let State::Downloading { done: d, total: t, .. } = &mut self.update {
+                    *d = done;
+                    *t = total.or(*t);
+                }
+            }
+            UpdateEvent::Installed(v) => {
+                self.say(
+                    LineKind::Good,
+                    format!("amanece updated to v{v}: quit (q) and start it again to use it"),
+                );
+                self.update = State::Installed(v);
+            }
+            UpdateEvent::Failed(error) => {
+                self.say(LineKind::Error, format!("update failed: {error}"));
+                if let State::Downloading { release, .. } = &self.update {
+                    self.update = State::Failed { release: release.clone(), error };
+                }
+            }
+        }
+    }
+
+    /// `U`, or a click on the version widget.
+    fn update_action(&mut self) {
+        use update::State;
+        match self.update.clone() {
+            State::Idle | State::UpToDate | State::CheckFailed(_) => self.check_updates(true),
+            State::Checking => self.say(LineKind::Info, "checking GitHub for a newer amanece…"),
+            State::Downloading { release, .. } => {
+                self.say(LineKind::Info, format!("downloading amanece v{}…", release.version))
+            }
+            State::Available(r) => self.ask_update(r, None),
+            State::Failed { release, error } => self.ask_update(release, Some(error)),
+            State::Installed(v) => self.say(
+                LineKind::Info,
+                format!("amanece v{v} is installed: quit (q) and start it again to use it"),
+            ),
+        }
+    }
+
+    fn ask_update(&mut self, r: update::Release, error: Option<String>) {
+        let Some((archive, _)) = &r.archive else {
+            open_with_default_app(std::path::Path::new(&r.page));
+            self.say(
+                LineKind::Info,
+                format!("v{} has no download for this computer: opening its release page", r.version),
+            );
+            return;
+        };
+        let exe = std::env::current_exe()
+            .map(|p| crate::local::strip_verbatim(p).display().to_string())
+            .unwrap_or_else(|_| "amanece".into());
+        let mut lines = vec![
+            format!("amanece v{} is out (this is v{}).", r.version, update::CURRENT),
+            String::new(),
+            format!("Download {} ({}) from GitHub,", archive.name, human_bytes(archive.size)),
+            "check its SHA-256 and replace".into(),
+            format!("  {exe}"),
+            "with it? Start amanece again afterwards to use the new version.".into(),
+        ];
+        if let Some(e) = error {
+            lines.push(String::new());
+            lines.push(format!("The last try failed: {e}"));
+        }
+        lines.push(String::new());
+        lines.push("y = update · o = release notes · n / Esc = not now".into());
+        self.dialog = Some(Dialog::Confirm {
+            title: "Update amanece".into(),
+            lines,
+            action: Pending::Update(r),
+        });
+    }
+
+    fn start_update(&mut self, r: update::Release) {
+        let total = r.archive.as_ref().map(|(a, _)| a.size).filter(|s| *s > 0);
+        self.say(LineKind::Info, format!("downloading amanece v{}…", r.version));
+        update::install(r.clone(), self.tx.clone());
+        self.update = update::State::Downloading { release: r, done: 0, total };
+    }
+
     fn on_console(&mut self, e: ConsoleEvent) {
         match e {
             ConsoleEvent::Output => {}
@@ -1243,6 +1419,7 @@ impl App {
             KeyCode::Char('n') => self.toggle_sound(),
             KeyCode::Char('L') => self.toggle_logs(),
             KeyCode::Char('O') => self.open_state_dir(),
+            KeyCode::Char('U') => self.update_action(),
             KeyCode::Char('E') => {
                 let dir = self.local.cwd.clone();
                 open_with_default_app(&dir);
@@ -1335,6 +1512,7 @@ impl App {
                         Badge::Poll => self.cycle_poll(),
                         Badge::Sound => self.toggle_sound(),
                         Badge::Logs => self.toggle_logs(),
+                        Badge::Update => self.update_action(),
                         Badge::Conn => {
                             if !self.connected() && self.login_attempts < MAX_LOGIN_ATTEMPTS {
                                 self.open_login();
@@ -1434,6 +1612,9 @@ impl App {
         }
         if let Some(r) = &self.console.pty {
             lines.push(format!("`{}` is still running in the console and will be stopped.", r.label));
+        }
+        if let update::State::Downloading { release, .. } = &self.update {
+            lines.push(format!("The download of amanece v{} will be stopped.", release.version));
         }
         lines.push("Quit amanece? (y/n)".into());
         self.dialog = Some(Dialog::Confirm {
@@ -1573,6 +1754,13 @@ impl App {
             Dialog::Confirm { title, lines, action } => match key.code {
                 // Enter alone never deletes: that needs an explicit y.
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.confirmed(action),
+                // the release notes, and the question stays open
+                KeyCode::Char('o') | KeyCode::Char('O') if matches!(action, Pending::Update(_)) => {
+                    if let Pending::Update(r) = &action {
+                        open_with_default_app(std::path::Path::new(&r.page));
+                    }
+                    self.dialog = Some(Dialog::Confirm { title, lines, action });
+                }
                 KeyCode::Enter if !matches!(action, Pending::Delete(_)) => self.confirmed(action),
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {}
                 _ => self.dialog = Some(Dialog::Confirm { title, lines, action }),
@@ -1591,6 +1779,7 @@ impl App {
             Pending::Quit => self.quit = true,
             Pending::Frames { date, sample, files } => self.enqueue_frames(&date, &sample, files),
             Pending::Delete(path) => self.delete_local(&path),
+            Pending::Update(r) => self.start_update(r),
         }
     }
 

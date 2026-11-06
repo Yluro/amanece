@@ -7,6 +7,7 @@ use crate::layout;
 use crate::console::LineKind;
 use crate::model::{SampleInfo, Shell, Solve, Status, human_bytes};
 use crate::rank::{self, Criterion};
+use crate::update;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -1071,11 +1072,33 @@ fn badge(text: String, fg: Color, bg: Color) -> Span<'static> {
     )
 }
 
+/// The version widget at the right end of the status bar: just the version, dim, until
+/// a newer release turns it into a badge that updates on click (or `U`). No ✓/✗ here:
+/// the default Windows console font (Consolas) has no glyph for them.
+fn version_widget(state: &update::State) -> Span<'static> {
+    use update::State;
+    let current = update::CURRENT;
+    match state {
+        State::Idle | State::Checking | State::UpToDate => Span::raw(format!("v{current}")).fg(Color::DarkGray),
+        State::CheckFailed(_) => Span::raw(format!("v{current} ?")).fg(Color::DarkGray),
+        State::Available(r) => badge(format!("↑ v{}", r.version), Color::Black, Color::LightGreen),
+        State::Downloading { release, done, total } => {
+            let pct = total
+                .filter(|t| *t > 0)
+                .map(|t| format!(" {}%", (done * 100 / t).min(100)))
+                .unwrap_or_default();
+            badge(format!("↓ v{}{pct}", release.version), Color::Black, Color::Yellow)
+        }
+        State::Installed(v) => badge(format!("v{v} · restart"), Color::Black, Color::Green),
+        State::Failed { .. } => badge("update failed".into(), Color::White, Color::Red),
+    }
+}
+
 const OFF_FG: Color = Color::Gray;
 const OFF_BG: Color = Color::Rgb(55, 55, 55);
 const BAR_BG: Color = Color::Rgb(25, 25, 25);
 
-/// Status on the right (connection, polling, sound, logs, downloads), global keys on
+/// Status on the right (connection, polling, sound, logs, downloads, version), global keys on
 /// the left, the latest message in between.
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let mut right: Vec<Span> = Vec::new();
@@ -1140,6 +1163,9 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     });
     let req = app.remote.requests.load(std::sync::atomic::Ordering::Relaxed);
     right.push(Span::raw(format!(" req {req} ")).fg(Color::DarkGray));
+    tags.push((right.len(), Badge::Update));
+    right.push(version_widget(&app.update));
+    right.push(Span::raw(" "));
     let right = Line::from(right);
 
     let key = |k: &'static str, d: &'static str| {
@@ -1349,7 +1375,7 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
             f.render_widget(Paragraph::new(lines).block(dialog_block(title)), r);
         }
         Dialog::Help => {
-            let r = centered(80, 44, area);
+            let r = centered(80, help_lines().len() as u16 + 2, area);
             f.render_widget(Clear, r);
             f.render_widget(
                 Paragraph::new(help_lines()).block(dialog_block("Keys (any key closes)")),
@@ -1376,6 +1402,7 @@ fn help_lines() -> Vec<Line<'static>> {
         row("X", "cancel queued downloads"),
         row("E", "open the Local panel's folder in the file explorer"),
         row("O", "open amanece's folder (config.toml, cache, amanece.log)"),
+        row("U", "update amanece when the status bar shows ↑ v… (asks first); else check now"),
         row("q", "quit"),
         sec("Local (left)"),
         row("Enter / →", "open folder        Backspace / ←  parent"),
@@ -1384,9 +1411,8 @@ fn help_lines() -> Vec<Line<'static>> {
         row("b", "back to the launch folder    r  refresh"),
         sec("ALBA (beamtimes and samples, like folders)"),
         row("Enter / →", "open a beamtime (hides the others) / go to a sample's stats"),
-        row("Backspace / ←", "back to the beamtime list"),
+        row("Backspace / ←", "back to the beamtime list    r  refresh listing"),
         row("s", "rescan sample      S  fetch stats for the whole beamtime"),
-        row("r", "refresh listing"),
         sec("Stats"),
         row("Space", "mark solve for download / tick a frames run"),
         row("a", "mark all solves with HKL files"),
@@ -2057,6 +2083,75 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    fn key(app: &mut App, c: char) {
+        use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        app.handle(crate::event::AppEvent::Input(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))));
+    }
+
+    #[test]
+    fn version_widget_offers_a_newer_release() {
+        use crate::update::{Asset, Release, State};
+        let base = std::env::temp_dir().join(format!("amanece_update_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        let bar = |app: &App| render(app, 170, 42).lines().last().unwrap().to_string();
+        // not checked yet / up to date: only the version, at the right end
+        assert!(bar(&app).ends_with(&format!("v{}", crate::update::CURRENT)));
+        app.update = State::UpToDate;
+        assert!(bar(&app).ends_with(&format!("v{}", crate::update::CURRENT)));
+
+        let asset = |name: &str| Asset { name: name.into(), url: format!("https://example/{name}"), size: 3_358_132 };
+        let release = Release {
+            version: "9.9.9".into(),
+            page: "https://github.com/Yluro/amanece/releases/tag/v9.9.9".into(),
+            archive: Some((asset("amanece-v9.9.9-x.zip"), asset("amanece-v9.9.9-x.zip.sha256"))),
+        };
+        app.update = State::Available(release.clone());
+        let screen = render(&app, 170, 42);
+        assert!(screen.lines().last().unwrap().ends_with("↑ v9.9.9"));
+        // a click asks first; n leaves everything as it was
+        let (x, y) = find(&screen, "↑ v9.9.9");
+        click(&mut app, x + 2, y);
+        assert!(matches!(app.dialog, Some(Dialog::Confirm { action: crate::app::Pending::Update(_), .. })));
+        let dialog = render(&app, 170, 42);
+        assert!(dialog.contains("amanece v9.9.9 is out") && dialog.contains("amanece-v9.9.9-x.zip (3.4 MB)"));
+        assert!(dialog.contains("y = update"));
+        key(&mut app, 'n');
+        assert!(app.dialog.is_none());
+        assert_eq!(app.update, State::Available(release.clone()));
+        // the daily re-check failing (offline) keeps the badge
+        app.handle(crate::event::AppEvent::Update(crate::update::UpdateEvent::Checked {
+            result: Err("offline".into()),
+            manual: false,
+        }));
+        assert_eq!(app.update, State::Available(release.clone()));
+        // U asks the same
+        key(&mut app, 'U');
+        assert!(matches!(app.dialog, Some(Dialog::Confirm { action: crate::app::Pending::Update(_), .. })));
+        key(&mut app, 'n');
+
+        app.update = State::Downloading { release: release.clone(), done: 1_000_000, total: Some(4_000_000) };
+        assert!(bar(&app).ends_with("↓ v9.9.9 25%"));
+        // a check that was under way when the download started changes nothing
+        app.handle(crate::event::AppEvent::Update(crate::update::UpdateEvent::Checked {
+            result: Ok(Some(release.clone())),
+            manual: false,
+        }));
+        assert!(bar(&app).ends_with("↓ v9.9.9 25%"));
+        app.handle(crate::event::AppEvent::Update(crate::update::UpdateEvent::Failed("no network".into())));
+        assert!(bar(&app).ends_with("update failed"));
+        assert!(matches!(&app.update, State::Failed { error, .. } if error == "no network"));
+        app.handle(crate::event::AppEvent::Update(crate::update::UpdateEvent::Installed("9.9.9".into())));
+        assert!(bar(&app).ends_with("v9.9.9 · restart"));
+        // a later daily check that finds the same release keeps saying "restart"
+        app.handle(crate::event::AppEvent::Update(crate::update::UpdateEvent::Checked {
+            result: Ok(Some(release)),
+            manual: false,
+        }));
+        assert_eq!(app.update, State::Installed("9.9.9".into()));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[test]
     fn stats_lists_samples_with_the_same_cell() {
         let base = std::env::temp_dir().join(format!("amanece_cells_ui_{}", std::process::id()));
@@ -2280,6 +2375,8 @@ mod tests {
         app.dialog = Some(Dialog::Help);
         let screen = render(&app, 170, 46);
         assert!(screen.contains("★") && screen.contains("checkCIF C yellow, B orange, A red"));
+        assert!(screen.contains("≈ same cell"));
+        assert!(screen.contains("U               update amanece"));
         // the last line still shows: the box holds 42 lines
         assert!(screen.contains("Windows GUI programs (xprep, shelxle, olex2…)"));
         std::fs::remove_dir_all(&base).ok();
