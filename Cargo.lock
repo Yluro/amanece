@@ -65,8 +65,10 @@ name = "amanece"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "directories",
+ "md5",
  "portable-pty",
  "ratatui",
  "regex",

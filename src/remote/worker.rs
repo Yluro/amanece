@@ -7,6 +7,7 @@
 use super::scan;
 use super::session::{self, ConnectError, Connection, HostKey, Target};
 use super::sftp::{Limiter, ReadOnlySftp};
+use crate::cbf;
 use crate::event::AppEvent;
 use crate::model::{RemoteFile, SampleInfo};
 use anyhow::{Result, anyhow};
@@ -83,7 +84,9 @@ pub enum RemoteCmd {
 pub enum DownloadEvent {
     Started { id: u64, label: String, total: Option<u64> },
     Progress { id: u64, done: u64, total: Option<u64> },
-    Finished { id: u64, label: String, bytes: u64, skipped: bool },
+    /// `verified`: a frame (`.cbf`) whose bytes match its own Content-MD5, whether
+    /// just downloaded or already here (`skipped`). False for files with nothing to check.
+    Finished { id: u64, label: String, bytes: u64, skipped: bool, verified: bool },
     Failed { id: u64, label: String, message: String },
 }
 
@@ -585,6 +588,15 @@ async fn download_worker(
                 fail(format!("{e:#}"));
                 break;
             }
+            // the whole frame arrived but fails its own checksum: the session is fine, so
+            // fetch it again from scratch (download_one already removed the .part)
+            if e.is::<cbf::Corrupt>() {
+                emit(
+                    &events,
+                    RemoteEvent::Notice(format!("{}: {e:#}; downloading it again", job.label)),
+                );
+                continue;
+            }
             // Did the session die under us? The command loop checks and reconnects once,
             // however many workers ask.
             let (tx, answer) = tokio::sync::oneshot::channel();
@@ -625,6 +637,43 @@ fn discard_part(local: &std::path::Path) {
     let _ = std::fs::remove_file(part_path(local));
 }
 
+/// Frames (`job.local` is a `.cbf`) are checked against their own Content-MD5; other
+/// files pass unread. `path` is the file to read: the `.part` or the local file.
+async fn self_check(job: &DownloadJob, path: &std::path::Path) -> Result<cbf::Check> {
+    if !cbf::is_cbf(&job.local) {
+        return Ok(cbf::Check::Unchecked);
+    }
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || cbf::check_file(&path)).await?
+}
+
+/// The local file already has the remote size. A frame must also pass its checksum to
+/// be kept (true, reported as skipped); a corrupt copy is fetched again (false).
+async fn keep_local(job: &DownloadJob, have: u64, events: &std::sync::mpsc::Sender<AppEvent>) -> bool {
+    match self_check(job, &job.local).await {
+        Ok(check) => {
+            emit(
+                events,
+                RemoteEvent::Download(DownloadEvent::Finished {
+                    id: job.id,
+                    label: job.label.clone(),
+                    bytes: have,
+                    skipped: true,
+                    verified: check == cbf::Check::Verified,
+                }),
+            );
+            true
+        }
+        Err(e) => {
+            emit(
+                events,
+                RemoteEvent::Notice(format!("{}: local copy failed its check ({e:#}); downloading it again", job.label)),
+            );
+            false
+        }
+    }
+}
+
 async fn download_one(
     sftp: &ReadOnlySftp,
     job: &DownloadJob,
@@ -632,36 +681,22 @@ async fn download_one(
     shared: &Shared,
     events: &std::sync::mpsc::Sender<AppEvent>,
 ) -> Result<()> {
-    let local_len = std::fs::metadata(&job.local).ok().map(|m| m.len());
+    let mut local_len = std::fs::metadata(&job.local).ok().map(|m| m.len());
     if let (Some(want), Some(have)) = (job.size, local_len)
         && want == have
     {
-        emit(
-            events,
-            RemoteEvent::Download(DownloadEvent::Finished {
-                id: job.id,
-                label: job.label.clone(),
-                bytes: have,
-                skipped: true,
-            }),
-        );
-        return Ok(());
+        if keep_local(job, have, events).await {
+            return Ok(());
+        }
+        local_len = None;
     }
     let mut reader = sftp.open_download(&job.remote).await?;
     let total = reader.size.or(job.size);
     if let (Some(want), Some(have)) = (total, local_len)
         && want == have
+        && keep_local(job, have, events).await
     {
         reader.close().await;
-        emit(
-            events,
-            RemoteEvent::Download(DownloadEvent::Finished {
-                id: job.id,
-                label: job.label.clone(),
-                bytes: have,
-                skipped: true,
-            }),
-        );
         return Ok(());
     }
     emit(
@@ -732,6 +767,14 @@ async fn download_one(
         let _ = tokio::fs::remove_file(&part).await;
         return Err(anyhow!("incomplete: got {done} of {t} bytes"));
     }
+    // a frame that fails its own checksum never gets its final name; the worker retries
+    let check = match self_check(job, &part).await {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&part).await;
+            return Err(e);
+        }
+    };
     tokio::fs::rename(&part, &job.local).await?;
     emit(
         events,
@@ -740,6 +783,7 @@ async fn download_one(
             label: job.label.clone(),
             bytes: done,
             skipped: false,
+            verified: check == cbf::Check::Verified,
         }),
     );
     Ok(())
@@ -772,6 +816,57 @@ mod tests {
         s.push(0, vec![job(10, true)]);
         let order: Vec<u64> = std::iter::from_fn(|| s.take(false).map(|q| q.job.id)).collect();
         assert_eq!(order, vec![10, 1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn only_frames_are_self_checked() {
+        let dir = std::env::temp_dir().join(format!("amanece_selfcheck_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut bad = cbf::tests::tiny_cbf(Some(cbf::tests::BINARY_MD5));
+        let binary = bad.windows(4).position(|w| w == b"\x0c\x1a\x04\xd5").unwrap() + 4;
+        bad[binary + 2] ^= 0x01;
+        let frame = |name: &str| DownloadJob {
+            local: dir.join(name),
+            ..job(1, false)
+        };
+
+        let good = frame("good_0001.cbf");
+        std::fs::write(&good.local, cbf::tests::tiny_cbf(Some(cbf::tests::BINARY_MD5))).unwrap();
+        assert_eq!(self_check(&good, &good.local).await.unwrap(), cbf::Check::Verified);
+
+        // the download's .part is checked by the final name's extension
+        let corrupt = frame("bad_0001.cbf");
+        let part = part_path(&corrupt.local);
+        std::fs::write(&part, &bad).unwrap();
+        assert!(self_check(&corrupt, &part).await.unwrap_err().is::<cbf::Corrupt>());
+
+        // anything but a frame passes unread, whatever it holds
+        let hkl = frame("XDS_ASCII.HKL");
+        std::fs::write(&hkl.local, &bad).unwrap();
+        assert_eq!(self_check(&hkl, &hkl.local).await.unwrap(), cbf::Check::Unchecked);
+
+        // keep_local: a corrupt frame of the right size is not kept, a good one is
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::fs::write(&corrupt.local, &bad).unwrap();
+        assert!(!keep_local(&corrupt, bad.len() as u64, &tx).await);
+        assert!(keep_local(&good, 1, &tx).await);
+        let events: Vec<AppEvent> = rx.try_iter().collect();
+        assert!(
+            matches!(&events[0], AppEvent::Remote(RemoteEvent::Notice(m)) if m.contains("Content-MD5 mismatch")),
+            "{events:?}"
+        );
+        assert!(
+            matches!(
+                &events[1],
+                AppEvent::Remote(RemoteEvent::Download(DownloadEvent::Finished {
+                    skipped: true,
+                    verified: true,
+                    ..
+                }))
+            ),
+            "{events:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

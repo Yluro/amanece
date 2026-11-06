@@ -178,6 +178,8 @@ pub struct Group {
     pub bytes: u64,
     pub done_files: usize,
     pub done_bytes: u64,
+    /// Done files that passed their CBF Content-MD5 check.
+    pub verified: usize,
     pub failed: usize,
     pub cancelled: usize,
     pub first_error: Option<String>,
@@ -953,6 +955,7 @@ impl App {
                 label,
                 bytes,
                 skipped,
+                verified,
             } => {
                 self.downloads.queued = self.downloads.queued.saturating_sub(1);
                 self.downloads.done += 1;
@@ -965,15 +968,17 @@ impl App {
                         if let Some(g) = self.downloads.groups.iter_mut().find(|g| g.id == gid) {
                             g.done_files += 1;
                             g.done_bytes += bytes;
+                            g.verified += usize::from(verified);
                         }
                         self.finish_group(gid);
                     }
                     None => {
+                        let md5 = if verified { ", MD5 OK" } else { "" };
                         if skipped {
-                            self.console.push(LineKind::Info, format!("= {label} (already here)"));
+                            self.console.push(LineKind::Info, format!("= {label} (already here{md5})"));
                         } else {
                             self.console
-                                .push(LineKind::Good, format!("↓ {label}  {}", human_bytes(bytes)));
+                                .push(LineKind::Good, format!("↓ {label}  {}{md5}", human_bytes(bytes)));
                         }
                         // at once, not when the queue is empty: frames may keep it busy for long
                         self.local.refresh();
@@ -1024,9 +1029,19 @@ impl App {
                 format!("frames {}: cancelled after {}/{} files", g.label, g.done_files, g.files),
             );
         } else if g.failed == 0 {
+            let md5 = match g.verified {
+                0 => String::new(),
+                n if n == g.files => ", all MD5 verified".into(),
+                n => format!(", {n} MD5 verified"),
+            };
             self.say(
                 LineKind::Good,
-                format!("✓ frames {}: done, {} files, {} in {took}", g.label, g.files, human_bytes(g.done_bytes)),
+                format!(
+                    "✓ frames {}: done, {} files, {} in {took}{md5}",
+                    g.label,
+                    g.files,
+                    human_bytes(g.done_bytes)
+                ),
             );
         } else {
             self.say(
@@ -1971,6 +1986,7 @@ impl App {
                 bytes,
                 done_files: 0,
                 done_bytes: 0,
+                verified: 0,
                 failed: 0,
                 cancelled: 0,
                 first_error: None,
