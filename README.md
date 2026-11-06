@@ -88,7 +88,17 @@ Each panel shows its keys on its bottom border; `?` lists them all. In short:
   `Enter` opens one (the others are hidden), `Backspace` goes back.
   A green ◆ next to a sample: it's already downloaded (from this beamtime) into the Local folder;
   yellow ◆: only a local folder with the same name exists.
-- **Stats**: every solve with its statistics, ★ on the best one. `Space` marks, `d` downloads,
+- **Stats**: every solve with its statistics, ★ on the best one. The details under the table show
+  how the ★ was chosen: each solve's points for completeness (30), CC½ (30), inner-shell R (20) and
+  d_min (20), its place in the ranking, and for the others how far behind ★ they are and which
+  criterion cost them most (or why a solve isn't ranked at all: failed, running, no HKL file).
+  Values that would draw a checkCIF alert are coloured, yellow for C, orange for B and red for A:
+  d_min (THETM01, sin θ/λ < 0.590 / 0.575 / 0.550), completeness (PLAT029, < 99 / 97 / 95 %) and
+  Rmerge as a stand-in for Rint (RINTA01, > 10 / 15 / 20 %). The details spell each alert out.
+  These come from the pipeline's overall shell, so they are a warning at the beamline, not checkCIF
+  itself: the completeness runs to the pipeline's d_min (checkCIF tests θ_full, usually higher), and
+  checkCIF doesn't publish the PLAT029 limits (these are read off real reports). Change the limits
+  in the `[checkcif]` section of `config.toml`. `Space` marks, `d` downloads,
   `F` downloads raw frames (asks first). Frames download a few files at a time (`parallel_downloads`
   in the config, default 3) with a progress bar above the status bar; more frame datasets wait their
   turn. HKL/log downloads (`d`) jump the queue and start right away, even while frames are
@@ -116,7 +126,16 @@ cache, log), `q` quits (asks first).
 Everything else goes in one folder, `%APPDATA%\amanece\config\` on Windows (`~/.config/amanece/`
 on Linux, `~/Library/Application Support/amanece/` on macOS). Press `O` in the app to open it.
 
-- `config.toml` – settings (poll intervals, sound, `remote_root`, …)
+- `config.toml` – settings (poll intervals, sound, `remote_root`, checkCIF alert limits, …). It is
+  written once, on first run; a `config.toml` from an older version has no `[checkcif]` section and
+  uses the defaults. To change them, add:
+
+  ```toml
+  [checkcif]                                 # limits for alert levels C, B, A
+  sin_theta_lambda = [0.590, 0.575, 0.550]   # 1/Å, alert below (d_min 0.85 / 0.87 / 0.91 Å)
+  completeness = [99.0, 97.0, 95.0]          # %, alert below
+  rint = [10.0, 15.0, 20.0]                  # %, alert above (compared with Rmerge)
+  ```
 - `known_hosts` – the server's pinned host key
 - `cache-<id>.json` – listings and stats already fetched, one file per account (`<id>` is a hash,
   not the username)
