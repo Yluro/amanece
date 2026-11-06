@@ -80,6 +80,8 @@ Each panel shows its keys on its bottom border; `?` lists them all. In short:
   in the config, default 3) with a progress bar above the status bar; more frame datasets wait their
   turn. HKL/log downloads (`d`) jump the queue and start right away, even while frames are
   downloading. If the connection drops, it reconnects and continues where each file stopped.
+  Every frame is checked against the MD5 checksum stored in its own CBF header, both after it
+  arrives and when one already in the folder is skipped; a frame that fails is downloaded again.
 - **Console**: a terminal (Windows ConPTY). `:` to type. Commands run in the Local folder and a
   bare program name gets the selected file: with `XDS_ASCII.HKL` selected, `xprep` runs
   `xprep XDS_ASCII.HKL`. Interactive console programs work: while SADABS (or any program) runs,

@@ -1,5 +1,6 @@
 mod app;
 mod cache;
+mod cbf;
 mod config;
 mod console;
 mod download;

@@ -198,6 +198,23 @@ Gotchas:
   (files, bytes, speed, ETA, failures, other datasets queued). The console gets two lines per dataset (started,
   then done / failed / cancelled), not one per frame; HKL and log downloads still get a line per file.
 
+### 2.13 Frame checksums (2026-11-06)
+
+- CrysAlisPro could not index JSG331 and amanece was suspected of corrupting the frames. It wasn't: all 720
+  frames passed their own checksum and matched WinSCP copies byte for byte (the cause was a 90° spindle-axis
+  mismatch in the instrument model). But nothing in amanece could answer "are my frames intact?", and a
+  local file of the right size was trusted as is.
+- Every Pilatus miniCBF carries `Content-MD5` in the MIME header of its binary section: base64 MD5 of the
+  `X-Binary-Size` bytes after the `0C 1A 04 D5` marker (padding after them is not covered). `cbf.rs` checks it.
+- A downloaded `.cbf` is checked before its `.part` is renamed. A mismatch removes the `.part` and the worker
+  fetches the file again from scratch (a warning line in the console); after 3 such tries the file fails with
+  the mismatch as its error. A `.cbf` already here with the remote size is checked too, and fetched again if it
+  fails. Other files, and CBFs without `Content-MD5`, are not checked.
+- `DownloadEvent::Finished` has a `verified` flag; the dataset's closing line ends in "all MD5 verified" (or
+  "N MD5 verified" when only some frames carry a checksum).
+- OneDrive cloud-only placeholders (Files On-Demand) are not read for the skip-existing check: reading them
+  would pull every frame back from the cloud. Their size alone is trusted, as before.
+
 ## 3. Gentle-scraping rules (hard requirements)
 
 1. **Read-only by construction.** The SFTP wrapper type exposes only `read_dir`, `stat` and `open_read`.
@@ -212,8 +229,8 @@ Gotchas:
 6. **Max 3 login attempts per launch**, then exit, to stay clear of lockouts.
 7. **Downloads**: at most `parallel_downloads` (default 3, max 4) frames at a time plus one HKL/log slot (§2.12),
    file opens ≤ 10/s, over the same single connection. Each goes to `*.part`, then is renamed locally; a dropped
-   session resumes the `.part`. Skip if the local file exists with the same size. Raw frames only after a
-   confirm dialog showing the total size.
+   session resumes the `.part`. Skip if the local file exists with the same size *(2026-11-06: and, for a
+   `.cbf` frame, passes its own Content-MD5, §2.13)*. Raw frames only after a confirm dialog showing the total size.
 8. Never list `RAW_DATA/` unless frames are requested; never list autoPROC's `<id>/` working dir.
 
 ## 4. Decisions (from the Q&A on 2026-10-22)
@@ -278,12 +295,13 @@ src/
 ├── config.rs          %APPDATA%\amanece\config\config.toml (poll mode, sound, external_window…; never credentials);
 │                      the same dir holds known_hosts, the caches, amanece.log and login.toml
 ├── cache.rs           <config dir>/cache-<account hash>.json
+├── cbf.rs             miniCBF self-check: binary section vs its Content-MD5 (§2.13)
 ├── local.rs           local directory model
 ├── remote/
 │   ├── session.rs     russh connect + password/keyboard-interactive auth, TOFU host-key check
 │   ├── sftp.rs        ReadOnlySftp newtype (read_dir / stat / open_read only)
 │   ├── worker.rs      command loop (listing, reconnect/backoff) + download workers (express/bulk queues,
-│   │                  resume, progress events)
+│   │                  resume, CBF check, progress events)
 │   ├── layout.rs      path building + discovery for both layouts, regexes, test-sample detection
 │   └── ispyb.rs       AutoProcContainer parser + unit normalisation
 ├── download.rs        job → local path mapping, .part/rename, skip-existing, provenance file

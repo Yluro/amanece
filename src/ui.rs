@@ -2006,9 +2006,9 @@ mod tests {
         let screen = render(&app, 170, 42);
         assert!(screen.contains("frames JSG285b/frames_r3"), "{screen}");
         assert!(screen.contains("0/3 files") && screen.contains("█"));
-        app.handle(ev(DownloadEvent::Finished { id: ids[0], label: label(1), bytes: 100, skipped: false }));
+        app.handle(ev(DownloadEvent::Finished { id: ids[0], label: label(1), bytes: 100, skipped: false, verified: false }));
         app.handle(ev(DownloadEvent::Started { id: ids[1], label: label(2), total: Some(100) }));
-        app.handle(ev(DownloadEvent::Finished { id: ids[1], label: label(2), bytes: 100, skipped: false }));
+        app.handle(ev(DownloadEvent::Finished { id: ids[1], label: label(2), bytes: 100, skipped: false, verified: false }));
         app.handle(ev(DownloadEvent::Started { id: ids[2], label: label(3), total: Some(100) }));
         app.handle(ev(DownloadEvent::Failed { id: ids[2], label: label(3), message: "boom".into() }));
         assert!(app.downloads.groups.is_empty());
@@ -2019,6 +2019,39 @@ mod tests {
         // the bar is gone once the dataset is done
         let screen = render(&app, 170, 42);
         assert!(!screen.contains("█") && !screen.contains("files ·"), "{screen}");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn frames_say_when_every_checksum_matched() {
+        use crate::event::AppEvent;
+        use crate::remote::{DownloadEvent, RemoteEvent};
+        let base = std::env::temp_dir().join(format!("amanece_md5_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        let ev = |d| AppEvent::Remote(RemoteEvent::Download(d));
+        let label = |i: u64| format!("frames_r3/manually-mounted_3_000{i}.cbf");
+        let run = |app: &mut App, verified: [bool; 2]| {
+            let files: Vec<RemoteFile> = (1..=2)
+                .map(|i| RemoteFile::new(format!("/r/manually-mounted_3_000{i}.cbf"), Some(100)))
+                .collect();
+            app.enqueue_frames("20251211", "JSG285b", files);
+            let mut ids: Vec<u64> = app.downloads.job_group.keys().copied().collect();
+            ids.sort();
+            for (k, &id) in ids.iter().enumerate() {
+                let (label, verified) = (label(k as u64 + 1), verified[k]);
+                // the second is already here: skipped, but still checked
+                let skipped = k == 1;
+                app.handle(ev(DownloadEvent::Finished { id, label, bytes: 100, skipped, verified }));
+            }
+            app.console.lines.back().map(|l| l.text.clone()).unwrap_or_default()
+        };
+        let all = run(&mut app, [true, true]);
+        assert!(all.contains("done, 2 files") && all.ends_with(", all MD5 verified"), "{all}");
+        let some = run(&mut app, [true, false]);
+        assert!(some.ends_with(", 1 MD5 verified"), "{some}");
+        let none = run(&mut app, [false, false]);
+        assert!(!none.contains("MD5"), "{none}");
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -2041,7 +2074,7 @@ mod tests {
         let ev = |d| AppEvent::Remote(RemoteEvent::Download(d));
         let label = "autoproc_anom_r1/XDS_ASCII.HKL".to_string();
         app.handle(ev(DownloadEvent::Started { id: 9999, label: label.clone(), total: Some(1) }));
-        app.handle(ev(DownloadEvent::Finished { id: 9999, label, bytes: 1, skipped: false }));
+        app.handle(ev(DownloadEvent::Finished { id: 9999, label, bytes: 1, skipped: false, verified: false }));
         assert!(app.downloads.queued > 0 && !app.downloads.groups.is_empty());
         assert!(names(&app).contains(&"KS347".to_string()), "{:?}", names(&app));
         std::fs::remove_dir_all(&base).ok();
