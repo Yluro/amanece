@@ -9,6 +9,7 @@ anyhow = "1.0.104"
 base64 = "0.22.1"
 clap = { version = "4.6.7", features = ["derive"] }
 directories = "6.0.0"
+flate2 = "1.1.10"
 keyring = "4.2.0"
 md5 = "0.8.1"
 portable-pty = "0.9.0"
@@ -17,12 +18,17 @@ regex = "1.13.1"
 roxmltree = "0.21.1"
 russh = { version = "0.64.1", default-features = false, features = ["ring", "flate2", "rsa"] }
 russh-sftp = "3.0.1"
+self-replace = "1.5.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.10.9"
+tar = { version = "0.4.46", default-features = false }
 tokio = { version = "1.54.1", features = ["full"] }
 toml = "1.1.8"
 trash = "5.2.9"
+ureq = { version = "3.5.1", features = ["platform-verifier"] }
 vt100 = "0.18.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Diagnostics_Debug", "Win32_System_SystemInformation", "Win32_UI_WindowsAndMessaging"] }
+zip = { version = "9.4.1", default-features = false, features = ["deflate-flate2"] }

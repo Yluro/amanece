@@ -77,6 +77,8 @@ pub struct Config {
     pub beamlines: Vec<String>,
     /// Proposal folder on the server, if automatic detection doesn't find it.
     pub remote_root: Option<String>,
+    /// Ask GitHub for a newer amanece at startup and once a day (`U` updates).
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -96,6 +98,7 @@ impl Default for Config {
             parallel_downloads: 3,
             beamlines: vec!["bl13".into(), "bl06".into()],
             remote_root: None,
+            check_updates: true,
         }
     }
 }
@@ -134,6 +137,10 @@ parallel_downloads = 3
 # on each of these beamlines (bl13 = XALOC, bl06 = XAIRA)
 beamlines = ["bl13", "bl06"]
 # remote_root = "/bl13/projects/cycle2026-I/<account digits>-<pi>"
+
+# ask GitHub for a newer amanece at startup and once a day (one small request;
+# nothing is downloaded until you press U and say yes)
+check_updates = true
 "#;
 
 impl Config {
@@ -313,6 +320,9 @@ mod tests {
         assert_eq!(cfg.port, 443);
         assert_eq!(cfg.poll_mode, PollMode::Manual);
         assert_eq!(cfg.external_window, vec!["xprep".to_string()]);
+        assert!(cfg.check_updates);
+        // older config files without the key keep checking
+        assert!(toml::from_str::<Config>("port = 443").unwrap().check_updates);
     }
 
     #[test]

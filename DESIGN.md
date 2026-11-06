@@ -215,6 +215,23 @@ Gotchas:
 - OneDrive cloud-only placeholders (Files On-Demand) are not read for the skip-existing check: reading them
   would pull every frame back from the cloud. Their size alone is trusted, as before.
 
+### 2.14 Version check and self-update (2026-11-06)
+
+- The right end of the status bar shows the running version, dim. At startup and once a day amanece asks the
+  GitHub API for `releases/latest` of Yluro/amanece (one unauthenticated request, far below the 60/h limit);
+  `check_updates = false` in config.toml turns that off, and `U` / a click on the version still checks on demand.
+  This is the only network access besides the ALBA server, and it never goes to the ALBA server.
+- A newer release turns the version into a green `↑ v…` badge. `U` or a click asks first (archive name and size,
+  the exe that will be replaced); `o` in that dialog opens the release page. Nothing is downloaded before `y`.
+- The update (`update.rs`, a std thread with blocking `ureq`, system certificates via rustls-platform-verifier):
+  download `amanece-v…-<target>.zip|.tar.gz` and its `.sha256` from the release; the SHA-256 must match; the
+  binary is taken from the archive, written next to the running exe (proves the folder is writable, avoids a
+  noexec `/tmp`), started once with `--version`, which must print the new version (catches e.g. a glibc too old),
+  and only then swapped in with `self-replace`. The running program stays the old one until restarted: the badge
+  says `v… · restart`. Any failure before the swap leaves the old exe untouched.
+- Platforms without a release archive (or a release missing this platform's archive or `.sha256`) get the
+  release page in the browser instead.
+
 ## 3. Gentle-scraping rules (hard requirements)
 
 1. **Read-only by construction.** The SFTP wrapper type exposes only `read_dir`, `stat` and `open_read`.
