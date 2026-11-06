@@ -241,7 +241,7 @@ pub fn clock(secs: f64) -> String {
 pub struct App {
     pub cfg: Config,
     pub config_path: Option<PathBuf>,
-    /// The config folder, also holding the caches, the log and the remembered username.
+    /// The config folder, also holding the caches, the log and the remembered usernames.
     pub state_dir: Option<PathBuf>,
     /// Launch folder: only where the Local panel starts (and `b` returns to).
     pub base: PathBuf,
@@ -252,9 +252,10 @@ pub struct App {
     pub egg: Option<Egg>,
     pub conn: Conn,
     pub login_attempts: u32,
-    /// Prefills the login dialog: `--user`, the remembered one, or the last login.
+    /// Prefills the login dialog: `--user`, the last remembered one, or the last login.
     last_user: Option<String>,
-    remember_user: bool,
+    /// Remembered usernames, most recently used first; ←→ picks them in the login dialog.
+    pub saved_users: Vec<String>,
     pub local: LocalPanel,
     pub cache: Cache,
     cache_dirty: bool,
@@ -308,9 +309,13 @@ impl App {
         offline: bool,
     ) -> App {
         let state_dir = config_path.as_ref().and_then(|p| p.parent()).map(PathBuf::from);
-        let remembered = state_dir.as_deref().and_then(crate::config::remembered_user);
-        let remember_user = remembered.is_some();
-        let last_user = user.filter(|u| !u.trim().is_empty()).or(remembered);
+        let saved_users = state_dir
+            .as_deref()
+            .map(crate::config::remembered_users)
+            .unwrap_or_default();
+        let last_user = user
+            .filter(|u| !u.trim().is_empty())
+            .or_else(|| saved_users.first().cloned());
         let cache = Cache::load_startup(state_dir.as_deref(), &cfg.host, last_user.as_deref(), &base);
         let mut app = App {
             poll_mode: cfg.poll_mode,
@@ -328,7 +333,7 @@ impl App {
             conn: Conn::Offline,
             login_attempts: 0,
             last_user,
-            remember_user,
+            saved_users,
             cache,
             cache_dirty: false,
             cache_saved: Instant::now(),
@@ -405,24 +410,46 @@ impl App {
     fn open_login(&mut self) {
         let user = self.last_user.clone().unwrap_or_default();
         let field = if user.is_empty() { 0 } else { 1 };
+        let remember = self.is_saved(&user);
         self.dialog = Some(Dialog::Login(Login {
             user,
             pass: String::new(),
             field,
-            remember: self.remember_user,
+            remember,
             busy: false,
             error: None,
         }));
     }
 
-    /// Saves (`Some`) or forgets (`None`) the username for the next login dialog.
-    fn remember_login(&mut self, user: Option<&str>) {
+    fn is_saved(&self, user: &str) -> bool {
+        self.saved_users.iter().any(|u| u == user.trim())
+    }
+
+    /// Puts the username first in the remembered list (`keep`) or forgets it.
+    fn remember_login(&mut self, user: &str, keep: bool) {
         let Some(dir) = self.state_dir.clone() else {
             return;
         };
-        if let Err(e) = crate::config::remember_user(&dir, user) {
-            self.say(LineKind::Warn, format!("cannot update the remembered username: {e}"));
+        match crate::config::remember_user(&dir, user, keep) {
+            Ok(users) => self.saved_users = users,
+            Err(e) => self.say(LineKind::Warn, format!("cannot update the remembered usernames: {e}")),
         }
+    }
+
+    /// ←→ in the username field: the next (or previous) remembered username.
+    fn cycle_saved_user(&self, l: &mut Login, next: bool) {
+        let n = self.saved_users.len();
+        if n == 0 {
+            return;
+        }
+        let i = match (self.saved_users.iter().position(|u| u == l.user.trim()), next) {
+            (Some(i), true) => (i + 1) % n,
+            (Some(i), false) => (i + n - 1) % n,
+            (None, true) => 0,
+            (None, false) => n - 1,
+        };
+        l.user = self.saved_users[i].clone();
+        l.remember = true;
     }
 
     /// After a login: switch to that account's cache, or claim the one shown before
@@ -696,7 +723,7 @@ impl App {
                     let remember = l.remember;
                     self.dialog = None;
                     if remember {
-                        self.remember_login(Some(&user));
+                        self.remember_login(&user, true);
                     }
                 }
                 self.last_user = Some(user.clone());
@@ -1172,6 +1199,7 @@ impl App {
         }
         if self.dialog.is_some() {
             let p = Position::new(m.column, m.row);
+            // the "remember username" box; the saved list only changes when a login is sent
             if clicked
                 && let Some(Dialog::Login(l)) = &mut self.dialog
                 && !l.busy
@@ -1333,9 +1361,17 @@ impl App {
                         );
                         return;
                     }
+                    KeyCode::Left | KeyCode::Right if l.field == 0 => {
+                        self.cycle_saved_user(&mut l, key.code == KeyCode::Right)
+                    }
                     KeyCode::Tab | KeyCode::Down => l.field = (l.field + 1) % 3,
                     KeyCode::BackTab | KeyCode::Up => l.field = (l.field + 2) % 3,
                     KeyCode::Char(' ') if l.field == 2 => l.remember = !l.remember,
+                    // forget the saved name shown, without logging in
+                    KeyCode::Delete if l.field == 0 && self.is_saved(&l.user) => {
+                        self.remember_login(&l.user, false);
+                        l.remember = false;
+                    }
                     KeyCode::Enter => {
                         if l.field == 0 && !l.user.is_empty() {
                             l.field = 1;
@@ -1343,9 +1379,8 @@ impl App {
                             l.busy = true;
                             l.error = None;
                             self.conn = Conn::Connecting;
-                            self.remember_user = l.remember;
                             if !l.remember {
-                                self.remember_login(None);
+                                self.remember_login(&l.user, false);
                             }
                             self.remote.send(RemoteCmd::Connect {
                                 user: l.user.trim().to_string(),
@@ -2382,7 +2417,7 @@ mod login_tests {
     }
 
     #[test]
-    fn state_lives_in_the_config_folder_and_username_is_opt_in() {
+    fn state_lives_in_the_config_folder_and_usernames_are_opt_in() {
         let root = std::env::temp_dir().join(format!("amanece_login_flow_{}", std::process::id()));
         let config = root.join("config");
         let launch = root.join("launch");
@@ -2401,7 +2436,8 @@ mod login_tests {
         assert_eq!(login(&app).pass, "p w");
         app.on_remote(connected("ua"));
         assert!(app.dialog.is_none());
-        assert_eq!(crate::config::remembered_user(&config).as_deref(), Some("ua"));
+        let saved = || crate::config::remembered_users(&config);
+        assert_eq!(saved(), ["ua"]);
         let a = crate::cache::account_key("ua", "127.0.0.1");
         assert_eq!(app.cache.account.as_deref(), Some(a.as_str()));
         app.cache.set_dates(vec!["20251211".into()]);
@@ -2409,37 +2445,92 @@ mod login_tests {
         assert!(config.join(format!("cache-{a}.json")).exists());
         assert!(config.join("amanece.log").exists());
 
-        // another account in the same session gets its own (empty) cache
+        // another account in the same session gets its own (empty) cache; a reconnect
+        // without the dialog remembers nothing
         app.on_remote(connected("ub"));
         assert!(app.cache.dates.is_empty());
         assert_ne!(app.cache.account.as_deref(), Some(a.as_str()));
+        assert_eq!(saved(), ["ua"]);
         app.shutdown();
         drop(app);
 
-        // next launch: prefilled, ticked, and ua's cache shown before login
+        // next launch: prefilled, ticked, and ua's cache shown before login;
+        // this time log in as ub, box still ticked
         let (mut app, _rt2) = app_in(&root, None);
         assert_eq!(login(&app).user, "ua");
         assert_eq!(login(&app).field, 1);
         assert!(login(&app).remember);
         assert_eq!(app.cache.dates, vec!["20251211"]);
-        // unticking forgets it as soon as the login is sent
-        app.on_key(KeyEvent::from(KeyCode::Tab));
-        app.on_key(KeyEvent::from(KeyCode::Char(' ')));
         app.on_key(KeyEvent::from(KeyCode::BackTab));
+        app.on_key(KeyEvent::from(KeyCode::Backspace));
+        typed(&mut app, "b");
+        app.on_key(KeyEvent::from(KeyCode::Tab));
         typed(&mut app, "pw");
         app.on_key(KeyEvent::from(KeyCode::Enter));
         assert!(login(&app).busy);
-        assert_eq!(crate::config::remembered_user(&config), None);
+        app.on_remote(connected("ub"));
+        assert_eq!(saved(), ["ub", "ua"]);
         app.shutdown();
+        drop(app);
 
-        // --user still wins over a remembered name
-        crate::config::remember_user(&config, Some("ua")).unwrap();
-        let (app, _rt3) = app_in(&root, Some("uc".into()));
+        // third launch: the last one is prefilled, ←→ in the username field picks another
+        let (mut app, _rt3) = app_in(&root, None);
+        assert_eq!(login(&app).user, "ub");
+        app.on_key(KeyEvent::from(KeyCode::Up));
+        app.on_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!((login(&app).user.as_str(), login(&app).field), ("ua", 0));
+        app.on_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(login(&app).user, "ub");
+        app.on_key(KeyEvent::from(KeyCode::Left));
+        assert_eq!(login(&app).user, "ua");
+        assert!(login(&app).remember);
+        // ↑↓ still move between the fields
+        app.on_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!((login(&app).user.as_str(), login(&app).field), ("ua", 1));
+        app.on_key(KeyEvent::from(KeyCode::Left));
+        assert_eq!((login(&app).user.as_str(), login(&app).field), ("ua", 1));
+        app.on_key(KeyEvent::from(KeyCode::Up));
+        // playing with the box changes nothing on disk
+        app.on_key(KeyEvent::from(KeyCode::BackTab));
+        assert_eq!(login(&app).field, 2);
+        for _ in 0..3 {
+            app.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        }
+        assert!(!login(&app).remember);
+        assert_eq!(saved(), ["ub", "ua"]);
+        // Del in the username field forgets the name shown, without logging in
+        app.on_key(KeyEvent::from(KeyCode::Tab));
+        app.on_key(KeyEvent::from(KeyCode::Delete));
+        assert_eq!(saved(), ["ub"]);
+        assert_eq!((login(&app).user.as_str(), login(&app).remember), ("ua", false));
+        app.on_key(KeyEvent::from(KeyCode::Delete)); // not saved any more: nothing
+        assert_eq!(saved(), ["ub"]);
+        // a login sent with the box unticked forgets that name too
+        app.on_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!((login(&app).user.as_str(), login(&app).remember), ("ub", true));
+        app.on_key(KeyEvent::from(KeyCode::BackTab));
+        app.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.on_key(KeyEvent::from(KeyCode::BackTab));
+        assert_eq!(login(&app).field, 1);
+        assert_eq!(saved(), ["ub"]);
+        typed(&mut app, "pw");
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(login(&app).busy);
+        assert!(saved().is_empty());
+        assert!(!config.join("login.toml").exists());
+        app.shutdown();
+        drop(app);
+
+        // --user still wins over a remembered name, and isn't ticked unless it is saved
+        crate::config::remember_user(&config, "ua", true).unwrap();
+        let (app, _rt4) = app_in(&root, Some("uc".into()));
         assert_eq!(login(&app).user, "uc");
+        assert!(!login(&app).remember);
 
         // nothing was ever written into the launch folder
         assert_eq!(std::fs::read_dir(&launch).unwrap().count(), 0);
         drop(app);
         std::fs::remove_dir_all(&root).ok();
     }
+
 }

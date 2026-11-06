@@ -1,6 +1,6 @@
 //! `config.toml` in the user config dir. Never holds credentials. The same folder
 //! holds amanece's other files: `known_hosts`, the caches, `amanece.log` and, only
-//! when "remember username" is ticked at login, `login.toml` with the username.
+//! when "remember username" is ticked at login, `login.toml` with the usernames.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -206,41 +206,72 @@ impl Config {
 
 const LOGIN_FILE: &str = "login.toml";
 
-#[derive(Serialize, Deserialize)]
+/// At most this many usernames are remembered; the least recently used one drops off.
+pub const MAX_REMEMBERED: usize = 10;
+
+#[derive(Serialize, Deserialize, Default)]
 struct Remembered {
-    user: String,
+    /// Most recently used first.
+    #[serde(default)]
+    users: Vec<String>,
+    /// 0.2.0 kept a single name here; still read, never written.
+    #[serde(default, skip_serializing)]
+    user: Option<String>,
 }
 
-/// The username saved by the login dialog's "remember username" box.
-pub fn remembered_user(dir: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(dir.join(LOGIN_FILE)).ok()?;
-    toml::from_str::<Remembered>(&text)
-        .ok()
-        .map(|r| r.user.trim().to_string())
-        .filter(|u| !u.is_empty())
-}
-
-/// Saves `Some(user)` for the next login dialog, or forgets the saved one (`None`).
-/// Only ever the username: the password is never written anywhere.
-pub fn remember_user(dir: &Path, user: Option<&str>) -> std::io::Result<()> {
-    let path = dir.join(LOGIN_FILE);
-    match user {
-        Some(user) => {
-            std::fs::create_dir_all(dir)?;
-            let body = toml::to_string(&Remembered { user: user.to_string() }).unwrap_or_default();
-            std::fs::write(
-                path,
-                format!(
-                    "# Written by amanece because \"remember username\" was ticked at login.\n\
-                     # Only the username, never the password. Untick the box to remove this file.\n{body}"
-                ),
-            )
+/// The usernames saved by the login dialog's "remember username" box, most recently
+/// used first.
+pub fn remembered_users(dir: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(dir.join(LOGIN_FILE)) else {
+        return Vec::new();
+    };
+    let r: Remembered = toml::from_str(&text).unwrap_or_default();
+    let mut users: Vec<String> = Vec::new();
+    for u in r.users.into_iter().chain(r.user) {
+        let u = u.trim().to_string();
+        if !u.is_empty() && !users.contains(&u) {
+            users.push(u);
         }
-        None => match std::fs::remove_file(path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        },
     }
+    users.truncate(MAX_REMEMBERED);
+    users
+}
+
+/// Puts `user` first in the saved list (`keep`) or takes it out, and returns the new
+/// list. Only usernames are written, never a password; an empty list removes the file.
+pub fn remember_user(dir: &Path, user: &str, keep: bool) -> std::io::Result<Vec<String>> {
+    let user = user.trim();
+    let before = remembered_users(dir);
+    let mut users = before.clone();
+    users.retain(|u| u != user);
+    if keep && !user.is_empty() {
+        users.insert(0, user.to_string());
+        users.truncate(MAX_REMEMBERED);
+    }
+    if users == before {
+        return Ok(users);
+    }
+    let path = dir.join(LOGIN_FILE);
+    if users.is_empty() {
+        return match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(users),
+        };
+    }
+    std::fs::create_dir_all(dir)?;
+    let body = toml::to_string(&Remembered {
+        users: users.clone(),
+        user: None,
+    })
+    .unwrap_or_default();
+    std::fs::write(
+        path,
+        format!(
+            "# Written by amanece: usernames that had \"remember username\" ticked at login,\n\
+             # most recently used first. Never a password. Untick the box at login to drop one.\n{body}"
+        ),
+    )?;
+    Ok(users)
 }
 
 #[cfg(test)]
@@ -248,14 +279,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remembers_and_forgets_the_username() {
+    fn remembers_and_forgets_usernames() {
         let dir = std::env::temp_dir().join(format!("amanece_login_{}", std::process::id()));
-        assert_eq!(remembered_user(&dir), None);
-        remember_user(&dir, Some("u2025\"x")).unwrap();
-        assert_eq!(remembered_user(&dir).as_deref(), Some("u2025\"x"));
-        remember_user(&dir, None).unwrap();
-        remember_user(&dir, None).unwrap();
-        assert_eq!(remembered_user(&dir), None);
+        assert!(remembered_users(&dir).is_empty());
+        remember_user(&dir, "u2025\"x", true).unwrap();
+        remember_user(&dir, "ub", true).unwrap();
+        assert_eq!(remembered_users(&dir), ["ub", "u2025\"x"]);
+        // used again: back to the front, not twice
+        assert_eq!(remember_user(&dir, "u2025\"x", true).unwrap(), ["u2025\"x", "ub"]);
+        assert_eq!(remember_user(&dir, "ub", false).unwrap(), ["u2025\"x"]);
+        assert_eq!(remember_user(&dir, "never-saved", false).unwrap(), ["u2025\"x"]);
+        remember_user(&dir, "u2025\"x", false).unwrap();
+        assert!(!dir.join(LOGIN_FILE).exists());
+        remember_user(&dir, "u2025\"x", false).unwrap();
+        // the oldest name drops off past the limit
+        for i in 0..MAX_REMEMBERED + 2 {
+            remember_user(&dir, &format!("u{i}"), true).unwrap();
+        }
+        let users = remembered_users(&dir);
+        assert_eq!(users.len(), MAX_REMEMBERED);
+        assert_eq!(users[0], format!("u{}", MAX_REMEMBERED + 1));
+        // the one-name file written by 0.2.0 still reads
+        std::fs::write(dir.join(LOGIN_FILE), "user = \"ua\"\n").unwrap();
+        assert_eq!(remembered_users(&dir), ["ua"]);
+        assert_eq!(remember_user(&dir, "ub", true).unwrap(), ["ub", "ua"]);
+        assert!(!std::fs::read_to_string(dir.join(LOGIN_FILE)).unwrap().contains("user ="));
         std::fs::remove_dir_all(&dir).ok();
     }
 

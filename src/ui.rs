@@ -1070,9 +1070,20 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                 };
                 Line::from(vec![
                     Span::raw(format!("  {label:<10}")),
-                    Span::styled(format!(" {value:<36}"), style),
+                    Span::styled(format!(" {value:<35}"), style),
                 ])
             };
+            let mut user_row = field("Username", l.user.clone(), l.field == 0);
+            if !app.saved_users.is_empty() {
+                // which remembered name this is; ←→ picks another
+                let n = app.saved_users.len();
+                let hint = match app.saved_users.iter().position(|u| u == l.user.trim()) {
+                    Some(i) => format!(" ←→ {}/{n}", i + 1),
+                    None => format!(" ←→ {n} saved"),
+                };
+                let color = if l.field == 0 { Color::Gray } else { Color::DarkGray };
+                user_row.spans.push(Span::raw(hint).fg(color));
+            }
             let tick = format!("[{}] Remember username", if l.remember { "x" } else { " " });
             let tick_style = if l.field == 2 {
                 Style::new().fg(Color::White).bg(Color::Rgb(40, 60, 80))
@@ -1086,7 +1097,7 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
             let mut lines = vec![
                 Line::from(format!("  {}:{}", app.cfg.host, app.cfg.port)).fg(Color::DarkGray),
                 Line::from(""),
-                field("Username", l.user.clone(), l.field == 0),
+                user_row,
                 field("Password", "•".repeat(l.pass.chars().count()), l.field == 1),
                 Line::from(remember),
             ];
@@ -1100,7 +1111,13 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                 lines.push(Line::from(""));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from("  Enter connect · Tab next field · Esc work offline").fg(Color::DarkGray));
+            let saved_here = app.saved_users.iter().any(|u| u == l.user.trim());
+            let help = match l.field {
+                0 if saved_here => "  Enter next · ←→ saved names · Del forget it · Esc offline",
+                0 if !app.saved_users.is_empty() => "  Enter next · ←→ saved names · Esc work offline",
+                _ => "  Enter connect · Tab next field · Esc work offline",
+            };
+            lines.push(Line::from(help).fg(Color::DarkGray));
             let note = if l.remember {
                 "  Only the username is saved, never the password."
             } else {
@@ -1804,6 +1821,26 @@ mod tests {
         println!("{screen}");
         assert!(screen.contains("[x] Remember username  Space toggles"));
         assert!(screen.contains("Only the username is saved, never the password."));
+        assert!(!screen.contains("←→"), "no hint without saved names");
+
+        // remembered names: the field says which one it is, ←→ picks another
+        use ratatui::crossterm::event::{Event, KeyCode, KeyEvent};
+        let key = |app: &mut App, k| app.handle(crate::event::AppEvent::Input(Event::Key(KeyEvent::from(k))));
+        app.saved_users = vec!["u2024".into(), "u2025".into()];
+        let screen = render(&app, 120, 40);
+        println!("{screen}");
+        assert!(screen.contains("←→ 2/2"));
+        key(&mut app, KeyCode::Tab); // from the box to the username
+        key(&mut app, KeyCode::Right);
+        let screen = render(&app, 120, 40);
+        assert!(screen.contains("u2024") && screen.contains("←→ 1/2"));
+        assert!(screen.contains("Del forget it"), "help names Del on a saved name");
+        key(&mut app, KeyCode::Backspace);
+        let screen = render(&app, 120, 40);
+        println!("{screen}");
+        // the hint fits in the dialog
+        let row = screen.lines().find(|l| l.contains("←→ 2 saved")).expect("hint for an unsaved name");
+        assert!(row.contains("←→ 2 saved │"), "{row}");
         std::fs::remove_dir_all(&base).ok();
     }
 
