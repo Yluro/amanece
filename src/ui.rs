@@ -1,11 +1,12 @@
 //! Rendering. Reads `App`, never mutates it.
 
 use crate::app::{AlbaRow, App, Badge, Conn, Dialog, Focus, ListHit, StatsRow};
+use crate::checkcif::{self, Check, Level};
 use crate::config::PollMode;
 use crate::layout;
 use crate::console::LineKind;
 use crate::model::{SampleInfo, Shell, Solve, Status, human_bytes};
-use crate::rank;
+use crate::rank::{self, Criterion};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -438,7 +439,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         );
         return;
     }
-    let details_h = 11.min(inner.height.saturating_sub(4));
+    let details_h = 12.min(inner.height.saturating_sub(4));
     let [table_a, details_a] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(details_h)]).areas(inner);
 
@@ -564,16 +565,21 @@ fn solve_row(app: &App, s: &Solve, run: u32, best: bool) -> Row<'static> {
     } else {
         format!("  {}", s.kind.label())
     };
+    let alerts = alerts(app, s);
+    let flag = |text: String, check: Check| match checkcif::level_of(&alerts, check) {
+        Some(l) => Cell::from(text).style(alert_style(l)),
+        None => Cell::from(text),
+    };
     let mut row = Row::new(vec![
         Cell::from(mark),
         Cell::from(label),
         Cell::from(run.to_string()),
         Cell::from(status_glyph(s.status)),
         Cell::from(sg),
-        Cell::from(f2(o.and_then(|o| o.d_high))),
-        Cell::from(r_cell(o)),
+        flag(f2(o.and_then(|o| o.d_high)), Check::Resolution),
+        flag(r_cell(o), Check::Rint { rmeas: false }),
         Cell::from(cc(o.and_then(|o| o.cc_half))),
-        Cell::from(f1(o.and_then(|o| o.completeness))),
+        flag(f1(o.and_then(|o| o.completeness)), Check::Completeness),
         Cell::from(f1(o.and_then(|o| o.i_sig))),
         Cell::from(f1(o.and_then(|o| o.multiplicity))),
     ]);
@@ -583,6 +589,129 @@ fn solve_row(app: &App, s: &Solve, run: u32, best: bool) -> Row<'static> {
         row = row.fg(Color::DarkGray);
     }
     row
+}
+
+/// checkCIF-style alerts of a solve's overall shell (none for failed solves).
+fn alerts(app: &App, s: &Solve) -> Vec<checkcif::Alert> {
+    match (s.status, s.stats.as_ref().and_then(|st| st.overall.as_ref())) {
+        (Status::Done | Status::Running, Some(o)) => checkcif::check(o, &app.cfg.checkcif),
+        _ => Vec::new(),
+    }
+}
+
+fn alert_color(l: Level) -> Color {
+    match l {
+        Level::C => Color::Yellow,
+        Level::B => Color::Rgb(255, 140, 0),
+        Level::A => Color::Red,
+    }
+}
+
+fn alert_style(l: Level) -> Style {
+    let st = Style::new().fg(alert_color(l));
+    if l == Level::A { st.add_modifier(Modifier::BOLD) } else { st }
+}
+
+/// `checkCIF  A d_min 0.94 Å = sin θ/λ 0.532 < 0.550  …`, or that there is no alert.
+fn alert_line(alerts: &[checkcif::Alert]) -> Line<'static> {
+    if alerts.is_empty() {
+        return Line::from("checkCIF: no resolution, completeness or Rint alert").fg(Color::DarkGray);
+    }
+    let mut spans = vec![Span::raw("checkCIF").fg(Color::Gray)];
+    for a in alerts {
+        let c = alert_color(a.level);
+        spans.push(Span::raw("  "));
+        spans.push(Span::raw(format!(" {} ", a.level.letter())).fg(Color::Black).bg(c).bold());
+        spans.push(Span::raw(format!(" {}", a.text())).fg(c));
+    }
+    Line::from(spans)
+}
+
+/// The run number and solve with this key.
+fn solve_by_key<'a>(info: &'a SampleInfo, key: &str) -> Option<(u32, &'a Solve)> {
+    info.runs
+        .iter()
+        .flat_map(|r| r.solves.iter().map(move |s| (r.run, s)))
+        .find(|(_, s)| s.key() == key)
+}
+
+/// Where the solve stands in the ★ ranking, and its points per criterion.
+fn ranking_lines(info: &SampleInfo, s: &Solve) -> Vec<Line<'static>> {
+    let b = match rank::breakdown(s) {
+        Ok(b) => b,
+        Err(why) => {
+            return vec![Line::from(format!("not ranked for ★: {}", why.reason())).fg(Color::DarkGray)];
+        }
+    };
+    let ranking = rank::ranking(info);
+    let key = s.key();
+    let pos = ranking.iter().position(|(k, _)| *k == key).unwrap_or(0);
+    let total = 100.0 * b.score();
+    let name = |k: &str| {
+        solve_by_key(info, k)
+            .map(|(run, s)| format!("{} r{run}", s.kind.label()))
+            .unwrap_or_default()
+    };
+    let head = if pos == 0 {
+        let mut t = if ranking.len() == 1 {
+            format!("★ best (the only solve that competes): {total:.1}/100")
+        } else {
+            format!("★ best of {}: {total:.1}/100", ranking.len())
+        };
+        if let Some((k, v)) = ranking.get(1) {
+            t.push_str(&format!(", next {} {:.1}", name(k), 100.0 * v));
+        }
+        Line::from(t).light_green().bold()
+    } else {
+        let (best_key, best_v) = &ranking[0];
+        let gap = 100.0 * best_v - total;
+        let mut spans = vec![Span::raw(format!(
+            "#{} of {}: {total:.1}/100, {gap:.1} behind ★ {}",
+            pos + 1,
+            ranking.len(),
+            name(best_key)
+        ))
+        .fg(Color::Gray)];
+        let best_b = solve_by_key(info, best_key).and_then(|(_, s)| rank::breakdown(s).ok());
+        // the criterion that cost it the most points
+        let worst = best_b.as_ref().and_then(|bb| {
+            Criterion::ALL
+                .iter()
+                .filter_map(|c| Some((*c, bb.points(*c)? - b.points(*c)?)))
+                .max_by(|x, y| x.1.total_cmp(&y.1))
+        });
+        match worst {
+            Some((c, d)) if d >= 0.5 => {
+                spans.push(Span::raw(format!(", mostly on {} (−{d:.1})", c.label())).fg(Color::Yellow));
+            }
+            _ if best_b.is_some_and(|bb| bb.bonus > b.bonus) => {
+                spans.push(Span::raw(", on the xia2chem tie-break").fg(Color::Yellow));
+            }
+            _ => {}
+        }
+        Line::from(spans)
+    };
+    // non-breaking spaces inside an item, so a narrow panel wraps between items
+    const NB: char = '\u{a0}';
+    let mut why = Criterion::ALL
+        .iter()
+        .map(|c| {
+            let label = c.label().replace(' ', &NB.to_string());
+            match b.earned(*c) {
+                Some(e) => format!("{label}{NB}{e:.1}/{:.0}", 100.0 * c.weight()),
+                None => format!("{label}{NB}–"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("  ");
+    if b.bonus > 0.0 {
+        why.push_str(&format!("  +{:.1}{NB}{}", 100.0 * b.bonus, s.kind.label()));
+    }
+    let w = b.weight();
+    if w < 1.0 - 1e-9 {
+        why.push_str(&format!("  (– left out: {:.0} points scaled to 100)", 100.0 * w));
+    }
+    vec![head, Line::from(why).fg(Color::Gray)]
 }
 
 fn shell_line(label: &str, s: Option<&Shell>) -> Line<'static> {
@@ -610,18 +739,10 @@ fn solve_details(app: &App, info: &SampleInfo, run: usize, solve: usize) -> Vec<
         Status::Running => Span::raw("running").yellow(),
         Status::Failed => Span::raw("failed").red(),
     };
-    let mut head = vec![
+    let head = vec![
         Span::raw(format!("{} · run {} · ", s.kind.label(), r.run)).bold(),
         status,
     ];
-    let best = rank::best(info);
-    match (rank::score(s), &best) {
-        (Some(v), Some((k, _))) if *k == s.key() => {
-            head.push(Span::raw(format!("  ★ best solve (score {v:.2})")).light_green().bold());
-        }
-        (Some(v), Some((_, b))) => head.push(Span::raw(format!("  score {v:.2} (best {b:.2})")).fg(Color::Gray)),
-        _ => {}
-    }
     let mut lines = vec![Line::from(head)];
     if let Some(st) = &s.stats {
         let cell = st
@@ -651,9 +772,13 @@ fn solve_details(app: &App, info: &SampleInfo, run: usize, solve: usize) -> Vec<
         lines.push(shell_line("overall", st.overall.as_ref()));
         lines.push(shell_line("inner", st.inner.as_ref()));
         lines.push(shell_line("outer", st.outer.as_ref()));
+        if st.overall.is_some() && s.status != Status::Failed {
+            lines.push(alert_line(&alerts(app, s)));
+        }
     } else {
         lines.push(Line::from("no statistics yet").fg(Color::DarkGray));
     }
+    lines.extend(ranking_lines(info, s));
     if !s.hkl.is_empty() {
         let files: Vec<String> = s
             .hkl
@@ -682,10 +807,6 @@ fn solve_details(app: &App, info: &SampleInfo, run: usize, solve: usize) -> Vec<
     if rmeas_only {
         lines.push(Line::from("* no Rmerge reported: the R column shows Rmeas").fg(Color::DarkGray));
     }
-    lines.push(
-        Line::from("★ best by completeness, CC½, inner R and resolution")
-            .fg(Color::DarkGray),
-    );
     lines
 }
 
@@ -1231,12 +1352,12 @@ fn help_lines() -> Vec<Line<'static>> {
         row("r", "refresh listing"),
         sec("Stats"),
         row("Space", "mark solve for download / tick a frames run"),
-        row("a", "mark all solves with HKL files     ★ marks the best solve"),
-        row("◆ green", "ALBA sample already downloaded (from this beamtime) here"),
-        row("◆ yellow", "only a local folder with the same name exists here"),
-        row("d", "download marked solves into xia2chem_r3/, ednaproc_r3/ … in the Local folder"),
-        row("F", "download ticked raw-frame runs (asks first; progress bar above the status bar)"),
-        row("", "HKL/log downloads skip ahead of frames and start at once"),
+        row("a", "mark all solves with HKL files"),
+        row("★", "best solve: Cmpl 30 + CC½ 30 + inner R 20 + d_min 20 points"),
+        row("alert colours", "checkCIF C yellow, B orange, A red; limits in config.toml"),
+        row("◆ green/yellow", "downloaded here (this beamtime) / only a same-name folder"),
+        row("d", "download marked solves into xia2chem_r3/, ednaproc_r3/ …"),
+        row("F", "download ticked frame runs (asks); HKL/logs go first"),
         sec("Console (a terminal in the Local panel's folder)"),
         row("Enter", "run; a bare program name gets the selected file"),
         row("", "while a program runs (SADABS…), Enter sends your answer"),
@@ -2020,6 +2141,70 @@ mod tests {
             }
         }
         None
+    }
+
+    /// Foreground of the first cell showing `value` in the Stats row that contains `row`.
+    fn stats_fg(app: &App, w: u16, h: u16, row: &str, value: &str) -> Option<Color> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let rows = app.hit.borrow().stats.rows;
+        let xs: Vec<u16> = (rows.x..(rows.x + rows.width).min(w)).collect();
+        for y in rows.y..rows.y + rows.height {
+            let line: String = xs.iter().map(|&x| buf[(x, y)].symbol().to_string()).collect();
+            if line.contains(row) {
+                let i = line.find(value)?;
+                let x = xs[line[..i].chars().count()];
+                return Some(buf[(x, y)].fg);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn stats_show_checkcif_alerts_and_why_a_solve_won() {
+        let base = std::env::temp_dir().join(format!("amanece_alerts_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        // d_min 0.94 Å is sin θ/λ 0.532 (A), 0.86 Å is 0.581 (C), 0.73 Å draws nothing
+        assert_eq!(stats_fg(&app, 170, 42, "ednaproc", "0.94"), Some(Color::Red));
+        assert_eq!(stats_fg(&app, 170, 42, "autoPROC noanom", "0.86"), Some(Color::Yellow));
+        assert_eq!(stats_fg(&app, 170, 42, "★ xia2chem", "0.73"), Some(Color::LightGreen));
+        // complete data and a low Rmerge keep their plain colour
+        assert_eq!(stats_fg(&app, 170, 42, "ednaproc", "100.0"), Some(Color::Reset));
+        assert_eq!(stats_fg(&app, 170, 42, "ednaproc", "7.2"), Some(Color::Reset));
+        let mut screens = Vec::new();
+        for sel in 0..3 {
+            app.stats_sel = sel;
+            screens.push(render(&app, 170, 42).replace('\u{a0}', " "));
+        }
+        let [best, edna, autoproc] = &screens[..] else { unreachable!() };
+        assert!(best.contains("checkCIF: no resolution, completeness or Rint alert"));
+        assert!(best.contains("★ best of 3: 94.8/100, next autoPROC noanom r3"));
+        assert!(best.contains("Cmpl 30.0/30  CC½ 30.0/30  R inner 14.4/20  d_min 20.0/20  +0.5 xia2chem"));
+        assert!(edna.contains(" A  d_min 0.94 Å = sin θ/λ 0.532 < 0.550"));
+        assert!(edna.contains("#3 of 3:") && edna.contains("behind ★ xia2chem r3, mostly on d_min"));
+        assert!(autoproc.contains(" C  d_min 0.86 Å = sin θ/λ 0.582 < 0.590"));
+        assert!(autoproc.contains("#2 of 3:"));
+        // a solve without HKL files says why it isn't ranked
+        let info = app.cache.experiments.get_mut("20251211").unwrap().infos.get_mut("JSG285b").unwrap();
+        info.runs[1].solves[1].hkl.clear();
+        app.stats_sel = 1;
+        assert!(render(&app, 170, 42).contains("not ranked for ★: no HKL file to download"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn help_fits_its_box() {
+        let base = std::env::temp_dir().join(format!("amanece_help_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        app.dialog = Some(Dialog::Help);
+        let screen = render(&app, 170, 46);
+        assert!(screen.contains("★") && screen.contains("checkCIF C yellow, B orange, A red"));
+        // the last line still shows: the box holds 42 lines
+        assert!(screen.contains("Windows GUI programs (xprep, shelxle, olex2…)"));
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

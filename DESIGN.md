@@ -215,6 +215,30 @@ Gotchas:
 - OneDrive cloud-only placeholders (Files On-Demand) are not read for the skip-existing check: reading them
   would pull every frame back from the cloud. Their size alone is trusted, as before.
 
+### 2.14 checkCIF alerts and the ★ breakdown (2026-11-06)
+
+- `checkcif.rs` judges a solve's overall shell against three IUCr/PLATON tests. Limits are per level
+  C, B, A, in `config.toml` `[checkcif]`:
+  - THETM01 (IUCr page): sin θ/λ = 1/(2·d_min) < 0.590 / 0.575 / 0.550. (0.60 is the IUCr's *target*,
+    not an alert limit.)
+  - PLAT029: completeness < 99 / 97 / 95 %. PLATON documents no limits, only that 0.99 or more is
+    expected; real reports put 0.91–0.93 at A, 0.951–0.954 at B and 0.973–0.977 at C. checkCIF tests the
+    fraction to θ_full, while the pipeline's overall completeness runs to its d_min, so ours is the stricter.
+  - RINTA01 (IUCr page): Rint > 10 / 15 / 20 %. Compared with the overall Rmerge (the same sum over
+    equivalents); Rmeas stands in when a pipeline reports no Rmerge (xia2chem 2026), as in the ranking.
+- The table colours the d_min, Rmrg% and Cmpl% cells (yellow C, orange `Rgb(255,140,0)` B, red bold A);
+  the details add one line naming each alert, or saying there is none. Failed solves get no alerts.
+- `rank::breakdown` returns each criterion's fraction; the details show points earned out of 30/30/20/20
+  (missing values: "–", and the rest scaled up), the bonus, the place in `rank::ranking`, and for a
+  solve that isn't ★: the gap and the criterion with the largest point deficit. Unranked solves say why
+  (`rank::Unranked`). The score is shown out of 100 (it was 0–1 before).
+- Known gap in the ranking: d_min is the pipeline's cutoff, not where the data stop. xia2chem integrates
+  JSG285b to 0.73 Å (full 20 points) with an outer shell at I/σ 0.1 and CC½ .06. The same noise shells
+  push xia2chem 2026's overall Rmeas to 30–50 % on crystals where autoPROC (which cuts resolution
+  itself) reports a 13–17 % Rmerge, so its Rint alert says more about the cutoff than the crystal.
+  Checked against a real cache on 2026-11-06 (256 solves): completeness A alerts are mostly single
+  sweeps (kappa 0) that a second sweep would fill.
+
 ## 3. Gentle-scraping rules (hard requirements)
 
 1. **Read-only by construction.** The SFTP wrapper type exposes only `read_dir`, `stat` and `open_read`.
@@ -296,6 +320,8 @@ src/
 │                      the same dir holds known_hosts, the caches, amanece.log and login.toml
 ├── cache.rs           <config dir>/cache-<account hash>.json
 ├── cbf.rs             miniCBF self-check: binary section vs its Content-MD5 (§2.13)
+├── checkcif.rs        checkCIF-style alerts from the overall shell (§2.14)
+├── rank.rs            ★ best-solve score, its per-criterion breakdown and the ranking (§2.7, §2.14)
 ├── local.rs           local directory model
 ├── remote/
 │   ├── session.rs     russh connect + password/keyboard-interactive auth, TOFU host-key check

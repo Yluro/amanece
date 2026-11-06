@@ -77,6 +77,8 @@ pub struct Config {
     pub beamlines: Vec<String>,
     /// Proposal folder on the server, if automatic detection doesn't find it.
     pub remote_root: Option<String>,
+    /// Limits for the checkCIF-style alerts in the Stats panel.
+    pub checkcif: crate::checkcif::Limits,
 }
 
 impl Default for Config {
@@ -96,6 +98,7 @@ impl Default for Config {
             parallel_downloads: 3,
             beamlines: vec!["bl13".into(), "bl06".into()],
             remote_root: None,
+            checkcif: crate::checkcif::Limits::default(),
         }
     }
 }
@@ -134,6 +137,16 @@ parallel_downloads = 3
 # on each of these beamlines (bl13 = XALOC, bl06 = XAIRA)
 beamlines = ["bl13", "bl06"]
 # remote_root = "/bl13/projects/cycle2026-I/<account digits>-<pi>"
+
+# checkCIF-style alerts in the Stats panel. Each list gives the limits for alert
+# levels C, B, A; a value past one turns its cell yellow (C), orange (B) or red (A).
+[checkcif]
+# THETM01: sin(theta_max)/lambda in 1/A, i.e. d_min above 0.85 / 0.87 / 0.91 A
+sin_theta_lambda = [0.590, 0.575, 0.550]
+# PLAT029: completeness in %, below (checkCIF expects 99 % or more)
+completeness = [99.0, 97.0, 95.0]
+# RINTA01: Rint in %, above; compared with the overall Rmerge (Rmeas if no Rmerge)
+rint = [10.0, 15.0, 20.0]
 "#;
 
 impl Config {
@@ -313,6 +326,7 @@ mod tests {
         assert_eq!(cfg.port, 443);
         assert_eq!(cfg.poll_mode, PollMode::Manual);
         assert_eq!(cfg.external_window, vec!["xprep".to_string()]);
+        assert_eq!(cfg.checkcif, crate::checkcif::Limits::default());
     }
 
     #[test]
