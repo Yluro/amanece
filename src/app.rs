@@ -368,6 +368,17 @@ impl App {
         offline: bool,
     ) -> App {
         let state_dir = config_path.as_ref().and_then(|p| p.parent()).map(PathBuf::from);
+        // The Local panel opens in `default_folder` if set, else where it was when
+        // amanece last closed, else in the folder it was started from.
+        let configured = cfg.default_folder.as_deref().map(PathBuf::from);
+        let configured_ok = configured.as_ref().is_some_and(|p| p.is_dir());
+        let base = match configured {
+            Some(p) if configured_ok => p,
+            _ => state_dir
+                .as_deref()
+                .and_then(crate::config::last_local_folder)
+                .unwrap_or(base),
+        };
         let saved_users = state_dir
             .as_deref()
             .map(crate::config::remembered_users)
@@ -799,6 +810,9 @@ impl App {
 
     pub fn shutdown(&mut self) {
         self.save_cache();
+        if let Some(dir) = &self.state_dir {
+            let _ = crate::config::save_local_folder(dir, &self.local.cwd);
+        }
         self.console.kill();
         self.remote.send(RemoteCmd::Shutdown);
     }

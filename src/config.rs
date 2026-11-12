@@ -77,6 +77,8 @@ pub struct Config {
     pub beamlines: Vec<String>,
     /// Proposal folder on the server, if automatic detection doesn't find it.
     pub remote_root: Option<String>,
+    /// Local folder amanece always opens in, wherever it was started from.
+    pub default_folder: Option<String>,
     /// Limits for the checkCIF-style alerts in the Stats panel.
     pub checkcif: crate::checkcif::Limits,
     /// Unit-cell database: two reduced cells match within this many % on each edge…
@@ -104,6 +106,7 @@ impl Default for Config {
             parallel_downloads: 3,
             beamlines: vec!["bl13".into(), "bl06".into()],
             remote_root: None,
+            default_folder: None,
             checkcif: crate::checkcif::Limits::default(),
             cell_match_pct: 1.5,
             cell_match_deg: 2.0,
@@ -146,6 +149,10 @@ parallel_downloads = 3
 # on each of these beamlines (bl13 = XALOC, bl06 = XAIRA)
 beamlines = ["bl13", "bl06"]
 # remote_root = "/bl13/projects/cycle2026-I/<account digits>-<pi>"
+
+# Local folder amanece always opens in, wherever it was started from. Unset, it opens
+# where it was when it was last closed (and the folder it was started in the first time).
+# default_folder = "C:/Users/you/Documents/alba"
 
 # unit-cell database (cells.toml in this folder): the Stats panel lists the samples
 # whose reduced cell matches within this many % on each edge and degrees on each angle
@@ -312,9 +319,38 @@ pub fn remember_user(dir: &Path, user: &str, keep: bool) -> std::io::Result<Vec<
     Ok(users)
 }
 
+const FOLDER_FILE: &str = "local_folder.txt";
+
+/// The Local panel's folder when amanece last closed, if it still exists.
+pub fn last_local_folder(dir: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(dir.join(FOLDER_FILE)).ok()?;
+    let folder = PathBuf::from(text.trim_end_matches(['\r', '\n']));
+    folder.is_dir().then_some(folder)
+}
+
+/// Remembers the Local panel's folder for the next start. Only the path is written.
+pub fn save_local_folder(dir: &Path, folder: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join(FOLDER_FILE), folder.to_string_lossy().as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remembers_local_folder() {
+        let dir = std::env::temp_dir().join(format!("amanece_folder_{}", std::process::id()));
+        let folder = dir.join("proposal");
+        std::fs::create_dir_all(&folder).unwrap();
+        assert!(last_local_folder(&dir).is_none());
+        save_local_folder(&dir, &folder).unwrap();
+        assert_eq!(last_local_folder(&dir), Some(folder.clone()));
+        // a folder that no longer exists is not restored
+        std::fs::remove_dir_all(&folder).unwrap();
+        assert!(last_local_folder(&dir).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn remembers_and_forgets_usernames() {
