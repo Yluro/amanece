@@ -2,10 +2,9 @@
 
 Terminal UI for the ALBA BL13-XALOC/BL6-XAIRA autoprocessing results: browse your beamtimes over SFTP,
 compare the statistics of every solve (xia2chem, ednaproc, autoPROC, xia2), download the HKL
-files you pick into the Local panel's folder (it starts where you launched it), and run any commands
-(SHELXT, XPREP,...) on them.
+files you pick into the local folder, and run any commands (PLATON, SHELXT, XPREP,...) on them.
 
-Read-only, gentle and safe by design: one SFTP connection, rate-limited requests, and nothing about
+Read-only, gentle and safe by design: one SFTP connection channel, rate-limited requests, and nothing about
 your login is stored unless you tick a box: "Remember username" saves the username, "Remember
 password" puts the password in the system's credential store (never in a file). 
 See [DESIGN.md](DESIGN.md).
