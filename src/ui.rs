@@ -142,6 +142,8 @@ fn truncate(s: &str, max: usize) -> String {
 
 fn draw_local(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Local;
+    // Keep the previous scroll window so moving up doesn't drag the view.
+    let prev_offset = app.hit.borrow().local.offset;
     let cwd = app.local.cwd.display().to_string();
     let block = panel(
         title(
@@ -183,7 +185,9 @@ fn draw_local(f: &mut Frame, app: &App, area: Rect) {
     let list = List::new(items)
         .block(block)
         .highlight_style(highlight(focused));
-    let mut state = ListState::default().with_selected(Some(app.local.selected));
+    let mut state = ListState::default()
+        .with_selected(Some(app.local.selected))
+        .with_offset(prev_offset);
     f.render_stateful_widget(list, area, &mut state);
     app.hit.borrow_mut().local = ListHit {
         area,
@@ -223,6 +227,7 @@ fn status_glyph(s: Status) -> Span<'static> {
 
 fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Alba;
+    let prev_offset = app.hit.borrow().alba.offset;
     app.hit.borrow_mut().alba = ListHit {
         area,
         ..ListHit::default()
@@ -293,7 +298,9 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     let list = List::new(items)
         .block(block)
         .highlight_style(highlight(focused));
-    let mut state = ListState::default().with_selected(Some(app.alba_sel));
+    let mut state = ListState::default()
+        .with_selected(Some(app.alba_sel))
+        .with_offset(prev_offset);
     f.render_stateful_widget(list, area, &mut state);
     app.hit.borrow_mut().alba = ListHit {
         area,
@@ -398,6 +405,7 @@ fn cc(v: Option<f64>) -> String {
 
 fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Stats;
+    let prev_offset = app.hit.borrow().stats.offset;
     app.hit.borrow_mut().stats = ListHit {
         area,
         ..ListHit::default()
@@ -508,7 +516,9 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         .header(header)
         .column_spacing(1)
         .row_highlight_style(highlight(focused));
-    let mut state = TableState::default().with_selected(Some(app.stats_sel.min(rows.len() - 1)));
+    let mut state = TableState::default()
+        .with_selected(Some(app.stats_sel.min(rows.len() - 1)))
+        .with_offset(prev_offset);
     f.render_stateful_widget(table, table_a, &mut state);
     app.hit.borrow_mut().stats = ListHit {
         area,
@@ -2574,6 +2584,32 @@ mod tests {
         }));
         assert_eq!(app.alba_rows().len(), rows + 1);
         assert_eq!(selected(&app).as_deref(), Some("JSG285b"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn list_view_stays_put_when_moving_up() {
+        let base = std::env::temp_dir().join(format!("amanece_ui_scroll_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        app.focus = Focus::Alba;
+        let n = app.alba_rows().len();
+        // 24 rows tall leaves the ALBA list a window of 3 rows, smaller than the list
+        app.alba_sel = n - 1;
+        render(&app, 120, 24);
+        let window = app.hit.borrow().alba.rows.height as usize;
+        let bottom = app.hit.borrow().alba.offset;
+        assert!(window >= 2 && bottom > 0, "list must overflow: {n} rows, window {window}");
+        // moving up inside the window must not move the view
+        for sel in (bottom..n - 1).rev() {
+            app.alba_sel = sel;
+            render(&app, 120, 24);
+            assert_eq!(app.hit.borrow().alba.offset, bottom, "selected {sel}");
+        }
+        // only stepping past the top of the window scrolls it
+        app.alba_sel = bottom - 1;
+        render(&app, 120, 24);
+        assert_eq!(app.hit.borrow().alba.offset, bottom - 1);
         std::fs::remove_dir_all(&base).ok();
     }
 
