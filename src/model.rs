@@ -140,12 +140,14 @@ impl Run {
         format!("{}_{}", self.prefix, self.run)
     }
 
-    /// Image range taken from any solve's stats.
+    /// The run's image range: the widest the solves report. A pipeline may integrate
+    /// fewer images than were collected (autoPROC cut XAIRA's 1–720 to 1–635), so the
+    /// first solve's range isn't the run's; the raw data covers at least the union.
     pub fn images(&self) -> Option<(u32, u32)> {
         self.solves
             .iter()
             .filter_map(|s| s.stats.as_ref().and_then(|st| st.images))
-            .next()
+            .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
     }
 }
 
@@ -236,6 +238,18 @@ mod tests {
         assert_eq!(human_bytes(514), "514 B");
         assert_eq!(human_bytes(5_599_465), "5.6 MB");
         assert_eq!(human_bytes(4_500_000_000), "4.5 GB");
+    }
+
+    #[test]
+    fn run_images_are_the_widest_any_solve_reports() {
+        let solve = |images| Solve {
+            stats: Some(Stats { images, ..Stats::default() }),
+            ..Solve::new(SolveKind::AutoProcNoAnom, "d", 1)
+        };
+        let run = |solves| Run { prefix: "p".into(), run: 1, characterisation: false, solves };
+        assert_eq!(run(vec![]).images(), None);
+        assert_eq!(run(vec![solve(Some((1, 635))), solve(None), solve(Some((1, 720)))]).images(), Some((1, 720)));
+        assert_eq!(run(vec![solve(Some((5, 700))), solve(Some((1, 650)))]).images(), Some((1, 700)));
     }
 
     #[test]
