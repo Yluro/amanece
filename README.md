@@ -30,19 +30,20 @@ Unpack it and put `amanece` (`amanece.exe`) somewhere on your `PATH`. Each archi
 
 **Requisites:**
 
-- **Windows**: Windows 10 version 1809 or newer (the console panel needs ConPTY). 
+- **Windows**: Windows 10 version 1809 or newer. 
 - **macOS**: Binaries downloaded with a browser carry a quarantine flag; clear it once with
   `xattr -d com.apple.quarantine amanece`.
 - **Linux**: glibc 2.35 or newer (Ubuntu 22.04 / Debian 12 or newer; the binaries are built on Ubuntu 22.04).
   The C and C++ runtimes (`libc`, `libgcc_s`) are on every normal install; `xdg-open` is used to open files.
   "Remember password" needs a Secret Service keyring (GNOME Keyring or KWallet, normal on a desktop);
   without one the password just isn't saved.
-- **CellCheckCSD** (optional, for the CSD check in the Stats panel): CCDC's free, offline unit-cell
-  check against the CSD and ICSD, [downloaded from the CCDC](https://www.ccdc.cam.ac.uk/solutions/software/cellcheckcsd/)
-  after a free registration (about 3 GB with its data; Windows and Linux only). amanece finds it in the
-  default folder (`C:\Program Files\CCDC\CellCheckCSD`, or `/opt/CCDC/CellCheckCSD` on Linux), or wherever
-  `cellcheck_dir` in `config.toml` points. Without it everything else works and the CellCheckCSD
-  subtab shows where to get it. Its licence doesn't allow bundling it, so each user installs their own copy.
+
+### CellCheckCSD _(optional)_
+
+Amanece can search the CSD and the ICSD, using [CellCheckCSD](https://www.ccdc.cam.ac.uk/solutions/software/cellcheckcsd/).
+CellCheck is free to download after registering an account in the CCDC. Amanece looks in its default 
+instalation folder (`C:\Program Files\CCDC\CellCheckCSD` on Windows, or `/opt/CCDC/CellCheckCSD` on Linux). If you have
+CellCheckCSD installed in a custom folder: change the `cellcheck_dir` value in `config.toml`.
 
 ### Build from source
 
@@ -63,8 +64,8 @@ To build amanece from source, clone the repository and install it using cargo:
 ```bash
 git clone https://github.com/Yluro/amanece        # clone the amanece repository code
 cd amanece                                        # move to the amanece folder
-git checkout "$(git describe --tags --abbrev=0)"  # (optional, recomended) checkout to the lastest stable release
-cargo install --path .                            # install amanece into your user path
+git checkout "$(git describe --tags --abbrev=0)"  # (optional, recomended) checkout to the latest stable release
+cargo install --path .                            # install the amanece release into your user path
 ```
 ### Updating
 
@@ -90,8 +91,8 @@ the username field picks another. Only usernames are saved, in `login.toml`. To 
 and press `Del` (or log in with the box unticked).
 
 **Remember password** (off by default) also keeps that account's password in your system's credential 
-manager under the name `amanece`. It is saved only after the server accepted it. If the server ever rejects a saved password (someone changed it), 
-amanece deletes it and asks you to type the new one.
+manager under the name `amanece`. It is saved only after the server accepted it. If the server ever rejects 
+a saved password (someone changed it), amanece deletes it and asks you to type the new one.
 
 ## Key shortcuts
 
