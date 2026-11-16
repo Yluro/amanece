@@ -92,7 +92,7 @@ fn panel(title: Line<'static>, focused: bool, keys: &[(&str, &str)]) -> Block<'s
     }
 }
 
-/// `⏎ open  ⌫ up …` for a panel's bottom border.
+/// `⏎ open  ← up …` for a panel's bottom border.
 fn hints(keys: &[(&str, &str)], focused: bool) -> Line<'static> {
     let (k, d) = if focused {
         (Style::new().fg(ACCENT).add_modifier(Modifier::BOLD), Style::new().fg(Color::Gray))
@@ -151,7 +151,7 @@ fn draw_local(f: &mut Frame, app: &App, area: Rect) {
             focused,
         ),
         focused,
-        &[("⏎", "open"), ("⌫", "up"), ("N", "new folder"), ("Supr", "delete")],
+        &[("⏎", "open"), ("←", "up"), ("N", "new folder"), ("Supr", "delete")],
     );
     let inner_w = area.width.saturating_sub(4) as usize;
     let items: Vec<ListItem> = app
@@ -246,7 +246,7 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     let room = area.width.saturating_sub(28) as usize;
     t.spans.push(Span::raw(format!("{} ", shorten(&path, room))).fg(Color::Gray));
     let keys: &[(&str, &str)] = if app.alba_date.is_some() {
-        &[("⏎", "stats"), ("⌫", "back"), ("S", "scan all")]
+        &[("⏎", "stats"), ("←", "back"), ("S", "scan all")]
     } else {
         &[("⏎", "open"), ("r", "refresh")]
     };
@@ -882,7 +882,12 @@ fn solve_sections(
     if let Some(n) = &s.note {
         lines.push(Line::from(n.clone()).fg(Color::Yellow));
     }
-    lines.extend(ranking_lines(info, s));
+    // only where it stands; the breakdown is in the ? help
+    if rank::breakdown(s).is_ok() {
+        let mut head = ranking_lines(info, s).remove(0);
+        head.spans.push(Span::raw("  ? why").fg(Color::DarkGray).not_bold());
+        lines.push(head);
+    }
     let rmeas_only = s
         .stats
         .as_ref()
@@ -897,18 +902,25 @@ fn solve_sections(
     };
     let mut sections = vec![Section::new(title, lines)];
 
-    // the space group, then one edge and its angle per line
-    let sg = st.space_group.clone().unwrap_or_else(|| "space group –".into());
-    let mut cell_lines = vec![Line::from(sg).bold()];
+    // crystal system // space group, then the edges, then the angles
+    let head = match st.space_group.as_deref() {
+        Some(sg) => match crystal_system(sg) {
+            Some(sys) => format!("{sys}  //  {sg}"),
+            None => sg.to_string(),
+        },
+        None => "space group –".into(),
+    };
+    let mut cell_lines = vec![Line::from(head).bold()];
     match st.cell {
         Some(c) => {
-            for (i, (edge, angle)) in [("a", "α"), ("b", "β"), ("c", "γ")].into_iter().enumerate() {
-                cell_lines.push(Line::from(vec![
-                    Span::raw(format!("{edge}: ")).fg(Color::Gray),
-                    Span::raw(format!("{:>8.3} Å", c[i])),
-                    Span::raw(format!("     {angle}: ")).fg(Color::Gray),
-                    Span::raw(format!("{:>7.2}°", c[i + 3])),
-                ]));
+            for (names, unit, off) in [(["a", "b", "c"], " Å", 0), (["α", "β", "γ"], "°", 3)] {
+                let mut spans = Vec::new();
+                for (i, n) in names.into_iter().enumerate() {
+                    let v = if off == 0 { format!("{:>7.3}", c[i]) } else { format!("{:>7.2}", c[i + 3]) };
+                    spans.push(Span::raw(format!("{n}: ")).fg(Color::Gray));
+                    spans.push(Span::raw(format!("{v}{unit:<2}   ")));
+                }
+                cell_lines.push(Line::from(spans));
             }
         }
         None => cell_lines.push(Line::from("no cell yet").fg(Color::DarkGray)),
@@ -975,6 +987,72 @@ fn solve_sections(
         sections.push(Section { title, hint, lines, toggle: Some(StatsToggle::Details), more_line: false });
     }
     (sections, hits)
+}
+
+/// The crystal system of a space group, from its number (`#15`, as ednaproc writes it)
+/// or its Hermann–Mauguin symbol, spaced or not (`P 21 21 21`, `P212121`, `C 1 2/c 1`).
+fn crystal_system(sg: &str) -> Option<&'static str> {
+    if let Some(n) = sg.trim().strip_prefix('#') {
+        return match n.trim().parse::<u16>().ok()? {
+            1..=2 => Some("Triclinic"),
+            3..=15 => Some("Monoclinic"),
+            16..=74 => Some("Orthorhombic"),
+            75..=142 => Some("Tetragonal"),
+            143..=167 => Some("Trigonal"),
+            168..=194 => Some("Hexagonal"),
+            195..=230 => Some("Cubic"),
+            _ => None,
+        };
+    }
+    let s: String = sg.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut chars = s.chars();
+    if !matches!(chars.next()?.to_ascii_uppercase(), 'P' | 'A' | 'B' | 'C' | 'F' | 'I' | 'R') {
+        return None;
+    }
+    let r: String = chars.collect();
+    if r.is_empty() {
+        return None;
+    }
+    if r.contains('6') {
+        return Some("Hexagonal");
+    }
+    if r.contains('3') {
+        // trigonal symbols lead with the 3 axis (P 31 2 1, R -3 m); cubic ones carry it second
+        return Some(if r.starts_with('3') || r.starts_with("-3") { "Trigonal" } else { "Cubic" });
+    }
+    if r.contains('4') {
+        return Some("Tetragonal");
+    }
+    // count the symmetry directions that aren't 1: none triclinic, one monoclinic, three orthorhombic
+    let b = r.as_bytes();
+    let (mut i, mut n) = (0, 0);
+    while i < b.len() {
+        match b[i] {
+            b'-' => i += 1,
+            b'1' => i += 1,
+            b'2' => {
+                i += 1;
+                if b.get(i) == Some(&b'1') {
+                    i += 1;
+                }
+                if b.get(i) == Some(&b'/') {
+                    i += 2;
+                }
+                n += 1;
+            }
+            c if c.is_ascii_alphabetic() => {
+                i += 1;
+                n += 1;
+            }
+            _ => return None,
+        }
+    }
+    match n {
+        0 => Some("Triclinic"),
+        1 => Some("Monoclinic"),
+        3 => Some("Orthorhombic"),
+        _ => None,
+    }
 }
 
 /// A blank line, `Similar cells: 7 hits`, a column header and one row per hit up to
@@ -1426,6 +1504,62 @@ fn centered(w: u16, h: u16, area: Rect) -> Rect {
     }
 }
 
+/// The sun rising over the sea (amanece: dawn), above the login dialog and in the README.
+const BANNER: [&str; 12] = [
+    "                     ╷",
+    "     ·     ╲         │         ╱     ·",
+    "            ╲     ▄▄▄▄▄▄▄     ╱",
+    "   ·          ▗▄███████████▄▖          ·",
+    "  ──   ──   ▗█████████████████▖   ──   ──",
+    "           ▐███████████████████▌",
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+    "       ───── ═════════════════ ─────",
+    "             ─── ───────── ───",
+    "",
+    "      ▄▀█ █▀▄▀█ ▄▀█ █▄ █ █▀▀ █▀▀ █▀▀",
+    "      █▀█ █ ▀ █ █▀█ █ ▀█ ██▄ █▄▄ ██▄",
+];
+const BANNER_W: u16 = 43;
+
+/// The banner in colour: the sun goes from yellow at the top to red at the horizon, the rays
+/// are a paler yellow and the reflection fades out.
+fn banner_lines() -> Vec<Line<'static>> {
+    const SUN: [Color; 6] = [
+        Color::Rgb(255, 214, 102), // top of the rays
+        Color::Rgb(255, 214, 102),
+        Color::Rgb(255, 205, 80),
+        Color::Rgb(255, 170, 60),
+        Color::Rgb(250, 130, 50),
+        Color::Rgb(235, 95, 45),
+    ];
+    let rays = Color::Rgb(255, 225, 150);
+    BANNER
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let style = match i {
+                0..=5 => None,
+                6 => Some(Style::new().fg(Color::Rgb(200, 85, 50))),
+                7 => Some(Style::new().fg(Color::Rgb(190, 100, 60))),
+                8 => Some(Style::new().fg(Color::Rgb(120, 75, 60))),
+                _ => Some(Style::new().fg(Color::Rgb(255, 200, 130)).bold()),
+            };
+            match style {
+                Some(s) => Line::styled(*row, s),
+                // sun rows: the disc in the row's colour, the rays around it paler
+                None => Line::from(
+                    row.chars()
+                        .map(|c| {
+                            let fg = if "█▄▗▖▐▌".contains(c) { SUN[i] } else { rays };
+                            Span::styled(c.to_string(), Style::new().fg(fg))
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+            }
+        })
+        .collect()
+}
+
 fn dialog_block(t: &str) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
@@ -1437,8 +1571,21 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
     let area = f.area();
     match d {
         Dialog::Login(l) => {
-            let r = centered(62, 13, area);
-            f.render_widget(Clear, r);
+            let mut r = centered(62, 13, area);
+            // the sunrise at the top of the dialog, when the screen has room for it; `r` stays
+            // the form's part, so the click and cursor positions below don't change
+            let total = BANNER.len() as u16 + 1 + r.height;
+            let with_banner = area.height >= total + 2 && r.width == 62;
+            if with_banner {
+                let outer = Rect::new(r.x, area.y + (area.height - total) / 2, r.width, total);
+                r.y = outer.y + BANNER.len() as u16 + 1;
+                f.render_widget(Clear, outer);
+                f.render_widget(dialog_block("Connect to ALBA"), outer);
+                let b = Rect::new(outer.x + (outer.width - BANNER_W) / 2, outer.y + 1, BANNER_W, BANNER.len() as u16);
+                f.render_widget(Paragraph::new(banner_lines()), b);
+            } else {
+                f.render_widget(Clear, r);
+            }
             let field = |label: &str, value: String, active: bool| {
                 let style = if active {
                     Style::new().fg(Color::White).bg(Color::Rgb(40, 60, 80))
@@ -1518,10 +1665,13 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                 "  Nothing is saved to disk.".to_string()
             };
             lines.push(Line::from(note).fg(Color::DarkGray));
-            f.render_widget(
-                Paragraph::new(lines).block(dialog_block("Connect to ALBA")),
-                r,
-            );
+            if with_banner {
+                // the frame is already drawn around banner and form
+                let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
+                f.render_widget(Paragraph::new(lines), inner);
+            } else {
+                f.render_widget(Paragraph::new(lines).block(dialog_block("Connect to ALBA")), r);
+            }
             if !l.busy {
                 let (y, len) = match l.field {
                     0 => (r.y + 3, l.user.chars().count()),
@@ -1568,12 +1718,71 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
             f.render_widget(Paragraph::new(lines).block(dialog_block(title)), r);
         }
         Dialog::Help => {
-            let r = centered(80, help_lines().len() as u16 + 2, area);
-            f.render_widget(Clear, r);
-            f.render_widget(
-                Paragraph::new(help_lines()).block(dialog_block("Keys (any key closes)")),
-                r,
+            let mut keys = help_lines();
+            let symbols = symbol_lines();
+            let star = star_lines(app);
+            let h = |l: &[Line]| l.len() as u16 + 2;
+            let w = |l: &[Line]| l.iter().map(Line::width).max().unwrap_or(0) as u16 + 2;
+            let all = h(&keys) + h(&symbols) + h(&star);
+            // Two columns when stacked doesn't fit and the screen is wide enough: the keys
+            // split at Stats, each half over one of the other boxes so the columns come out
+            // about as tall; each column as wide as its longest line, if there's room.
+            let more = keys.split_off(
+                keys.iter().position(|l| l.to_string() == "Stats").unwrap_or(keys.len()),
             );
+            let cols = [
+                vec![("Keys (any key closes)", keys), ("★ ranking", star)],
+                vec![("More keys", more), ("Symbols", symbols)],
+            ];
+            let col_w = |c: &Vec<(&str, Vec<Line>)>| c.iter().map(|b| w(&b.1)).max().unwrap_or(0);
+            let mut cw = [col_w(&cols[0]), col_w(&cols[1])];
+            let over = (cw[0] + cw[1] + 2).saturating_sub(area.width.saturating_sub(2));
+            // too wide: the left column gives up its long lines first, down to 80
+            let take = over.min(cw[0].saturating_sub(80));
+            cw = [cw[0] - take, cw[1].saturating_sub(over - take)];
+            let side = all > area.height.saturating_sub(2) && cw[0] >= 80 && cw[1] >= 80;
+            let mut placed: Vec<(&str, Vec<Line>, Rect)> = Vec::new();
+            if side {
+                let col_h = |c: &Vec<(&str, Vec<Line>)>| c.iter().map(|b| h(&b.1)).sum::<u16>();
+                let ch = col_h(&cols[0]).max(col_h(&cols[1])).min(area.height);
+                let total_w = cw[0] + 2 + cw[1];
+                let x0 = area.x + area.width.saturating_sub(total_w) / 2;
+                let y0 = area.y + (area.height - ch) / 2;
+                let mut x = x0;
+                for (col, width) in cols.into_iter().zip(cw) {
+                    let (mut y, n) = (y0, col.len());
+                    for (i, (t, lines)) in col.into_iter().enumerate() {
+                        let left = (y0 + ch).saturating_sub(y);
+                        // the last box reaches the bottom, so both columns end level
+                        let bh = if i + 1 == n { left } else { h(&lines).min(left) };
+                        placed.push((t, lines, Rect::new(x, y, width, bh)));
+                        y += bh;
+                    }
+                    x += width + 2;
+                }
+            } else {
+                // stacked: the keys whole, then symbols and ranking; cut at the bottom
+                let [c0, c1] = cols;
+                let mut it0 = c0.into_iter();
+                let mut it1 = c1.into_iter();
+                let (t, mut keys) = it0.next().unwrap();
+                let (_, more) = it1.next().unwrap();
+                keys.extend(more);
+                let boxes = [(t, keys), it1.next().unwrap(), it0.next().unwrap()];
+                let r = centered(80, all, area);
+                let mut y = r.y;
+                for (t, lines) in boxes {
+                    let bh = h(&lines).min((r.y + r.height).saturating_sub(y));
+                    placed.push((t, lines, Rect { y, height: bh, ..r }));
+                    y += bh;
+                }
+            }
+            for (t, lines, r) in placed {
+                if r.height > 2 {
+                    f.render_widget(Clear, r);
+                    f.render_widget(Paragraph::new(lines).block(dialog_block(t)), r);
+                }
+            }
         }
     }
 }
@@ -1609,10 +1818,6 @@ fn help_lines() -> Vec<Line<'static>> {
         sec("Stats"),
         row("Space / a", "mark a solve or tick a frames run / mark all with HKL files"),
         row("c / z", "all similar cells / fold shells and checkCIF (or click the title)"),
-        row("★", "best solve: Cmpl 30 + CC½ 30 + inner R 20 + d_min 20 points"),
-        row("alert colours", "checkCIF C yellow, B orange, A red; limits in config.toml"),
-        row("Similar cells", "samples with a matching cell (code, date), from cells.toml"),
-        row("◆ green/yellow", "downloaded here (this beamtime) / only a same-name folder"),
         row("d", "download marked solves into xia2chem_r3/, ednaproc_r3/ …"),
         row("F", "download ticked frame runs (asks); HKL/logs go first"),
         sec("Console (a terminal in the Local panel's folder)"),
@@ -1621,13 +1826,99 @@ fn help_lines() -> Vec<Line<'static>> {
         row("", "xprep → xprep XDS_ASCII.HKL, shelxt → shelxt <name>"),
         row("↑ / ↓", "history        PgUp / PgDn  scroll"),
         row("Ctrl-C", "interrupt (twice: kill)    Esc  leave console"),
-        sec("Mouse"),
-        row("click", "focus a panel, select a row; double-click opens"),
-        row("", "click a Stats checkbox to mark; wheel scrolls; click status badges"),
         row("cd <dir>", "change folder   clear  wipe the log"),
         Line::from("  Windows GUI programs (xprep, shelxle, olex2…) start directly in their own window.")
             .fg(Color::DarkGray),
+        sec("Mouse"),
+        row("click", "focus a panel, select a row; double-click opens"),
+        row("", "click a Stats checkbox to mark; wheel scrolls; click status badges"),
     ]
+}
+
+/// How the ★ is given, and the breakdown for the solve highlighted in Stats.
+fn star_lines(app: &App) -> Vec<Line<'static>> {
+    let weights = Criterion::ALL
+        .iter()
+        .map(|c| format!("{} {:.0}", c.label(), 100.0 * c.weight()))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let mut lines = vec![
+        Line::from(format!("  Score /100: {weights}")),
+        Line::from("  d_min: full at 0.80 Å, none at 1.20 Å; missing values scale the rest to 100")
+            .fg(Color::Gray),
+        Line::from("  Only finished solves with an HKL file compete; xia2chem wins near-ties").fg(Color::Gray),
+    ];
+    let solve = match app.selected_row() {
+        Some(AlbaRow::Sample { date, name }) => app.info(&date, &name).and_then(|info| {
+            match App::stats_rows(info).get(app.stats_sel) {
+                Some(StatsRow::Solve { run, solve }) => Some((info, &info.runs[*run], &info.runs[*run].solves[*solve])),
+                _ => None,
+            }
+        }),
+        _ => None,
+    };
+    if let Some((info, r, s)) = solve {
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!("  {} · run {}", s.kind.label(), r.run)).bold());
+        for mut l in ranking_lines(info, s) {
+            l.spans.insert(0, Span::raw("  "));
+            lines.push(l);
+        }
+    }
+    lines
+}
+
+/// The legend for the glyphs and colours the panels use, two per line.
+fn symbol_lines() -> Vec<Line<'static>> {
+    let g = |s: &'static str| vec![Span::raw(s)];
+    let entries: Vec<(Vec<Span<'static>>, &'static str)> = vec![
+        (vec![Span::raw("●").green(), Span::raw(" "), Span::raw("◌").yellow(), Span::raw(" ○")], "online / connecting / offline"),
+        (vec![Span::raw("✗").red()], "disconnected, or solve failed"),
+        (vec![Span::raw("✓").green(), Span::raw(" "), Span::raw("…").yellow()], "solve done / running"),
+        (g("★"), "best solve (see ★ ranking)"),
+        (vec![Span::raw("◆").green()], "downloaded from this beamtime"),
+        (vec![Span::raw("◆").yellow()], "only a same-name folder"),
+        (g("[x] [ ]"), "solve marked / not marked"),
+        (g(" - "), "no HKL files to download"),
+        (g("12.3*"), "Rmeas (no Rmerge reported)"),
+        (g("–"), "no value"),
+        (
+            vec![
+                Span::raw("C").fg(alert_color(Level::C)),
+                Span::raw(" "),
+                Span::raw("B").fg(alert_color(Level::B)),
+                Span::raw(" "),
+                Span::raw("A").fg(alert_color(Level::A)),
+            ],
+            "checkCIF alerts (config.toml)",
+        ),
+        (vec![Span::raw("name").fg(Color::DarkGray)], "test sample"),
+        (vec![Span::raw("·").fg(Color::DarkGray), Span::raw(" "), Span::raw("⟳").fg(ACCENT)], "not scanned / scanning"),
+        (g("▾ ▸"), "section open / folded"),
+        (g("↑ v…"), "update available"),
+        (g("↓"), "downloading"),
+        (g("♪"), "new-sample sound"),
+        (g("⏎ ␣"), "Enter / Space"),
+        (g("» [↑n]"), "console waits / scrolled up"),
+    ];
+    let cell = |(glyph, d): (Vec<Span<'static>>, &'static str)| {
+        let w: usize = glyph.iter().map(|s| s.content.chars().count()).sum();
+        let mut spans = vec![Span::raw("  ")];
+        spans.extend(glyph.into_iter().map(|s| s.bold()));
+        spans.push(Span::raw(" ".repeat(8usize.saturating_sub(w))));
+        spans.push(Span::raw(format!("{d:<29}")));
+        spans
+    };
+    let mut it = entries.into_iter();
+    let mut lines = Vec::new();
+    while let Some(a) = it.next() {
+        let mut spans = cell(a);
+        if let Some(b) = it.next() {
+            spans.extend(cell(b));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
 pub mod splash {
@@ -2213,6 +2504,10 @@ mod tests {
         let screen = render(&app, 120, 40);
         println!("{screen}");
         assert!(screen.contains("[ ] Remember username") && screen.contains("Nothing is saved to disk."));
+        assert!(screen.contains(BANNER[10].trim()), "sunrise above the dialog");
+        let short = render(&app, 120, 24);
+        assert!(!short.contains(BANNER[10].trim()) && short.contains("[ ] Remember username"), "no room, no banner");
+        let screen = render(&app, 120, 40); // click positions are those of the last render
         let (x, y) = find(&screen, "[ ] Remember");
         click(&mut app, x + 1, y);
         let screen = render(&app, 120, 40);
@@ -2410,7 +2705,7 @@ mod tests {
         // a shorter panel: the list gets shorter and says why; folding makes room
         let screen = render(&app, 170, 52);
         println!("{screen}");
-        assert!(screen.contains("+3 more: no room, z folds the shells"), "{screen}");
+        assert!(screen.contains("more: no room, z folds the shells"), "{screen}");
         key(&mut app, 'z');
         assert!(render(&app, 170, 52).contains("JSG307"));
         std::fs::remove_dir_all(&base).ok();
@@ -2446,8 +2741,10 @@ mod tests {
         assert!(!lines[last_row + 1].contains("xia2chem"));
         assert!(lines[last_row + 2].contains("xia2chem · run 3 · images 1–720 · done"), "{screen}");
         assert!(screen.contains("HKL: shelxt.hkl (5.6 MB), shelxt.ins (514 B)"));
-        // the cell, one edge and its angle per line
-        assert!(screen.contains("a:   28.450 Å     α:   90.00°") && screen.contains("c:   14.390 Å     γ:   90.00°"));
+        // the cell: system // SG, the edges, the angles
+        assert!(screen.contains("  //  "), "{screen}");
+        assert!(screen.contains("a:  28.450 Å   b:  28.450 Å   c:  14.390 Å"), "{screen}");
+        assert!(screen.contains("α:   90.00°    β:   90.00°    γ:   90.00°"), "{screen}");
         for title in [" Cell ", "▾ Shells", "▾ checkCIF"] {
             assert!(screen.contains(title), "{title}");
         }
@@ -2665,8 +2962,14 @@ mod tests {
         }
         let [best, edna, autoproc] = &screens[..] else { unreachable!() };
         assert!(best.contains("no resolution, completeness or Rint alert"));
-        assert!(best.contains("★ best of 3: 94.8/100, next autoPROC noanom r3"));
-        assert!(best.contains("Cmpl 30.0/30  CC½ 30.0/30  R inner 14.4/20  d_min 20.0/20  +0.5 xia2chem"));
+        assert!(best.contains("★ best of 3: 94.8/100, next autoPROC noanom r3") && best.contains("? why"));
+        // the breakdown is in the ? help
+        assert!(!best.contains("R inner 14.4/20"));
+        app.stats_sel = 0;
+        app.dialog = Some(Dialog::Help);
+        let help = render(&app, 170, 80).replace('\u{a0}', " ");
+        assert!(help.contains("Cmpl 30.0/30  CC½ 30.0/30  R inner 14.4/20  d_min 20.0/20  +0.5 xia2chem"), "{help}");
+        app.dialog = None;
         assert!(edna.contains(" A  d_min 0.94 Å = sin θ/λ 0.532 < 0.550"));
         assert!(edna.contains("#3 of 3:") && edna.contains("behind ★ xia2chem r3, mostly on d_min"));
         assert!(autoproc.contains(" C  d_min 0.86 Å = sin θ/λ 0.582 < 0.590"));
@@ -2675,8 +2978,25 @@ mod tests {
         let info = app.cache.experiments.get_mut("20251211").unwrap().infos.get_mut("JSG285b").unwrap();
         info.runs[1].solves[1].hkl.clear();
         app.stats_sel = 1;
-        assert!(render(&app, 170, 42).contains("not ranked for ★: no HKL file to download"));
+        assert!(!render(&app, 170, 42).contains("not ranked for ★"));
+        app.dialog = Some(Dialog::Help);
+        assert!(render(&app, 170, 80).contains("not ranked for ★: no HKL file to download"));
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn crystal_systems() {
+        for (sg, sys) in [
+            ("P 1", "Triclinic"), ("P -1", "Triclinic"), ("P 21/c", "Monoclinic"), ("C 1 2/c 1", "Monoclinic"),
+            ("P 1 21 1", "Monoclinic"), ("C2", "Monoclinic"), ("P 21 21 21", "Orthorhombic"), ("P212121", "Orthorhombic"),
+            ("C 2 2 21", "Orthorhombic"), ("Pna21", "Orthorhombic"), ("Pbca", "Orthorhombic"), ("P422", "Tetragonal"),
+            ("P4/m", "Tetragonal"), ("I 41/a", "Tetragonal"), ("P 31 2 1", "Trigonal"), ("R -3", "Trigonal"),
+            ("P 63/m", "Hexagonal"), ("P 21 3", "Cubic"), ("F m -3 m", "Cubic"), ("I -4 3 d", "Cubic"),
+            ("#15", "Monoclinic"), ("#19", "Orthorhombic"),
+        ] {
+            assert_eq!(crystal_system(sg), Some(sys), "{sg}");
+        }
+        assert_eq!(crystal_system("space group"), None);
     }
 
     #[test]
@@ -2685,12 +3005,18 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let mut app = demo_app(&base);
         app.dialog = Some(Dialog::Help);
-        let screen = render(&app, 170, 46);
-        assert!(screen.contains("★") && screen.contains("checkCIF C yellow, B orange, A red"));
-        assert!(screen.contains("Similar cells") && screen.contains("fold shells and checkCIF"));
+        // tall enough: symbols stacked under the keys
+        let screen = render(&app, 120, 60);
+        assert!(screen.contains("fold shells and checkCIF"));
         assert!(screen.contains("U               update amanece"));
-        // the last line still shows: the box holds 42 lines
         assert!(screen.contains("Windows GUI programs (xprep, shelxle, olex2…)"));
+        assert!(!screen.contains("best solve: Cmpl"), "keys box holds keys only");
+        assert!(screen.contains("Symbols") && screen.contains("best solve (see ★ ranking)") && screen.contains("Score /100: Cmpl 30 + CC½ 30"));
+        assert!(screen.contains("console waits / scrolled up"), "last symbol line shows");
+        // too short to stack but wide: side by side, both whole
+        let screen = render(&app, 170, 46);
+        assert!(screen.contains("Windows GUI programs (xprep, shelxle, olex2…)"));
+        assert!(screen.contains("console waits / scrolled up"));
         std::fs::remove_dir_all(&base).ok();
     }
 
