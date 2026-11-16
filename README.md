@@ -37,6 +37,12 @@ Unpack it and put `amanece` (`amanece.exe`) somewhere on your `PATH`. Each archi
   The C and C++ runtimes (`libc`, `libgcc_s`) are on every normal install; `xdg-open` is used to open files.
   "Remember password" needs a Secret Service keyring (GNOME Keyring or KWallet, normal on a desktop);
   without one the password just isn't saved.
+- **CellCheckCSD** (optional, for the CSD check in the Stats panel): CCDC's free, offline unit-cell
+  check against the CSD and ICSD, [downloaded from the CCDC](https://www.ccdc.cam.ac.uk/solutions/software/cellcheckcsd/)
+  after a free registration (about 3 GB with its data; Windows and Linux only). amanece finds it in the
+  default folder (`C:\Program Files\CCDC\CellCheckCSD`, or `/opt/CCDC/CellCheckCSD` on Linux), or wherever
+  `cellcheck_dir` in `config.toml` points. Without it everything else works and the CellCheckCSD
+  subtab shows where to get it. Its licence doesn't allow bundling it, so each user installs their own copy.
 
 ### Build from source
 
@@ -216,9 +222,10 @@ the beamtime list and sample rescans happen at most once a minute.
 | Key | Default | Meaning |
 |---|---|---|
 | `sound` | `true` | beep when a new named sample gets processing results (`n` toggles it) |
-| `include_logs` | `false` | also download logs (summary.html, xia2.txt, CORRECT.LP, …) with the HKL files |
+| `include_logs` | `true` | also download logs (summary.html, xia2.txt, CORRECT.LP, …) with the HKL files (`L` toggles it) |
 | `show_test` | `false` | show samples named `test…` and characterisation-only samples |
 | `external_window` | `["xprep"]` | programs always started in their own window instead of the Console panel (Windows GUI programs are detected automatically) |
+| `cellcheck_dir` | unset | CellCheckCSD's folder when it isn't installed in the default place, e.g. `"D:/CCDC/CellCheckCSD"` |
 
 ### Similar cells
 
