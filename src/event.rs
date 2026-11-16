@@ -9,4 +9,5 @@ pub enum AppEvent {
     Remote(RemoteEvent),
     Console(ConsoleEvent),
     Update(UpdateEvent),
-}
+    /// A CellCheckCSD search finished (`key`: the solve's `Solve::key()`).
+    Csd { key: String, id: u64, result: Result<crate::csd::Outcome, String> },}

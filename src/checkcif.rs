@@ -72,18 +72,20 @@ pub struct Alert {
 }
 
 impl Alert {
-    /// `d_min 0.94 Å = sin θ/λ 0.532 < 0.550`, `Cmpl 96.2 % < 97` …
+    /// Short enough that all three fit on one row: `d 0.94Å sinθ/λ .532<.550`,
+    /// `Cmpl 96.2%<97`, `Rmerge 12.3%>10`.
     pub fn text(&self) -> String {
+        let dot3 = |v: f64| {
+            let s = format!("{v:.3}");
+            s.strip_prefix('0').map(str::to_string).unwrap_or(s)
+        };
         match self.check {
-            Check::Resolution => format!(
-                "d_min {:.2} Å = sin θ/λ {:.3} < {:.3}",
-                0.5 / self.value,
-                self.value,
-                self.limit
-            ),
-            Check::Completeness => format!("Cmpl {:.1} % < {}", self.value, self.limit),
+            Check::Resolution => {
+                format!("d {:.2}Å sinθ/λ {}<{}", 0.5 / self.value, dot3(self.value), dot3(self.limit))
+            }
+            Check::Completeness => format!("Cmpl {:.1}%<{}", self.value, self.limit),
             Check::Rint { rmeas } => format!(
-                "{} {:.1} % > {} (Rint)",
+                "{} {:.1}%>{}",
                 if rmeas { "Rmeas" } else { "Rmerge" },
                 self.value,
                 self.limit
@@ -178,9 +180,11 @@ mod tests {
         assert_eq!(a.iter().map(|a| a.level).collect::<Vec<_>>(), [Level::A, Level::C, Level::C]);
         let r = a.iter().find(|a| matches!(a.check, Check::Rint { .. })).unwrap();
         assert_eq!(r.check, Check::Rint { rmeas: true });
-        assert_eq!(r.text(), "Rmeas 12.0 % > 10 (Rint)");
+        assert_eq!(r.text(), "Rmeas 12.0%>10");
         let d = a.iter().find(|a| a.check == Check::Resolution).unwrap();
-        assert_eq!(d.text(), "d_min 0.86 Å = sin θ/λ 0.581 < 0.590");
+        assert_eq!(d.text(), "d 0.86Å sinθ/λ .581<.590");
+        let c = a.iter().find(|a| a.check == Check::Completeness).unwrap();
+        assert_eq!(c.text(), "Cmpl 91.0%<95");
     }
 
     #[test]
