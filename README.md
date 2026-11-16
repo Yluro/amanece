@@ -2,13 +2,13 @@
 
 # Amanece
 
-Terminal UI SFTP client to connect to the ALBA BL13-XALOC/BL6-XAIRA servers: browse your beamtime results,
-compare the statistics of every solve (xia2chem, ednaproc, autoPROC, xia2), search for similar unit cells, download the HKL
-files you pick into the local folder, and run any commands (PLATON, SHELXT, XPREP,...) on them.
+Terminal UI SFTP client to connect to the ALBA BL13-XALOC/BL6-XAIRA servers: browse your beamtime results;
+compare the statistics of every solve (xia2chem, ednaproc, autoPROC, xia2); search for similar unit cells; download the HKL
+files, frames or logs; and run any commands (PLATON, SHELXT, XPREP,...) on them.
 
 Read-only, gentle and safe by design: one SFTP connection channel, rate-limited requests, and nothing about
 your login is stored unless you tick a box: "Remember username" saves the username, "Remember
-password" puts the password in the system's credential store (never in a file). 
+password" puts the password in the system's credential store. 
 See [DESIGN.md](DESIGN.md).
 
 ## Installation
@@ -30,11 +30,10 @@ Unpack it and put `amanece` (`amanece.exe`) somewhere on your `PATH`. Each archi
 
 ### Updating
 
-The version is shown at the right end of the status bar. Amanece routinely asks GitHub
-whether there is a newer release. When there is, the version box turns into a green `↑ v0.4.0`: press `U` 
-(or click it) and say `y`, and amanece downloads this platform's
-archive, checks it against its `.sha256`, makes sure the new binary starts, 
+Since v0.3.1, Amanece routinely asks GitHub whether there is a newer release. When there is, the version box turns into a green `↑ v0.4.0`. Pressing `U` 
+automatically updates amanece.
 Restart amanece again to use the new version. `o` in that dialog opens the release notes.
+
 `check_updates = false` in `config.toml` stops the automatic check; `U` still checks when you ask.
 
 **Requisites:**
@@ -66,7 +65,7 @@ To build amanece from source, clone the repository and install it using cargo:
 ```bash
 git clone https://github.com/Yluro/amanece        # clone the amanece repository code
 cd amanece                                        # move to the amanece folder
-git checkout "$(git describe --tags --abbrev=0)"  # (optional) checkout to the lastest stable release
+git checkout "$(git describe --tags --abbrev=0)"  # (optional, recomended) checkout to the lastest stable release
 cargo install --path .                            # install amanece into your user path
 ```
 
