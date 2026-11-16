@@ -300,6 +300,86 @@ Gotchas:
 - Clicks: `Hit::stats_toggles` holds the rules of foldable sections and the Cell section's last line
   (`+N more`), rebuilt every frame.
 
+### 2.18 CSD check with CellCheckCSD (explored, not built, 2026-11-16)
+
+- Feature idea "already published?": next to `Similar cells` (our own `cells.toml`), say whether the ★ solve's
+  lattice is already in the Cambridge Structural Database, so a known compound is spotted at the beamline.
+- Routes looked at: WebCSD has no public API (and needs a personal subscription; scraping it is out); the CSD
+  Python API (`ccdc.search.ReducedCellSearch`) needs a CSD-Core licence and CCDC's own Python; **CellCheckCSD**
+  is free after registration, runs offline and is meant to be driven by other programs (CrysAlisPro, APEX use
+  it). Chosen: CellCheckCSD. It ships every current CSD entry, but only refcode, formula, space group and cell;
+  its data is a snapshot, updated by reinstalling (CCDC sends no notice).
+- Measured on CellCheckCSD **1.3.0** (build 2026-11-10, `C:\Program Files\CCDC\CellCheckCSD`, 3.1 GB, of which
+  `cell_check.csdsql` is 3.0 GB). Since 1.3 the data also holds >300 000 inorganic (ICSD) entries: CSD entries have
+  their refcode as identifier, ICSD ones a bare number. 1 805 887 entries in all.
+- Program: `ccdc_searcher.exe -query <q.xml> -database <cell_check.csdsql> -results <r.xml>`. The `.bat` only
+  sets `CCDC_SEARCHER_DATABASE` and calls the exe, so amanece calls the exe directly with `-database` (no cmd.exe,
+  no env var). Exit 0 on success; 1 with a `FATAL: …` line on stdout for a missing/unreadable query or a bad
+  centring letter (a results file may still be written: trust the exit code, not the file). Banner and `INFO:`
+  lines go to stdout, so it must be spawned with piped/null stdio or it scribbles over the TUI.
+- **Speed: 0.08 s per run, start-up included** (search itself 0.001–0.04 s). So no background cache is needed for
+  speed; a search can run on every selection of a solve with a cell. The 117 entries of `cells.toml` would take ~10 s.
+- Query (from `docs/ReducedCellSearch/ReducedCellQuerySchema.txt` and `Examples/query1.xml`):
+  ```xml
+  <query name="reduced_cell_search" version="1.0" originator="generic">
+    <lattice_centring>P</lattice_centring>  <!-- P A B C F I R, same letters as cells::centring -->
+    <a>10.44</a><b>5.03</b><c>13.50</c><alpha>90.0</alpha><beta>110.0</beta><gamma>90.0</gamma>
+    <settings>
+      <dimension_tolerance>1.5</dimension_tolerance> <!-- % of the LONGEST edge, not per edge -->
+      <angle_tolerance>2.0</angle_tolerance>         <!-- absolute degrees -->
+      <maximum_hits>0</maximum_hits>                 <!-- 0 = no limit -->
+    </settings>
+  </query>
+  ```
+  One query per file (the root is `<query>`).
+- Results: `<search_results>` → `<database><size>N</size><name>cell_check</name></database>`, then one
+  `<match identifier="EPULIL">` per hit with `<parameter type="…">` children: `cell_length_a|b|c`,
+  `cell_angle_alpha|beta|gamma`, `chemical_formula`, `space_group` (`P21/n`, no spaces), `source_database`; then
+  `status_report`s (`total_candidates_searched`, `total_search_time`). **Hits come sorted by identifier as a
+  string, not by closeness**, and `maximum_hits` cuts that alphabetical list (JG1 with max 2 → EPULIL, FUXSOG,
+  not the two closest). So: no cap (or a high one, 200) and amanece ranks the hits itself.
+- Formula: CSD moiety style, components joined by `,`, each `El<n>` with explicit 1s, charges and multipliers:
+  `C90 H72 N18 Zn2 4+,C6 Cr1 O12 3-,4.5(C3 H7 N1 O1),Cl1 1-`, `(Cl1 K1 O4)n`, `Cl0.948 K0.974 O4`. An element
+  set is easy to get (`[A-Z][a-z]?` followed by a number); a full sum formula is not needed.
+- Tried on our own cells (tolerances 1.5 % / 2°):
+  - AS571 (Pnma 8.77 5.62 7.21) → 17 hits, nine of them KClO₄ (ICSD) at 0.0–1 %: the crystal is potassium
+    perchlorate. Exactly the case this is for.
+  - AS553b (C2/m 23.93 27.89 19.22 118.0°) → IMUXOH/IMUXOH01/IMUXUN/IMUXUN01, a Zn₂ cage with M(oxalate)₃³⁻
+    (M = Cr, Al), C2/c. AS553 (the same crystal, autoPROC's cell 24.18 27.62 19.68 119.7°) → 0 hits: c differs by
+    0.46 Å > 1.5 % × 27.6 Å. Pipelines' cells differ by more than the tolerance, so query **every distinct
+    finished solve's cell** of the sample, not only the ★ one, and merge the hits.
+  - JG1 (P2₁/c 8.79 20.2 15.00 106.7°) → 4 unrelated hits (P2₁/c, P2₁/n, and C2/c FUXSOG through the reduced
+    cell) at 1.5 %; 1 at 0.5 %; 35 at 3 %. D47 (P-1) → 0. Common cells give a handful of coincidences, which
+    the element check sorts out.
+  - Centring works: FUXSOG's cell as C finds FUXSOG, as P finds 11 other entries.
+- Licence (`docs/cell_check_licence.txt`): internal research use, one copy; **may not be bundled** with other
+  software or its data redistributed. So amanece never ships, downloads or copies it or its data, and never
+  stores more than the hits it shows (identifier, cell, SG, formula) for the user's own samples; each user
+  installs CellCheckCSD themselves. Publications using its results acknowledge CellCheckCSD.
+- Plan (new `csd.rs`, no new crates):
+  - Config `[csd] dir = "C:/Program Files/CCDC/CellCheckCSD"` (exe and `.csdsql` found inside). Default: that
+    path if it exists, else the feature is hidden, no warning. Local process only, no network: §3 untouched.
+  - Query/results files in the config dir (`csd-query.xml`, `csd-results.xml`, overwritten each run, never the
+    launch dir). One search at a time on a std thread; 10 s timeout that kills it.
+  - When: on selecting a sample/solve that has a cell, one run per distinct cell of the sample (usually 1–3 runs,
+    < 0.3 s). Results kept in memory per sample for the session; optional `csd.toml` cache only if the batch
+    mode is built, stamped with `version.info` and the database size so a reinstall invalidates it.
+  - Tolerances: CellCheckCSD's own (1.5 % of the longest edge, 2°) from new keys `csd_match_pct` /
+    `csd_match_deg`, defaulting to `cell_match_pct` / `cell_match_deg`. Each hit is then re-scored with
+    `cells::same_lattice` so `sim%` means the same as in `Similar cells` (clamped at 0: their tolerance is looser
+    than ours on short edges).
+  - Ranking: hits whose element set equals the solve's (SFAC of `shelxt.ins`, or of any `.ins` we downloaded)
+    first and marked `≡`, then by score. Without an element list, by score only.
+  - Stats, Cell section: `In the CSD (N)` under `Similar cells`: identifier, SG, a b c α β γ, sim%, formula cut
+    with `…`; ICSD numbers shown as `ICSD 1137`. Grey `not in the CSD (1 805 887 entries, 2026-11-10)` when
+    empty. Same `c` all/closest-5 toggle. A click on a CSD refcode opens
+    `https://www.ccdc.cam.ac.uk/structures/Search?Ccdcid=<REFCODE>` (Access Structures, free); ICSD numbers get
+    no link (ICSD is paid).
+  - Later: a batch command over `cells.toml` writing `csd = ["IMUXOH", …]` on each entry.
+- Open: send the conventional cell + centring (what CellCheckCSD expects, done above) or our primitive Niggli
+  cell as P? (Same lattice; conventional keeps their reduction in charge.) Whether to hide ICSD hits for organic
+  samples. A key to re-run with a looser tolerance (3 %) when nothing is found.
+
 ## 3. Gentle-scraping rules (hard requirements)
 
 1. **Read-only by construction.** The SFTP wrapper type exposes only `read_dir`, `stat` and `open_read`.
