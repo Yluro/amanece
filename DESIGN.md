@@ -300,7 +300,44 @@ Gotchas:
 - Clicks: `Hit::stats_toggles` holds the rules of foldable sections and the Cell section's last line
   (`+N more`), rebuilt every frame.
 
-### 2.18 CSD check with CellCheckCSD (explored, not built, 2026-11-16)
+### 2.18 CSD check with CellCheckCSD (explored and built, 2026-11-16)
+
+**As built** (the exploration notes and plan follow; where they differ, this wins):
+- `csd.rs`: `Install::find` (the `cellcheck_dir` config key, else `%ProgramFiles%\CCDC\CellCheckCSD`; needs
+  the exe and `cell_check.csdsql`), `Query::xml`, `Install::search` (calls the exe directly with `-database`,
+  stdio piped, no window, 20 s timeout; query/results files `csd-query-<pid>_<id>.xml` in the config dir,
+  removed after), `parse`, `rank`, `local_elements`.
+- One search per solve, not per sample: the highlighted solve's conventional cell and centring
+  (`cells::centring`), tolerances `cell_match_pct` / `cell_match_deg`. `App::csd_auto` (from `tick`) starts it
+  the first time a solve with a cell is highlighted; `S` runs it again. Results live in `App::csd` by
+  `Solve::key()` for the session (no cache file: 0.1 s each). Background thread → `AppEvent::Csd`; a stale
+  result (an older id) is dropped.
+- Ranking: every hit re-scored with `cells::same_lattice` at 3× our tolerance (theirs is looser on short
+  edges), `sim` = 100 − score × 3·pct, closest first.
+- Elements filter, typed by the user: the first line of the CellCheckCSD subtab is a field (`InfoItem::CsdFilter`,
+  a cursor stop): Enter starts typing (every key goes to it, even q/S/c, until Enter applies or Esc cancels;
+  `App::csd_edit`), `csd::parse_elements` takes `Cu N O`, `cu, n, o` or `CuNO`, checks each against the 118
+  symbols (others are named in the console and left out), sorted. Per sample (`App::csd_filter` by date and
+  name: the solves of one compound share it), session only; an empty field clears it. Hits are kept when their
+  formula's elements include every required one (`csd::filter`; more elements, H, solvent or counter-ions, are
+  fine); the rule reads `· 8 of 17 hits`, or `none of the 17 hits contain Pt`. The listed hits and their cursor
+  stops are the filtered ones.
+  First built differently: the solve's elements were read from the newest `.ins`/`.res` with a real `UNIT` in
+  its downloaded folder (xia2's `shelxt.ins` is a placeholder, `SFAC C H N O` / `UNIT 1.0 …`), exact matches
+  marked `≡` and sorted first. Dropped at the user's request: the file was often missing, a stale guess
+  (SHELXT's Fe/Co), or out of date after deleting it, and re-reading it on every highlight or on a timer was
+  extra machinery. Typing the elements is explicit and filters instead of reordering.
+- Info's `CellCheckCSD` subtab (light cyan): the elements field, then `searching the CSD…`, the error and "S
+  tries again", `not in the CSD or ICSD (1 805 887 entries, data 2026-11-10)`, or a table (ID, SG, a b c α β γ,
+  sim%, formula cut to fit), the closest 5 until `c` (which also lists every similar cell), a footer with the
+  data size and date. ICSD numbers show as `ICSD 170089` in grey. Each listed hit is a cursor stop
+  (`InfoItem::CsdHit`): Enter (or a double click) opens a CSD refcode's free Access Structures page in the
+  browser; ICSD entries have none (said in the console). ← on a hit or the field folds the subtab.
+- Subtab order now: Shells, Files, Cell, Similar cells (its own subtab, count on the rule; only with a cell),
+  CellCheckCSD, checkCIF (last).
+- Tested: parse/rank/filter/parse_elements units, a canned-result UI test (typing, filtering, Esc, clearing),
+  and `cargo test live_search -- --ignored` against the real install (AS571's cell: 17 hits, 8 with Cl K O, all
+  KClO₄).
 
 - Feature idea "already published?": next to `Similar cells` (our own `cells.toml`), say whether the ★ solve's
   lattice is already in the Cambridge Structural Database, so a known compound is spotted at the beamline.
@@ -379,6 +416,47 @@ Gotchas:
 - Open: send the conventional cell + centring (what CellCheckCSD expects, done above) or our primitive Niggli
   cell as P? (Same lattice; conventional keeps their reduction in charge.) Whether to hide ICSD hits for organic
   samples. A key to re-run with a looser tolerance (3 %) when nothing is found.
+
+### 2.19 Full-height Stats and the new section order (2026-11-16)
+
+- Wide layout (≥ 150 columns): Stats (now 82 wide) takes the whole height on the right; Local, ALBA and the
+  console share the left (console under them). Narrow layout unchanged.
+- Stats table gets a `Score` column: the ★ ranking's points out of 100 (`rank::breakdown`), `–` when a solve
+  doesn't compete. The "#2 of 3 … behind ★" line under the table is gone; the breakdown stays in `?`.
+- The details are their own panel, **Info** (`Focus::Info`, between Stats and Console in the Tab cycle), under
+  the table panel, which takes only its rows (borders + header + rows; at least 2 rows, Info at least 10). Info's
+  title is the highlighted solve (`<pipeline> · run N · images · status`) or `Raw frames · run N`.
+- Info's subtabs, in order (`app::Sub`, cursor stops from `app::solve_items`): `Shells` (folded at startup),
+  `Files` (`HKL:` and `logs:` with every log's name, white when `L` includes them in `d`, grey with "(left out of
+  d: L)" when not; then notes and the Rmeas footnote), `checkCIF` (every alert on one row, spaces inside an alert
+  non-breaking so a narrow panel wraps between alerts; texts shortened to `d 0.94Å sinθ/λ .532<.550`,
+  `Cmpl 96.2%<97`, `Rmerge 12.3%>10`; folded, the badges go on its rule), `Cell` (folded: SG on the rule) with
+  `Similar cells`, and `CellCheckCSD` (light cyan; see §2.18 "As built", which also gives the current order:
+  Similar cells became its own subtab and checkCIF moved last).
+- Keys. Table: ↑↓ solves, → (or Tab) into Info. Info: ↑↓ move between subtab titles and, in an open Files, the
+  HKL and logs lines (`App::info_sel`, an `InfoItem` rather than an index, so moving to another solve keeps the
+  cursor on the same subtab); Enter folds/shows a title, ← folds (on the HKL/logs line: folds Files), → shows,
+  ← on a folded title (or Esc) goes back to the table. Enter on logs downloads just the logs of that solve; on
+  HKL, that solve (HKL, plus logs when `L` is on), into the usual `xia2chem_r3/` folder
+  (`App::queue_solve_files`, shared with `d`). Space, a, d, F, s, c, S work from Info too. `z` is free.
+- Mouse: a click on a subtab title folds/shows it; on HKL/logs selects, a double click downloads; the wheel
+  moves the cursor. Folded state (`App::folded`) is session state, not saved.
+- Info scrolls by lines, following the cursor: the subtabs are laid out one under the other and the panel shows
+  a window of them from `Hit::info_scroll` (kept between frames), moved only when the cursor's line (a title
+  with its first line) would leave it. Scrolling by whole subtabs, as first built, let the cursor walk off the
+  bottom of a subtab taller than the panel (a 60-hit CSD search). `↑N ↓M` on the panel's top border count the
+  rows hidden above and below. When everything doesn't fit, the same-cell list still shrinks first (down to 1)
+  and says `+N more: no room`.
+- `include_logs` now defaults to true (config files that already say `false` keep it).
+- XAIRA frames: a run's `frames 720` counts images, but its Eiger HDF5 files hold many images each (720 images in
+  10 files). The confirm dialog said "10 frames"; it now says `N files, size` and per run `720 images in 10 HDF5
+  files` (CBF runs: `N images`). The frames section no longer estimates XAIRA's size at 6.2 MB/image.
+- A solve's `images a–b` is the range its pipeline integrated (`startImageNumber`/`endImageNumber` of
+  `AutoProcIntegration`), not what was collected: XAIRA's autoPROC reported 1–635 of a 720-image sweep (fast_dp
+  reports no range). `Run::images` used the first solve's range, so the frames row could say 635; it now takes
+  the widest any solve reports (min start, max end). A solve that used less shows `images 1–635 of 720` in
+  Info's title and a yellow `… used images 1–635 of the run's 1–720: 85 left out` under Files. Why autoPROC
+  cut them (radiation damage? bad end images?) is in its own log, not the XML.
 
 ## 3. Gentle-scraping rules (hard requirements)
 
