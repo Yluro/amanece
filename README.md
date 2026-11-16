@@ -28,14 +28,6 @@ with one archive per platform:
 Unpack it and put `amanece` (`amanece.exe`) somewhere on your `PATH`. Each archive has a
 `.sha256` file next to it.
 
-### Updating
-
-Since v0.3.1, Amanece routinely asks GitHub whether there is a newer release. When there is, the version box turns into a green `↑ v0.4.0`. Pressing `U` 
-automatically updates amanece.
-Restart amanece again to use the new version. `o` in that dialog opens the release notes.
-
-`check_updates = false` in `config.toml` stops the automatic check; `U` still checks when you ask.
-
 **Requisites:**
 
 - **Windows**: Windows 10 version 1809 or newer (the console panel needs ConPTY). 
@@ -68,6 +60,13 @@ cd amanece                                        # move to the amanece folder
 git checkout "$(git describe --tags --abbrev=0)"  # (optional, recomended) checkout to the lastest stable release
 cargo install --path .                            # install amanece into your user path
 ```
+### Updating
+
+Since v0.3.1, Amanece routinely asks GitHub whether there is a newer release. When there is, the version box turns into a green `↑ v0.4.0`. Pressing `U` 
+automatically updates amanece.
+Restart amanece again to use the new version. `o` in that dialog opens the release notes.
+
+`check_updates = false` in `config.toml` stops the automatic check; `U` still checks when you ask.
 
 
 ## Running amanece
@@ -77,7 +76,7 @@ You can simply run amanece by calling the executable from any terminal:
 ```bash
 amanece
 ```
-The TUI is fully mouse and keyboard compatible.
+
 
 Tick **Remember username** in the login dialogue (`Tab` to it, `Space`, or click) to have the username
 prefilled next time. Up to 10 usernames are remembered: the last one used is prefilled and `←`/`→` in
@@ -85,13 +84,12 @@ the username field picks another. Only usernames are saved, in `login.toml`. To 
 and press `Del` (or log in with the box unticked).
 
 **Remember password** (off by default) also keeps that account's password in your system's credential 
-manager under the name `amanece`; next time it is filled in and `Enter` connects. It is saved only after 
-the server accepted it. If the server ever rejects a saved password (someone changed it), 
-amanece deletes it and asks you to type the new one, so it never retries a wrong password on its own.
+manager under the name `amanece`. It is saved only after the server accepted it. If the server ever rejects a saved password (someone changed it), 
+amanece deletes it and asks you to type the new one.
 
 ## Key shortcuts
 
-`?` lists all key shorcuts and symbols. Each panel shows its key hints on its bottom border.
+The TUI is fully mouse compatible, although there are several useful key shortcuts programmed. Pressing `?` lists all the help. Each panel shows its important key hints on its bottom border.
 
 ### Global keys
 
@@ -105,7 +103,7 @@ amanece deletes it and asks you to type the new one, so it never retries a wrong
 | `U` | update amanece (see [Updating](#updating)) |
 | `q` | quit (asks first) |
 
-### Local panel (left)
+### Local file tree panel (left)
 
 Browse folders; `N` makes a new folder, `Supr` moves the selected file or folder to the Recycle Bin
 (asks first). Downloads land in `<sample>/<program>/` inside the folder open here.
@@ -119,15 +117,19 @@ opens one (the others are hidden), `Backspace` goes back.
 - A green ◆ next to a sample: it's already downloaded (from this beamtime) into the Local folder.
 - A yellow ◆: only a local folder with the same name exists.
 
+The ALBA panel hides samples containing `test` in its name by default. Pressing `t` shows all experiments in the beamtime.
+
 ### Stats panel
 
 ![Stats panel: solves table, ranking, cell, similar cells, shells and checkCIF](docs/images/stats.png)
 
-Every solve with its statistics, ★ on the best one. Under the table, the highlighted solve's details
+Amanece lists every solve along with its statistics, and marks the best one based on a weighted ranking: completeness (30), CC½ (30),
+inner-shell R (20) and d_min (20).
+Under the solve table, the stats of each solve are listed:
 come in sections:
 
 - **Solve**: HKL and log files, and the ★ ranking.
-- **Cell**: space group, a b c and α β γ, and the similar cells.
+- **Cell**: space group, a b c and α β γ, and the similar cell hits, based on your cached database. 
 - **Shells**: overall, inner, outer.
 - **checkCIF**: alerts.
 
@@ -136,13 +138,6 @@ levels) and `z` again unfolds them; clicking either title does the same.
 
 **Keys:** `Space` marks, `d` downloads, `F` downloads raw frames (asks first), `c` toggles all similar
 cells, `z` folds.
-
-#### Ranking
-
-The ranking shows how the ★ was chosen: each solve's points for completeness (30), CC½ (30),
-inner-shell R (20) and d_min (20), its place in the ranking, and for the others how far behind ★
-they are and which criterion cost them most (or why a solve isn't ranked at all: failed, running,
-no HKL file).
 
 #### checkCIF alerts
 
@@ -154,11 +149,7 @@ Values that would draw a checkCIF alert are coloured, yellow for C, orange for B
 | Completeness | PLAT029 | < 99 / 97 / 95 % |
 | Rmerge (stand-in for Rint) | RINTA01 | > 10 / 15 / 20 % |
 
-The checkCIF section spells each alert out. These come from the pipeline's overall shell, so they
-are a warning at the beamline, not checkCIF itself: the completeness runs to the pipeline's d_min
-(checkCIF tests θ_full, usually higher), and checkCIF doesn't publish the PLAT029 limits (these are
-read off real reports). Change the limits in the `[checkcif]` section of
-[`config.toml`](#checkcif-alert-limits).
+You can change the limits in the `[checkcif]` section of [`config.toml`](#checkcif-alert-limits).
 
 #### Similar cells
 
@@ -168,9 +159,7 @@ a b c α β γ and `sim%`. `sim%` is 100 minus the largest difference in % of th
 `cell_match_deg` counts like an edge off by `cell_match_pct`): 100 for the same cell, 98.5 at the
 default match limit.
 
-Long sample names are cut (…) so each sample stays on one row. It lists the closest 5, then
-`+N more`; `c` (or a click on `+N more`) lists them all, `c` again only the closest 5. When the
-panel is too short for the whole list, it says so; `z` makes room.
+It lists the closest 5; `c` (or a click on `+N more`) lists them all.
 
 #### Downloads
 
@@ -183,23 +172,18 @@ panel is too short for the whole list, it says so; `z` makes room.
 
 ### Console panel
 
-A terminal (Windows ConPTY); `:` to type. Commands run in the Local folder and a bare program name
-gets the selected file: with `XDS_ASCII.HKL` selected, `xprep` runs `xprep XDS_ASCII.HKL`.
-Interactive console programs work: while SADABS (or any program) runs, what you type plus Enter is
-its answer; Ctrl-C interrupts, twice kills. XPREP and other Windows GUI programs open in their own
-window.
+Amanece comes with its own terminal emulator (Windows ConPTY). Commands run in the Local folder and a bare program name
+gets the selected file, e.g.: with `XDS_ASCII.HKL` selected, `xprep` runs `xprep XDS_ASCII.HKL`.
 
 ### Mouse
 
-Click a panel or row, double-click to open, click a Stats checkbox to mark, wheel to scroll, click
-the status badges (poll / sound / logs) to toggle. Shift+drag still selects text in Windows Terminal.
 
-## config.toml
+## Settings
 
-Amanece's settings can be configured by editting: `config.toml`, in amanece's own folder (`O` in the app opens it; see
-[Files it writes locally](#files-it-writes-locally) for the path). It is written once, with comments,
-on the first run and never rewritten afterwards, so edit it freely; changes take effect the next time
-amanece starts. Any key that is missing uses its default, so a `config.toml` from an older version
+Amanece's settings can be configured by editing: `config.toml`, in amanece's own folder (`O` in the app opens it; see
+[Files](#files)). It is written once, with comments; changes take effect the next time amanece starts. 
+
+Any key that is missing uses its default, so a `config.toml` from an older version
 keeps working and you only need the lines you want to change. It never holds credentials.
 
 ### Connection and polling
@@ -219,7 +203,7 @@ keeps working and you only need the lines you want to change. It never holds cre
 Polls never run more often than every 5 s, and at `30s` / `5s` only the open beamtime is re-listed;
 the beamtime list and sample rescans happen at most once a minute.
 
-### Where the data is
+### ALBA folder tree scanning
 
 | Key | Default | Meaning |
 |---|---|---|
