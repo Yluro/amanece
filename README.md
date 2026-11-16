@@ -68,7 +68,7 @@ cargo install --path .                            # install amanece into your us
 ```
 ### Updating
 
-Since v0.4.0, Amanece routinely asks GitHub whether there is a newer release. When there is, the version box turns into a green `↑ v0.5.0`. Pressing `U` 
+Since v0.4.1, Amanece routinely asks GitHub whether there is a newer release. When there is, the version box turns into a green `↑ v0.5.0`. Pressing `U` 
 automatically updates amanece.
 Restart amanece again to use the new version. `o` in that dialog opens the release notes.
 
