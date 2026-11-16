@@ -9,7 +9,7 @@ use crate::ui::splash::Egg;
 use crate::event::AppEvent;
 use crate::layout;
 use crate::local::LocalPanel;
-use crate::model::{RemoteFile, SampleInfo, Solve, human_bytes, now_secs};
+use crate::model::{RemoteFile, SampleInfo, Solve, Status, human_bytes, now_secs};
 use crate::notify;
 use crate::remote::session::HostKey;
 use crate::remote::{DownloadEvent, DownloadJob, RemoteCmd, RemoteEvent, RemoteHandle};
@@ -35,7 +35,10 @@ const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(24 * 3600);
 pub enum Focus {
     Local,
     Alba,
+    /// The solves table.
     Stats,
+    /// The highlighted solve's details, under the table.
+    Info,
     Console,
 }
 
@@ -44,7 +47,8 @@ impl Focus {
         match self {
             Focus::Local => Focus::Alba,
             Focus::Alba => Focus::Stats,
-            Focus::Stats => Focus::Console,
+            Focus::Stats => Focus::Info,
+            Focus::Info => Focus::Console,
             Focus::Console => Focus::Local,
         }
     }
@@ -54,9 +58,80 @@ impl Focus {
             Focus::Local => Focus::Console,
             Focus::Alba => Focus::Local,
             Focus::Stats => Focus::Alba,
-            Focus::Console => Focus::Stats,
+            Focus::Info => Focus::Stats,
+            Focus::Console => Focus::Info,
         }
     }
+}
+
+/// A foldable part ("subtab") of the Info panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Sub {
+    Shells,
+    Files,
+    CheckCif,
+    Cell,
+    /// Same-cell samples from `cells.toml` (only when the solve has a cell).
+    Similar,
+    Csd,
+    Frames,
+}
+
+/// A CellCheckCSD search of one solve's cell.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CsdState {
+    /// Running; the id tells it from a newer search of the same solve.
+    Searching(u64),
+    Done(crate::csd::Outcome),
+    Failed(String),
+}
+
+/// Where the Info panel's cursor can be: a subtab's title, or a line of Files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfoItem {
+    Head(Sub),
+    Hkl,
+    Logs,
+    /// The CellCheckCSD elements field (Enter types into it).
+    CsdFilter,
+    /// A CellCheckCSD hit, by its place in the filtered, ranked list.
+    CsdHit(usize),
+}
+
+/// CSD hits listed until `c` lists all of them (as for similar cells).
+pub const CSD_HITS: usize = 5;
+/// checkCIF alerts only mean something for a solve with an overall shell that didn't fail.
+pub fn has_checkcif(s: &Solve) -> bool {
+    s.status != Status::Failed && s.stats.as_ref().is_some_and(|st| st.overall.is_some())
+}
+
+/// The Info panel's cursor stops, top to bottom, for a solve (same order as the panel).
+pub fn solve_items(s: &Solve, folded: &HashSet<Sub>) -> Vec<InfoItem> {
+    let has_stats = s.stats.is_some();
+    let mut v = Vec::new();
+    if has_stats {
+        v.push(InfoItem::Head(Sub::Shells));
+    }
+    v.push(InfoItem::Head(Sub::Files));
+    if !folded.contains(&Sub::Files) {
+        if !s.hkl.is_empty() {
+            v.push(InfoItem::Hkl);
+        }
+        if !s.logs.is_empty() {
+            v.push(InfoItem::Logs);
+        }
+    }
+    if has_stats {
+        v.push(InfoItem::Head(Sub::Cell));
+        if s.stats.as_ref().is_some_and(|st| st.cell.is_some()) {
+            v.push(InfoItem::Head(Sub::Similar));
+        }
+        v.push(InfoItem::Head(Sub::Csd));
+        if has_checkcif(s) {
+            v.push(InfoItem::Head(Sub::CheckCif));
+        }
+    }
+    v
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,23 +261,20 @@ pub enum Badge {
     Update,
 }
 
-/// Parts of the Stats details that fold or expand (`c`, `z`, or a click on their title).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatsToggle {
-    /// Every same-cell hit instead of the closest few.
-    CellHits,
-    /// The shells table and the checkCIF alerts.
-    Details,
-}
-
 /// Screen layout from the last frame (written by `ui::draw`).
 #[derive(Debug, Clone, Default)]
 pub struct Hit {
     pub local: ListHit,
     pub alba: ListHit,
     pub stats: ListHit,
-    /// Clickable section titles under the Stats table.
-    pub stats_toggles: Vec<(Rect, StatsToggle)>,
+    /// The Info panel, its clickable lines (subtab titles, HKL, logs) and the Cell
+    /// subtab's "+N more" line.
+    pub info: Rect,
+    pub info_items: Vec<(Rect, InfoItem)>,
+    /// Rows of the Info panel's content scrolled off the top (kept between frames so the
+    /// view only moves when the cursor would leave it).
+    pub info_scroll: u16,
+    pub cell_more: Option<Rect>,
     pub console: Rect,
     pub console_cols: u16,
     pub badges: Vec<(Rect, Badge)>,
@@ -318,8 +390,18 @@ pub struct App {
     pub stats_sel: usize,
     /// Stats details: list every same-cell hit, not just the closest few (`c`).
     pub cell_hits_all: bool,
-    /// Stats details: shells and checkCIF folded to their title line (`z`).
-    pub fold_details: bool,
+    /// The Info panel's cursor, and its folded subtabs (Shells to start with). Session state.
+    pub info_sel: InfoItem,
+    pub folded: HashSet<Sub>,
+    /// CellCheckCSD install found at startup, and its searches by `Solve::key()`
+    /// (session only: a search takes 0.1 s, so nothing is saved).
+    pub cellcheck: Option<crate::csd::Install>,
+    pub csd: HashMap<String, CsdState>,
+    csd_next: u64,
+    /// Elements the CSD hits must contain, per sample (date, name), as typed into the
+    /// CellCheckCSD subtab; and the field's text while it is being typed. Session only.
+    pub csd_filter: HashMap<(String, String), Vec<String>>,
+    pub csd_edit: Option<String>,
     /// Marked solves, by `Solve::key()` (contains the full remote path).
     pub marks: HashSet<String>,
     /// Frame-run checkbox overrides, keyed `date/sample/prefix_run`.
@@ -417,7 +499,13 @@ impl App {
             alba_sel: 0,
             stats_sel: 0,
             cell_hits_all: false,
-            fold_details: false,
+            info_sel: InfoItem::Head(Sub::Shells),
+            folded: HashSet::from([Sub::Shells]),
+            cellcheck: crate::csd::Install::find(cfg.cellcheck_dir.as_deref().map(std::path::Path::new)),
+            csd: HashMap::new(),
+            csd_next: 0,
+            csd_filter: HashMap::new(),
+            csd_edit: None,
             marks: HashSet::new(),
             frame_marks: HashMap::new(),
             console: Console::default(),
@@ -752,10 +840,24 @@ impl App {
             }
             AppEvent::Console(e) => self.on_console(e),
             AppEvent::Update(e) => self.on_update(e),
+            AppEvent::Csd { key, id, result } => {
+                // a newer search of the same solve (S) wins
+                if matches!(self.csd.get(&key), Some(CsdState::Searching(i)) if *i == id) {
+                    let state = match result {
+                        Ok(o) => CsdState::Done(o),
+                        Err(e) => {
+                            self.say(LineKind::Warn, format!("CellCheckCSD: {e}"));
+                            CsdState::Failed(e)
+                        }
+                    };
+                    self.csd.insert(key, state);
+                }
+            }
         }
     }
 
     pub fn tick(&mut self) {
+        self.csd_auto();
         if self.connected()
             && let Some(at) = self.next_poll
             && Instant::now() >= at
@@ -1439,6 +1541,14 @@ impl App {
         if self.focus == Focus::Console && self.console_key(key) {
             return;
         }
+        // typing elements: every key goes to the field (q, S, c… are letters here)
+        if self.csd_edit.is_some() {
+            if self.focus == Focus::Info {
+                self.csd_edit_key(key);
+                return;
+            }
+            self.csd_edit = None;
+        }
         let shift_tab = key.code == KeyCode::BackTab;
         match key.code {
             KeyCode::Char('q') => self.request_quit(),
@@ -1482,6 +1592,7 @@ impl App {
                 Focus::Local => self.local_key(key),
                 Focus::Alba => self.alba_key(key),
                 Focus::Stats => self.stats_key(key),
+                Focus::Info => self.info_key(key),
                 Focus::Console => {}
             },
         }
@@ -1573,11 +1684,25 @@ impl App {
                             self.alba_activate();
                         }
                     }
+                } else if hit.info.contains(p) {
+                    // a title folds/unfolds, the HKL or logs line is picked (double: downloaded)
+                    self.set_focus(Focus::Info);
+                    if hit.cell_more.is_some_and(|r| r.contains(p)) {
+                        self.cell_hits_all = !self.cell_hits_all;
+                    } else if let Some((_, it)) = hit.info_items.iter().find(|(r, _)| r.contains(p)) {
+                        self.info_sel = *it;
+                        match *it {
+                            InfoItem::Head(sub) => self.toggle_fold(sub),
+                            InfoItem::Hkl if double => self.download_highlighted(false),
+                            InfoItem::Logs if double => self.download_highlighted(true),
+                            InfoItem::CsdHit(i) if double => self.open_csd_hit(i),
+                            InfoItem::CsdFilter => self.csd_edit = Some(self.csd_required().join(" ")),
+                            _ => {}
+                        }
+                    }
                 } else if hit.stats.area.contains(p) {
                     self.set_focus(Focus::Stats);
-                    if let Some((_, t)) = hit.stats_toggles.iter().find(|(r, _)| r.contains(p)) {
-                        self.toggle_details(*t);
-                    } else if let Some(i) = hit.stats.row_at(p).filter(|i| *i < self.stats_len()) {
+                    if let Some(i) = hit.stats.row_at(p).filter(|i| *i < self.stats_len()) {
                         self.stats_sel = i;
                         if double || p.x < hit.stats.rows.x + 3 {
                             self.toggle_stats_row(false);
@@ -1593,6 +1718,12 @@ impl App {
                     self.local.move_by(if up { -3 } else { 3 });
                 } else if hit.alba.area.contains(p) {
                     self.move_alba(if up { -3 } else { 3 });
+                } else if hit.info.contains(p) {
+                    let items = self.info_items();
+                    if !items.is_empty() {
+                        let i = self.info_index(&items);
+                        self.info_sel = items[if up { i.saturating_sub(1) } else { (i + 1).min(items.len() - 1) }];
+                    }
                 } else if hit.stats.area.contains(p) {
                     let n = self.stats_len();
                     self.stats_sel = if up {
@@ -2129,18 +2260,301 @@ impl App {
             KeyCode::Char('d') => self.download_solves(&date, &info),
             KeyCode::Char('F') => self.request_frames(&date, &info),
             KeyCode::Char('s') => self.rescan_selected(),
-            KeyCode::Char('c') => self.toggle_details(StatsToggle::CellHits),
-            KeyCode::Char('z') => self.toggle_details(StatsToggle::Details),
+            KeyCode::Char('c') => self.cell_hits_all = !self.cell_hits_all,
+            KeyCode::Char('S') => self.csd_search(),
             KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::Alba,
+            KeyCode::Right | KeyCode::Char('l') => self.focus = Focus::Info,
             _ => {}
         }
     }
 
-    fn toggle_details(&mut self, t: StatsToggle) {
-        match t {
-            StatsToggle::CellHits => self.cell_hits_all = !self.cell_hits_all,
-            StatsToggle::Details => self.fold_details = !self.fold_details,
+    /// The Info panel's cursor stops for the highlighted table row.
+    pub fn info_items(&self) -> Vec<InfoItem> {
+        let Some((d, s)) = self.selected_sample() else {
+            return Vec::new();
+        };
+        let Some(info) = self.info(&d, &s) else {
+            return Vec::new();
+        };
+        match Self::stats_rows(info).get(self.stats_sel) {
+            Some(StatsRow::Solve { run, solve }) => {
+                let s = &info.runs[*run].solves[*solve];
+                let mut items = solve_items(s, &self.folded);
+                // under the CellCheckCSD title: the elements field, then the listed hits
+                if !self.folded.contains(&Sub::Csd)
+                    && self.cellcheck.is_some()
+                    && let Some(at) = items.iter().position(|x| *x == InfoItem::Head(Sub::Csd))
+                {
+                    let n = self.csd_visible(s).map_or(0, |v| self.csd_shown(v.len()));
+                    let stops = std::iter::once(InfoItem::CsdFilter).chain((0..n).map(InfoItem::CsdHit));
+                    items.splice(at + 1..at + 1, stops);
+                }
+                items
+            }
+            Some(StatsRow::Frames { .. }) => vec![InfoItem::Head(Sub::Frames)],
+            None => Vec::new(),
         }
+    }
+
+    /// How many of `n` CSD hits are listed: the closest few, or all after `c`.
+    pub fn csd_shown(&self, n: usize) -> usize {
+        if self.cell_hits_all { n } else { n.min(CSD_HITS) }
+    }
+
+    /// Where the cursor is among `items`. It remembers what it was on, so moving to
+    /// another solve keeps it on the same subtab when that one has it too.
+    pub fn info_index(&self, items: &[InfoItem]) -> usize {
+        let find = |it: InfoItem| items.iter().position(|x| *x == it);
+        find(self.info_sel)
+            .or_else(|| match self.info_sel {
+                InfoItem::Hkl | InfoItem::Logs => find(InfoItem::Head(Sub::Files)),
+                InfoItem::CsdHit(_) => find(InfoItem::CsdFilter).or_else(|| find(InfoItem::Head(Sub::Csd))),
+                InfoItem::CsdFilter => find(InfoItem::Head(Sub::Csd)),
+                InfoItem::Head(_) => None,
+            })
+            .unwrap_or(0)
+    }
+
+    /// Enter on a CSD hit: its free CCDC page in the browser (ICSD entries have none).
+    fn open_csd_hit(&mut self, i: usize) {
+        let Some(s) = self.highlighted_solve() else {
+            return;
+        };
+        let Some(h) = self.csd_visible(&s).and_then(|v| v.get(i).map(|h| (*h).clone())) else {
+            return;
+        };
+        match h.url() {
+            Some(url) => {
+                open_with_default_app(std::path::Path::new(&url));
+                self.say(LineKind::Info, format!("opening {} on the CCDC's Access Structures", h.id));
+            }
+            None => self.say(LineKind::Info, format!("ICSD {} is an inorganic entry: no free CCDC page", h.id)),
+        }
+    }
+
+    fn toggle_fold(&mut self, sub: Sub) {
+        if !self.folded.remove(&sub) {
+            self.folded.insert(sub);
+        }
+    }
+
+    /// Info panel: ↑↓ between subtab titles (and the HKL and logs lines), Enter or ←
+    /// folds, Enter or → unfolds, ← on a folded title goes back to the table. Enter on
+    /// the logs downloads them; on the HKL line, that solve.
+    fn info_key(&mut self, key: KeyEvent) {
+        let items = self.info_items();
+        if items.is_empty() {
+            if matches!(key.code, KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc) {
+                self.focus = Focus::Stats;
+            }
+            return;
+        }
+        let i = self.info_index(&items);
+        let cur = items[i];
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.info_sel = items[i.saturating_sub(1)],
+            KeyCode::Down | KeyCode::Char('j') => self.info_sel = items[(i + 1).min(items.len() - 1)],
+            KeyCode::Home | KeyCode::Char('g') => self.info_sel = items[0],
+            KeyCode::End | KeyCode::Char('G') => self.info_sel = items[items.len() - 1],
+            KeyCode::Enter => match cur {
+                InfoItem::Head(sub) => {
+                    self.info_sel = cur;
+                    self.toggle_fold(sub);
+                }
+                InfoItem::Hkl => self.download_highlighted(false),
+                InfoItem::Logs => self.download_highlighted(true),
+                InfoItem::CsdHit(i) => self.open_csd_hit(i),
+                InfoItem::CsdFilter => self.csd_edit = Some(self.csd_required().join(" ")),
+            },
+            KeyCode::Left | KeyCode::Char('h') => match cur {
+                InfoItem::Head(sub) if !self.folded.contains(&sub) => {
+                    self.info_sel = cur;
+                    self.folded.insert(sub);
+                }
+                InfoItem::Head(_) => self.focus = Focus::Stats,
+                InfoItem::Hkl | InfoItem::Logs => {
+                    self.folded.insert(Sub::Files);
+                    self.info_sel = InfoItem::Head(Sub::Files);
+                }
+                InfoItem::CsdHit(_) | InfoItem::CsdFilter => {
+                    self.folded.insert(Sub::Csd);
+                    self.info_sel = InfoItem::Head(Sub::Csd);
+                }
+            },
+            KeyCode::Right | KeyCode::Char('l') => {
+                if let InfoItem::Head(sub) = cur {
+                    self.info_sel = cur;
+                    self.folded.remove(&sub);
+                }
+            }
+            KeyCode::Esc => self.focus = Focus::Stats,
+            // the table's actions work from here too
+            KeyCode::Char(' ' | 'a' | 'd' | 'F' | 's' | 'c' | 'S') => self.stats_key(key),
+            _ => {}
+        }
+    }
+
+    /// Enter on the HKL line (`logs` false: HKL, plus the logs when `L` includes them) or
+    /// the logs line (`logs` true: just the logs) of the highlighted solve.
+    fn download_highlighted(&mut self, logs: bool) {
+        if !self.connected() {
+            self.say(LineKind::Warn, "offline: press C to connect");
+            return;
+        }
+        let Some((date, sample)) = self.selected_sample() else {
+            return;
+        };
+        let Some(info) = self.info(&date, &sample).cloned() else {
+            return;
+        };
+        let Some(StatsRow::Solve { run, solve }) = Self::stats_rows(&info).get(self.stats_sel).copied() else {
+            return;
+        };
+        let s = &info.runs[run].solves[solve];
+        let files = if logs {
+            s.logs.clone()
+        } else {
+            let mut f = s.hkl.clone();
+            if self.include_logs {
+                f.extend(s.logs.iter().cloned());
+            }
+            f
+        };
+        self.queue_solve_files(&date, &info, vec![(run, s, files)]);
+    }
+
+    /// `S`: search the CSD again for the highlighted solve's cell.
+    fn csd_search(&mut self) {
+        if self.cellcheck.is_none() {
+            self.say(LineKind::Warn, format!("CSD search needs CellCheckCSD (free): {}", crate::csd::DOWNLOAD));
+            return;
+        }
+        match self.highlighted_solve() {
+            Some(s) if s.stats.as_ref().is_some_and(|st| st.cell.is_some()) => self.csd_start(),
+            Some(_) => self.say(LineKind::Warn, "this solve has no cell to search"),
+            None => self.say(LineKind::Warn, "highlight a solve with a cell, then press S"),
+        }
+    }
+
+    /// The solve under the table cursor, if that row is a solve.
+    pub(crate) fn highlighted_solve(&self) -> Option<Solve> {
+        let (date, sample) = self.selected_sample()?;
+        let info = self.info(&date, &sample)?;
+        match Self::stats_rows(info).get(self.stats_sel)? {
+            StatsRow::Solve { run, solve } => Some(info.runs[*run].solves[*solve].clone()),
+            StatsRow::Frames { .. } => None,
+        }
+    }
+
+    /// Searches the highlighted solve's cell once, when it is first shown (each tick).
+    fn csd_auto(&mut self) {
+        if self.cellcheck.is_none() {
+            return;
+        }
+        if let Some(s) = self.highlighted_solve()
+            && s.stats.as_ref().is_some_and(|st| st.cell.is_some())
+            && !self.csd.contains_key(&s.key())
+        {
+            self.csd_start();
+        }
+    }
+
+    /// The elements the highlighted sample's CSD hits must contain (empty: no filter).
+    pub fn csd_required(&self) -> &[String] {
+        self.selected_sample()
+            .and_then(|k| self.csd_filter.get(&k))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The highlighted solve's CSD hits that pass the elements filter, ranked.
+    pub fn csd_visible(&self, s: &Solve) -> Option<Vec<&crate::csd::Hit>> {
+        match self.csd.get(&s.key()) {
+            Some(CsdState::Done(o)) => Some(crate::csd::filter(&o.hits, self.csd_required())),
+            _ => None,
+        }
+    }
+
+    /// Typing in the elements field (Info, CellCheckCSD): letters, spaces and commas;
+    /// Enter applies, Esc leaves it as it was.
+    fn csd_edit_key(&mut self, key: KeyEvent) {
+        let Some(buf) = self.csd_edit.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.csd_edit = None,
+            KeyCode::Enter => {
+                let text = self.csd_edit.take().unwrap_or_default();
+                let (els, bad) = crate::csd::parse_elements(&text);
+                if !bad.is_empty() {
+                    self.say(LineKind::Warn, format!("not elements, left out: {}", bad.join(" ")));
+                }
+                if let Some(k) = self.selected_sample() {
+                    if els.is_empty() {
+                        self.csd_filter.remove(&k);
+                    } else {
+                        self.csd_filter.insert(k, els);
+                    }
+                }
+                self.info_sel = InfoItem::CsdFilter;
+            }
+            KeyCode::Backspace => {
+                buf.pop();
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && (c.is_ascii_alphabetic() || c == ' ' || c == ',')
+                    && buf.len() < 60 =>
+            {
+                buf.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    /// Starts a search of the highlighted solve's cell on its own thread; the result
+    /// comes back as `AppEvent::Csd`.
+    fn csd_start(&mut self) {
+        let Some((date, sample)) = self.selected_sample() else {
+            return;
+        };
+        let Some(info) = self.info(&date, &sample) else {
+            return;
+        };
+        let Some(StatsRow::Solve { run, solve }) = Self::stats_rows(info).get(self.stats_sel).copied() else {
+            return;
+        };
+        let s = info.runs[run].solves[solve].clone();
+        let (Some(install), Some(st)) = (self.cellcheck.clone(), s.stats.clone()) else {
+            return;
+        };
+        let Some(cell) = st.cell else {
+            return;
+        };
+        self.csd_next += 1;
+        let id = self.csd_next;
+        let tol = self.cfg.cell_tolerance();
+        let sg = st.space_group.clone();
+        let q = crate::csd::Query {
+            id,
+            cell,
+            centring: crate::cells::centring(sg.as_deref().unwrap_or("")),
+            length_pct: tol.length_pct,
+            angle_deg: tol.angle_deg,
+        };
+        let key = s.key();
+        self.csd.insert(key.clone(), CsdState::Searching(id));
+        let work = self.state_dir.clone().unwrap_or_else(std::env::temp_dir);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = install
+                .search(&q, &work)
+                .map(|mut o| {
+                    crate::csd::rank(&mut o, q.cell, sg.as_deref(), tol);
+                    o
+                })
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(AppEvent::Csd { key, id, result });
+        });
     }
 
     /// Marks/unmarks the highlighted solve or frames run; `advance` moves down after a solve.
@@ -2195,13 +2609,8 @@ impl App {
             self.say(LineKind::Warn, "mark solves with Space (or highlight one), then press d");
             return;
         }
-        let multi = info.distinct_prefixes() > 1;
-        let cwd = self.local.cwd.clone();
-        let mut jobs = Vec::new();
-        let mut folders = Vec::new();
-        let mut total: u64 = 0;
+        let mut list = Vec::new();
         for (ri, solve) in picked {
-            let run = &info.runs[ri];
             let mut files = solve.hkl.clone();
             if self.include_logs {
                 files.extend(solve.logs.iter().cloned());
@@ -2209,8 +2618,22 @@ impl App {
             if solve.hkl.is_empty() {
                 let why = solve.note.clone().unwrap_or_else(|| "no HKL file on the server".into());
                 self.console
-                    .push(LineKind::Warn, format!("{} run {}: {why}", solve.kind.label(), run.run));
+                    .push(LineKind::Warn, format!("{} run {}: {why}", solve.kind.label(), info.runs[ri].run));
             }
+            list.push((ri, solve, files));
+        }
+        self.queue_solve_files(date, info, list);
+    }
+
+    /// Queues `files` of each solve into its own folder (`xia2chem_r3/` …), ahead of frames.
+    fn queue_solve_files(&mut self, date: &str, info: &SampleInfo, list: Vec<(usize, &Solve, Vec<RemoteFile>)>) {
+        let multi = info.distinct_prefixes() > 1;
+        let cwd = self.local.cwd.clone();
+        let mut jobs = Vec::new();
+        let mut folders = Vec::new();
+        let mut total: u64 = 0;
+        for (ri, solve, files) in list {
+            let run = &info.runs[ri];
             if files.is_empty() {
                 continue;
             }
@@ -2332,17 +2755,27 @@ impl App {
             return;
         }
         let total: u64 = files.iter().filter_map(|f| f.size).sum();
-        let mut lines = vec![format!("{} frames, {} in total", files.len(), human_bytes(total))];
+        // CBF: one file per image. Eiger HDF5 (XAIRA): a master file and data files holding
+        // many images each, so the image count comes from the run, not the file count.
+        let mut lines = vec![format!("{} files, {} in total", files.len(), human_bytes(total))];
         if let Some(info) = self.info(&date, &sample) {
             for r in &info.runs {
-                let n = files
+                let mine: Vec<&RemoteFile> = files
                     .iter()
                     .filter(|f| layout::frame_belongs(&f.path, &r.prefix, r.run))
-                    .count();
-                if n > 0 {
-                    let kind = if r.characterisation { " (characterisation)" } else { "" };
-                    lines.push(format!("  run {}{kind}: {n} frames", r.run));
+                    .collect();
+                if mine.is_empty() {
+                    continue;
                 }
+                let kind = if r.characterisation { " (characterisation)" } else { "" };
+                let n = mine.len();
+                let h5 = mine.iter().any(|f| f.path.ends_with(".h5"));
+                let what = match (h5, r.images()) {
+                    (true, Some((a, b))) => format!("{} images in {n} HDF5 files", b.saturating_sub(a) + 1),
+                    (true, None) => format!("{n} HDF5 files"),
+                    (false, _) => format!("{n} images"),
+                };
+                lines.push(format!("  run {}{kind}: {what}", r.run));
             }
         }
         lines.push(String::new());

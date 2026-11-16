@@ -1,6 +1,6 @@
 //! Rendering. Reads `App`, never mutates it.
 
-use crate::app::{AlbaRow, App, Badge, Conn, Dialog, Focus, ListHit, StatsRow, StatsToggle};
+use crate::app::{AlbaRow, App, Badge, Conn, CsdState, Dialog, Focus, InfoItem, ListHit, StatsRow, Sub, has_checkcif};
 use crate::checkcif::{self, Check, Level};
 use crate::config::PollMode;
 use crate::layout;
@@ -17,7 +17,7 @@ use std::time::Instant;
 
 const ACCENT: Color = Color::Cyan;
 /// Width of the Stats panel in the three-column layout: the table and shell lines fit.
-const STATS_WIDTH: u16 = 76;
+const STATS_WIDTH: u16 = 82;
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -29,22 +29,21 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     .min(area.height.saturating_sub(10).max(4));
     let transfer_h = if app.downloads.groups.is_empty() { 0 } else { 1 };
-    let [main, console, transfer, status] = Layout::vertical([
-        Constraint::Min(8),
-        Constraint::Length(console_h),
-        Constraint::Length(transfer_h),
-        Constraint::Length(1),
-    ])
-    .areas(area);
+    let [panels, transfer, status] =
+        Layout::vertical([Constraint::Min(8), Constraint::Length(transfer_h), Constraint::Length(1)]).areas(area);
 
-    let (local_a, alba_a, stats_a) = if main.width >= 150 {
-        let [a, b, c] = Layout::horizontal([
-            Constraint::Fill(1),
-            Constraint::Fill(1),
-            Constraint::Length(STATS_WIDTH),
-        ])
-        .areas(main);
-        (a, b, c)
+    // Wide: Stats takes the whole height on the right, the console sits under Local and ALBA.
+    let (left, stats_a) = if panels.width >= 150 {
+        let [l, s] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(STATS_WIDTH)]).areas(panels);
+        (l, Some(s))
+    } else {
+        (panels, None)
+    };
+    let [main, console] = Layout::vertical([Constraint::Min(8), Constraint::Length(console_h)]).areas(left);
+
+    let (local_a, alba_a, stats_a) = if let Some(s) = stats_a {
+        let [a, b] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(main);
+        (a, b, s)
     } else {
         let [a, right] =
             Layout::horizontal([Constraint::Percentage(34), Constraint::Percentage(66)]).areas(main);
@@ -406,11 +405,13 @@ fn cc(v: Option<f64>) -> String {
 fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Stats;
     let prev_offset = app.hit.borrow().stats.offset;
-    app.hit.borrow_mut().stats = ListHit {
-        area,
-        ..ListHit::default()
-    };
-    app.hit.borrow_mut().stats_toggles.clear();
+    {
+        let mut h = app.hit.borrow_mut();
+        h.stats = ListHit { area, ..ListHit::default() };
+        h.info = Rect::default();
+        h.info_items.clear();
+        h.cell_more = None;
+    }
     let selected = app.selected_row();
     let Some(AlbaRow::Sample { date, name }) = selected.clone() else {
         let block = panel(title("Stats", focused), focused, &[]);
@@ -424,7 +425,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     let block = panel(
         title(format!("{name} · {}", layout::beamtime_label(&date)), focused),
         focused,
-        &[("␣", "mark"), ("d", "download"), ("F", "frames"), ("c", "cell hits"), ("z", "fold")],
+        &[("␣", "mark"), ("d", "download"), ("F", "frames"), ("→", "info")],
     );
     let Some(info) = app.info(&date, &name) else {
         let scanning = app.scanning.contains(&(date.clone(), name.clone()));
@@ -438,49 +439,40 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Paragraph::new(msg).fg(Color::DarkGray).block(block), area);
         return;
     };
-    let inner = block.inner(area);
-    f.render_widget(block, area);
     let rows = App::stats_rows(info);
     if rows.is_empty() {
         f.render_widget(
             Paragraph::new("Nothing found for this sample: no processing folders and no raw datasets.")
-                .fg(Color::DarkGray),
-            inner,
+                .fg(Color::DarkGray)
+                .block(block),
+            area,
         );
         return;
     }
-    // The table gets the rows it has (usually 5–10) and the details the rest. When they
-    // don't fit, the table shrinks to TABLE_MIN rows, then the same-cell list gets shorter;
-    // whatever still doesn't fit is cut at the bottom (`z` folds shells and checkCIF).
-    let (total, width) = (inner.height, inner.width);
-    let table_need = rows.len() as u16 + 1;
-    let table_min = table_need.min(TABLE_MIN);
-    let row = rows.get(app.stats_sel);
-    let mut limit = if app.cell_hits_all { usize::MAX } else { CELL_HITS };
-    let (sections, table_h) = loop {
-        let (sections, hits) = details_sections(app, &date, info, row, limit, width);
-        let need: u16 = sections.iter().map(|s| GAP + s.height(width)).sum();
-        let table_h = table_need.min(total.saturating_sub(need).max(table_min)).min(total);
-        let shown = hits.min(limit);
-        if need <= total - table_h || shown <= 1 {
-            break (sections, table_h);
-        }
-        limit = shown - 1;
-    };
-    let table_a = Rect { height: table_h, ..inner };
+    // The table panel takes its rows (borders + header + rows), the Info panel the rest;
+    // on a short screen the table keeps TABLE_MIN rows and scrolls.
+    let want = rows.len() as u16 + 3;
+    let table_h = want.min(area.height.saturating_sub(INFO_MIN)).max(TABLE_MIN.min(area.height));
+    let [table_area, info_area] =
+        Layout::vertical([Constraint::Length(table_h), Constraint::Fill(1)]).areas(area);
+    let table_a = block.inner(table_area);
+    f.render_widget(block, table_area);
+    let width = table_a.width;
 
-    let header = Row::new(
-        ["", "Solve", "Run", "", "SG", "d_min", "Rmrg%", "CC½", "Cmpl%", "I/σ", "Mult"]
-            .map(|h| Cell::from(h).bold()),
-    )
-    .fg(Color::Gray);
+    // every column needs 77; a narrower panel drops Mult before cutting pipeline names
+    let mult = width >= 77;
+    let mut heads = vec!["", "Solve", "Run", "", "SG", "d_min", "Rmrg%", "CC½", "Cmpl%", "I/σ", "Mult", "Score"];
+    if !mult {
+        heads.remove(10);
+    }
+    let header = Row::new(heads.into_iter().map(|h| Cell::from(h).bold())).fg(Color::Gray);
     let best = rank::best(info).map(|(k, _)| k);
     let table_rows: Vec<Row> = rows
         .iter()
         .map(|r| match *r {
             StatsRow::Solve { run, solve } => {
                 let s = &info.runs[run].solves[solve];
-                solve_row(app, s, info.runs[run].run, best.as_deref() == Some(&s.key()))
+                solve_row(app, s, info.runs[run].run, best.as_deref() == Some(&s.key()), mult)
             }
             StatsRow::Frames { run } => {
                 let r = &info.runs[run];
@@ -499,7 +491,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
             }
         })
         .collect();
-    let widths = [
+    let mut widths = vec![
         Constraint::Length(3),
         Constraint::Length(17),
         Constraint::Length(3),
@@ -511,17 +503,23 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(5),
         Constraint::Length(4),
         Constraint::Length(4),
+        Constraint::Length(5),
     ];
+    if !mult {
+        widths.remove(10);
+        widths[4] = Constraint::Length(8);
+    }
+    // the highlighted solve stays marked while the cursor is in Info
     let table = Table::new(table_rows, widths)
         .header(header)
         .column_spacing(1)
-        .row_highlight_style(highlight(focused));
+        .row_highlight_style(highlight(focused || app.focus == Focus::Info));
     let mut state = TableState::default()
         .with_selected(Some(app.stats_sel.min(rows.len() - 1)))
         .with_offset(prev_offset);
     f.render_stateful_widget(table, table_a, &mut state);
     app.hit.borrow_mut().stats = ListHit {
-        area,
+        area: table_area,
         // rows start below the header line
         rows: Rect {
             y: table_a.y + 1,
@@ -531,69 +529,291 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         offset: state.offset(),
     };
 
-    let mut toggles = Vec::new();
-    let mut y = table_a.bottom();
-    for s in &sections {
-        y += GAP;
-        if y >= inner.bottom() {
-            break;
-        }
-        let full = s.height(width);
-        let r = Rect { y, height: full.min(inner.bottom() - y), ..inner };
-        if let Some(t) = s.toggle {
-            toggles.push((Rect { height: 1, ..r }, t));
-            if s.more_line && r.height == full {
-                toggles.push((Rect { y: r.bottom() - 1, height: 1, ..r }, t));
-            }
-        }
-        s.render(f, r);
-        y = r.bottom();
+    if info_area.height > 0 {
+        draw_info(f, app, info_area, &date, info, rows.get(app.stats_sel));
     }
-    app.hit.borrow_mut().stats_toggles = toggles;
 }
 
-/// Rows the Stats table keeps when the details want more room: the header and 5 rows.
-const TABLE_MIN: u16 = 6;
-/// Blank rows above each details section.
+/// The Info panel: the highlighted row's subtabs, folded or not, scrolled so the cursor's
+/// subtab shows.
+fn draw_info(f: &mut Frame, app: &App, area: Rect, date: &str, info: &SampleInfo, row: Option<&StatsRow>) {
+    let focused = app.focus == Focus::Info;
+    app.hit.borrow_mut().info = area;
+    let head = match row {
+        Some(StatsRow::Solve { run, solve }) => solve_title(&info.runs[*run], &info.runs[*run].solves[*solve]),
+        Some(StatsRow::Frames { run }) => format!("Raw frames · run {}", info.runs[*run].run),
+        None => "Info".to_string(),
+    };
+    let mut block = panel(
+        title(head, focused),
+        focused,
+        &[("↑↓", "move"), ("⏎/←", "fold"), ("c", "cell hits"), ("S", "CSD")],
+    );
+    let inner = block.inner(area);
+    let width = inner.width;
+
+    // When everything doesn't fit, the same-cell list gets shorter first (down to 1).
+    let mut limit = if app.cell_hits_all { usize::MAX } else { CELL_HITS };
+    let (sections, heights) = loop {
+        let (sections, hits) = info_sections(app, date, info, row, limit, width);
+        let heights: Vec<u16> = sections.iter().map(|s| s.height(width, app.folded.contains(&s.sub))).collect();
+        let need = heights.iter().sum::<u16>() + GAP * heights.len().saturating_sub(1) as u16;
+        let shown = hits.min(limit);
+        if need <= inner.height || shown <= 1 {
+            break (sections, heights);
+        }
+        limit = shown - 1;
+    };
+    if sections.is_empty() {
+        f.render_widget(block, area);
+        return;
+    }
+
+    // Every subtab laid out one under the other (a GAP row between them); the panel
+    // shows `inner.height` rows of that, from `top`.
+    let mut starts = Vec::with_capacity(sections.len());
+    let mut y = 0u16;
+    for (i, h) in heights.iter().enumerate() {
+        if i > 0 {
+            y += GAP;
+        }
+        starts.push(y);
+        y += h;
+    }
+    let total = y;
+
+    // Scroll only as far as needed to keep the cursor's line in view: up to it when it
+    // is above, down to it when below. A title also brings the line under it, so moving
+    // up to a subtab shows where it starts.
+    let items = app.info_items();
+    let sel = items.get(app.info_index(&items)).copied();
+    let view = inner.height;
+    let mut top = app.hit.borrow().info_scroll;
+    if let Some((i, at, h)) = sel.and_then(|it| {
+        sections.iter().enumerate().find_map(|(i, s)| {
+            let (at, h) = s.offset_of(it, width, app.folded.contains(&s.sub))?;
+            Some((i, at, h))
+        })
+    }) {
+        let y0 = starts[i] + at;
+        let y1 = y0 + h.max(1);
+        if y0 < top {
+            top = y0;
+        } else if y1 > top + view {
+            top = y1.saturating_sub(view);
+        }
+    }
+    top = top.min(total.saturating_sub(view));
+
+    // ↑ / ↓ on the panel's top border when there is more above or below
+    let above = top > 0;
+    let below = top + view < total;
+    if above || below {
+        let arrows = match (above, below) {
+            (true, true) => format!(" ↑{top} ↓{} ", total - top - view),
+            (true, false) => format!(" ↑{top} "),
+            _ => format!(" ↓{} ", total - top - view),
+        };
+        block = block.title(Line::from(arrows).fg(if focused { ACCENT } else { Color::DarkGray }).right_aligned());
+    }
+    f.render_widget(block, area);
+
+    let mut hits = Vec::new();
+    let mut more = None;
+    for (i, s) in sections.iter().enumerate() {
+        let (s0, s1) = (starts[i], starts[i] + heights[i]);
+        if s1 <= top || s0 >= top + view {
+            continue;
+        }
+        // rows of this subtab cut off at the top, and where it lands on screen
+        let skip = top.saturating_sub(s0);
+        let y = inner.y + s0.saturating_sub(top);
+        let r = Rect { y, height: (s1 - s0 - skip).min(inner.bottom() - y), ..inner };
+        let folded = app.folded.contains(&s.sub);
+        hits.extend(s.render(f, r, skip, folded, sel, focused));
+        if s.more_line && !folded && s1 <= top + view {
+            more = Some(Rect { y: r.bottom() - 1, height: 1, ..r });
+        }
+    }
+    let mut h = app.hit.borrow_mut();
+    h.info_items = hits;
+    h.cell_more = more;
+    h.info_scroll = top;
+}
+
+/// `xia2chem · run 3 · images 1–720 · done`, or `images 1–635 of 720` when the solve
+/// used fewer images than the run has.
+fn solve_title(r: &Run, s: &Solve) -> String {
+    let status = match s.status {
+        Status::Done => "done",
+        Status::Running => "running",
+        Status::Failed => "failed",
+    };
+    let images = match (solve_images(s), r.images()) {
+        (Some((a, b)), Some(run)) if (a, b) != run => format!("images {a}–{b} of {} · ", run.1 - run.0 + 1),
+        (Some((a, b)), _) => format!("images {a}–{b} · "),
+        (None, _) => String::new(),
+    };
+    format!("{} · run {} · {images}{status}", s.kind.label(), r.run)
+}
+
+fn solve_images(s: &Solve) -> Option<(u32, u32)> {
+    s.stats.as_ref().and_then(|st| st.images)
+}
+
+/// `autoPROC used images 1–635 of the run's 1–720`, when it left some out.
+fn partial_images_line(r: &Run, s: &Solve) -> Option<Line<'static>> {
+    let (a, b) = solve_images(s)?;
+    let (ra, rb) = r.images()?;
+    ((a, b) != (ra, rb)).then(|| {
+        Line::from(format!(
+            "{} used images {a}–{b} of the run's {ra}–{rb}: {} left out",
+            s.kind.label(),
+            (rb - ra + 1).saturating_sub(b - a + 1)
+        ))
+        .fg(Color::Yellow)
+    })
+}
+
+/// Rows the Stats table panel keeps on a short screen: borders, header and 2 rows.
+const TABLE_MIN: u16 = 5;
+/// Rows the Info panel gets before the table panel takes its rows.
+const INFO_MIN: u16 = 10;
+/// Blank rows between subtabs.
 const GAP: u16 = 1;
 /// Same-cell hits listed until `c` lists all of them.
 const CELL_HITS: usize = 5;
 
-/// One part of the details under the Stats table: a rule with its title, then its lines.
+/// A subtab of the Info panel: a rule with its title, then its lines (hidden when folded).
 struct Section {
+    sub: Sub,
     title: Vec<Span<'static>>,
-    /// Right end of the rule: the key that folds or expands it.
+    /// Extra title spans shown only while folded (checkCIF's alert badges).
+    folded_title: Vec<Span<'static>>,
+    /// Right end of the rule.
     hint: Option<String>,
     lines: Vec<Line<'static>>,
-    /// What a click on the title toggles…
-    toggle: Option<StatsToggle>,
-    /// …and on the last line ("+N more").
+    /// Lines the cursor can stop on: (line index, item).
+    items: Vec<(usize, InfoItem)>,
+    /// The last line is "+N more" (a click lists every same-cell hit).
     more_line: bool,
 }
 
 impl Section {
-    fn new(title: Vec<Span<'static>>, lines: Vec<Line<'static>>) -> Self {
-        Section { title, hint: None, lines, toggle: None, more_line: false }
+    fn new(sub: Sub, title: Vec<Span<'static>>, lines: Vec<Line<'static>>) -> Self {
+        Section { sub, title, folded_title: Vec::new(), hint: None, lines, items: Vec::new(), more_line: false }
     }
 
-    fn body(&self) -> Paragraph<'static> {
-        Paragraph::new(self.lines.clone()).wrap(Wrap { trim: false })
+    fn line_height(line: &Line<'static>, width: u16) -> u16 {
+        Paragraph::new(line.clone()).wrap(Wrap { trim: false }).line_count(width) as u16
     }
 
-    /// Rule plus wrapped lines.
-    fn height(&self, width: u16) -> u16 {
-        1 + self.body().line_count(width) as u16
+    /// Rule plus wrapped lines (just the rule when folded).
+    fn height(&self, width: u16, folded: bool) -> u16 {
+        if folded {
+            return 1;
+        }
+        1 + self.lines.iter().map(|l| Self::line_height(l, width)).sum::<u16>()
     }
 
-    fn render(&self, f: &mut Frame, r: Rect) {
+    /// Where cursor stop `it` sits in this subtab: rows from its rule, and how tall. A
+    /// title counts its first line too, so scrolling up to it shows what it holds.
+    fn offset_of(&self, it: InfoItem, width: u16, folded: bool) -> Option<(u16, u16)> {
+        if it == InfoItem::Head(self.sub) {
+            return Some((0, self.height(width, folded).min(2)));
+        }
+        if folded {
+            return None;
+        }
+        let (k, _) = self.items.iter().find(|(_, x)| *x == it)?;
+        let before: u16 = self.lines[..*k].iter().map(|l| Self::line_height(l, width)).sum();
+        Some((1 + before, Self::line_height(&self.lines[*k], width)))
+    }
+
+    /// Draws it into `r`, its first `skip` rows scrolled off the top (the rule is row 0),
+    /// and returns where its cursor stops landed.
+    fn render(
+        &self,
+        f: &mut Frame,
+        r: Rect,
+        skip: u16,
+        folded: bool,
+        sel: Option<InfoItem>,
+        focused: bool,
+    ) -> Vec<(Rect, InfoItem)> {
+        if skip == 0 {
+            return self.render_whole(f, r, folded, sel, focused);
+        }
+        // the rule is off screen: just the body lines, scrolled
+        let mut hits = Vec::new();
+        let mut lines = self.lines.clone();
+        let mut y = 1i32 - i32::from(skip); // row of the body's first line, relative to r
+        for (i, l) in lines.iter_mut().enumerate() {
+            let h = Self::line_height(l, r.width);
+            if let Some((_, it)) = self.items.iter().find(|(k, _)| *k == i) {
+                if sel == Some(*it) {
+                    *l = l.clone().style(highlight(focused));
+                }
+                let top = y.max(0);
+                let bottom = (y + i32::from(h)).min(i32::from(r.height));
+                if bottom > top {
+                    hits.push((Rect { y: r.y + top as u16, height: (bottom - top) as u16, ..r }, *it));
+                }
+            }
+            y += i32::from(h);
+        }
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((skip - 1, 0)), r);
+        hits
+    }
+
+    fn render_whole(
+        &self,
+        f: &mut Frame,
+        r: Rect,
+        folded: bool,
+        sel: Option<InfoItem>,
+        focused: bool,
+    ) -> Vec<(Rect, InfoItem)> {
+        let arrow = if folded { "▸" } else { "▾" };
+        let mut title = vec![Span::raw(format!(" {arrow}")).fg(Color::Gray).bold()];
+        title.extend(self.title.iter().cloned());
+        if folded {
+            title.extend(self.folded_title.iter().cloned());
+        }
+        let mut line = Line::from(title);
+        if sel == Some(InfoItem::Head(self.sub)) {
+            line = line.style(highlight(focused));
+        }
         let mut block = Block::default()
             .borders(Borders::TOP)
             .border_style(Style::new().fg(Color::DarkGray))
-            .title(Line::from(self.title.clone()));
-        if let Some(h) = &self.hint {
+            .title(line);
+        let hint = self.hint.clone().or_else(|| Some(if folded { "⏎ show" } else { "⏎ fold" }.to_string()));
+        if let Some(h) = hint.filter(|_| sel == Some(InfoItem::Head(self.sub)) || self.hint.is_some()) {
             block = block.title(Line::from(format!(" {h} ")).fg(Color::DarkGray).right_aligned());
         }
-        f.render_widget(self.body().block(block), r);
+        let mut hits = vec![(Rect { height: 1, ..r }, InfoItem::Head(self.sub))];
+        let lines: Vec<Line<'static>> = if folded {
+            Vec::new()
+        } else {
+            let mut lines = self.lines.clone();
+            let mut y = r.y + 1;
+            for (i, l) in lines.iter_mut().enumerate() {
+                let h = Self::line_height(l, r.width);
+                if let Some((_, it)) = self.items.iter().find(|(k, _)| *k == i) {
+                    if sel == Some(*it) {
+                        *l = l.clone().style(highlight(focused));
+                    }
+                    if y < r.bottom() {
+                        hits.push((Rect { y, height: h.min(r.bottom() - y), ..r }, *it));
+                    }
+                }
+                y += h;
+            }
+            lines
+        };
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), r);
+        hits
     }
 }
 
@@ -602,9 +822,9 @@ fn rule_title(text: &str) -> Vec<Span<'static>> {
     vec![Span::raw(format!(" {text} ")).fg(Color::Gray).bold()]
 }
 
-/// The sections under the table for the highlighted row, and how many same-cell hits the
+/// The Info panel's subtabs for the highlighted row, and how many same-cell hits the
 /// solve has (`limit` of them are listed).
-fn details_sections(
+fn info_sections(
     app: &App,
     date: &str,
     info: &SampleInfo,
@@ -614,16 +834,24 @@ fn details_sections(
 ) -> (Vec<Section>, usize) {
     match row {
         Some(StatsRow::Solve { run, solve }) => solve_sections(app, date, info, *run, *solve, limit, width),
-        Some(StatsRow::Frames { run }) => (vec![frames_section(&info.runs[*run])], 0),
+        Some(StatsRow::Frames { run }) => (vec![frames_section(date, &info.runs[*run])], 0),
         None => (Vec::new(), 0),
     }
 }
 
-fn frames_section(r: &Run) -> Section {
-    let imgs = r
-        .images()
-        .map(|(a, b)| format!("images {a}–{b}, ≈ {} at 6.2 MB/frame", human_bytes((u64::from(b - a) + 1) * 6_230_000)))
-        .unwrap_or_else(|| "frame count known once listed".into());
+fn frames_section(date: &str, r: &Run) -> Section {
+    // XAIRA's Eiger writes HDF5 (a master file and data files of many images each);
+    // XALOC's Pilatus one CBF of ~6.2 MB per image
+    let h5 = layout::beamline_name(date).as_deref() == Some("XAIRA");
+    let imgs = match r.images() {
+        Some((a, b)) if h5 => format!("images {a}–{b} ({}) in Eiger HDF5 files", b - a + 1),
+        Some((a, b)) => format!(
+            "images {a}–{b} ({}), ≈ {} at 6.2 MB/image",
+            b - a + 1,
+            human_bytes((u64::from(b - a) + 1) * 6_230_000)
+        ),
+        None => "image count known once listed".into(),
+    };
     let mut lines = vec![Line::from(format!("prefix {}   {imgs}", r.prefix))];
     if r.characterisation {
         lines.push(Line::from("test shots only: no data collection").fg(Color::DarkGray));
@@ -637,7 +865,7 @@ fn frames_section(r: &Run) -> Section {
         Line::from("Space ticks/unticks the run. F lists the ticked runs and asks before downloading.")
             .fg(Color::DarkGray),
     );
-    Section::new(rule_title(&format!("Raw frames · run {}", r.run)), lines)
+    Section::new(Sub::Frames, rule_title(&format!("Raw frames · run {}", r.run)), lines)
 }
 
 /// Overall Rmerge, or Rmeas marked with `*` when the pipeline reports no Rmerge.
@@ -649,7 +877,7 @@ fn r_cell(o: Option<&Shell>) -> String {
     }
 }
 
-fn solve_row(app: &App, s: &Solve, run: u32, best: bool) -> Row<'static> {
+fn solve_row(app: &App, s: &Solve, run: u32, best: bool, mult: bool) -> Row<'static> {
     let mark = if s.hkl.is_empty() {
         " - ".to_string()
     } else if app.marks.contains(&s.key()) {
@@ -672,7 +900,7 @@ fn solve_row(app: &App, s: &Solve, run: u32, best: bool) -> Row<'static> {
         Some(l) => Cell::from(text).style(alert_style(l)),
         None => Cell::from(text),
     };
-    let mut row = Row::new(vec![
+    let mut cells = vec![
         Cell::from(mark),
         Cell::from(label),
         Cell::from(run.to_string()),
@@ -684,7 +912,13 @@ fn solve_row(app: &App, s: &Solve, run: u32, best: bool) -> Row<'static> {
         flag(f1(o.and_then(|o| o.completeness)), Check::Completeness),
         Cell::from(f1(o.and_then(|o| o.i_sig))),
         Cell::from(f1(o.and_then(|o| o.multiplicity))),
-    ]);
+        // the ★ ranking's points out of 100; – for solves that don't compete
+        Cell::from(rank::breakdown(s).map_or_else(|_| format!("{:>5}", "–"), |b| format!("{:>5.1}", 100.0 * b.score()))),
+    ];
+    if !mult {
+        cells.remove(10);
+    }
+    let mut row = Row::new(cells);
     if best {
         row = row.fg(Color::LightGreen).add_modifier(Modifier::BOLD);
     } else if s.status == Status::Failed {
@@ -719,15 +953,21 @@ fn alert_badge(l: Level) -> Span<'static> {
     Span::raw(format!(" {} ", l.letter())).fg(Color::Black).bg(alert_color(l)).bold()
 }
 
-/// One line per alert, ` A  d_min 0.94 Å = sin θ/λ 0.532 < 0.550`, or that there is none.
-fn alert_lines(alerts: &[checkcif::Alert]) -> Vec<Line<'static>> {
+/// Every alert on one line, ` A  d 0.94Å sinθ/λ .532<.550   C  Cmpl 96.2%<97`, or that
+/// there is none. Spaces inside an alert don't break, so a narrow panel wraps between alerts.
+fn alert_line(alerts: &[checkcif::Alert]) -> Line<'static> {
     if alerts.is_empty() {
-        return vec![Line::from("no resolution, completeness or Rint alert").fg(Color::DarkGray)];
+        return Line::from("no resolution, completeness or Rint alert").fg(Color::DarkGray);
     }
-    alerts
-        .iter()
-        .map(|a| Line::from(vec![alert_badge(a.level), Span::raw(format!(" {}", a.text())).fg(alert_color(a.level))]))
-        .collect()
+    let mut spans = Vec::new();
+    for (i, a) in alerts.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("   "));
+        }
+        spans.push(alert_badge(a.level));
+        spans.push(Span::raw(format!("\u{a0}{}", a.text().replace(' ', "\u{a0}"))).fg(alert_color(a.level)));
+    }
+    Line::from(spans)
 }
 
 /// The run number and solve with this key.
@@ -834,7 +1074,8 @@ fn shell_line(label: &str, s: Option<&Shell>) -> Line<'static> {
     ))
 }
 
-/// The solve (files, ★ ranking), its cell and same-cell hits, shells, checkCIF.
+/// A solve's subtabs: Shells, Files, checkCIF, Cell (with same-cell hits), CellCheckCSD.
+/// Same order and cursor stops as `app::solve_items`.
 fn solve_sections(
     app: &App,
     date: &str,
@@ -844,19 +1085,14 @@ fn solve_sections(
     limit: usize,
     width: u16,
 ) -> (Vec<Section>, usize) {
-    let r = &info.runs[run];
-    let s = &r.solves[solve];
-    let status = match s.status {
-        Status::Done => Span::raw("done").green(),
-        Status::Running => Span::raw("running").yellow(),
-        Status::Failed => Span::raw("failed").red(),
-    };
-    let mut title = vec![Span::raw(format!(" {} · run {} · ", s.kind.label(), r.run)).fg(Color::Gray).bold()];
-    if let Some((a, b)) = s.stats.as_ref().and_then(|st| st.images) {
-        title.push(Span::raw(format!("images {a}–{b} · ")).fg(Color::Gray));
+    let s = &info.runs[run].solves[solve];
+
+    // Files: the HKL line, the logs line, then notes
+    let mut lines = Vec::new();
+    let mut items = Vec::new();
+    if s.hkl.is_empty() && s.logs.is_empty() {
+        lines.push(Line::from("no HKL or log files").fg(Color::DarkGray));
     }
-    title.extend([status.bold(), Span::raw(" ")]);
-    let mut files = Vec::new();
     if !s.hkl.is_empty() {
         let names: Vec<String> = s
             .hkl
@@ -866,27 +1102,29 @@ fn solve_sections(
                 None => f.name().to_string(),
             })
             .collect();
-        files.push(Span::raw(format!("HKL: {}", names.join(", "))));
+        items.push((lines.len(), InfoItem::Hkl));
+        lines.push(Line::from(vec![Span::raw("HKL: ").fg(Color::Gray), Span::raw(names.join(", "))]));
     }
     if !s.logs.is_empty() {
-        let state = if app.include_logs { "included" } else { "not included" };
-        if !files.is_empty() {
-            files.push(Span::raw("   "));
-        }
-        files.push(Span::raw(format!("Logs: {} files, {state} (L toggles)", s.logs.len())).fg(Color::DarkGray));
+        // white when `d` takes them along (L toggles), grey when it leaves them out
+        let names: Vec<&str> = s.logs.iter().map(|f| f.name()).collect();
+        let (style, tail) = if app.include_logs {
+            (Style::new(), "")
+        } else {
+            (Style::new().fg(Color::DarkGray), "  (left out of d: L)")
+        };
+        items.push((lines.len(), InfoItem::Logs));
+        lines.push(Line::from(vec![
+            Span::raw("logs: ").fg(Color::Gray),
+            Span::styled(names.join(", "), style),
+            Span::raw(tail).fg(Color::DarkGray),
+        ]));
     }
-    if files.is_empty() {
-        files.push(Span::raw("no HKL or log files").fg(Color::DarkGray));
-    }
-    let mut lines = vec![Line::from(files)];
     if let Some(n) = &s.note {
         lines.push(Line::from(n.clone()).fg(Color::Yellow));
     }
-    // only where it stands; the breakdown is in the ? help
-    if rank::breakdown(s).is_ok() {
-        let mut head = ranking_lines(info, s).remove(0);
-        head.spans.push(Span::raw("  ? why").fg(Color::DarkGray).not_bold());
-        lines.push(head);
+    if let Some(l) = partial_images_line(&info.runs[run], s) {
+        lines.push(l);
     }
     let rmeas_only = s
         .stats
@@ -898,9 +1136,24 @@ fn solve_sections(
     }
     let Some(st) = &s.stats else {
         lines.push(Line::from("no statistics yet").fg(Color::DarkGray));
-        return (vec![Section::new(title, lines)], 0);
+        let mut files = Section::new(Sub::Files, rule_title("Files"), lines);
+        files.items = items;
+        return (vec![files], 0);
     };
-    let mut sections = vec![Section::new(title, lines)];
+    let mut files = Section::new(Sub::Files, rule_title("Files"), lines);
+    files.items = items;
+
+    let shells = vec![
+        Line::from(format!(
+            "{:<8} {:<13} {:>6} {:>5} {:>6} {:>7} {:>6} {:>6} {:>5}",
+            "shell", "d (Å)", "Cmpl%", "Mult", "I/σ", "Rmerge%", "Rmeas%", "Rpim%", "CC½"
+        ))
+        .fg(Color::Gray),
+        shell_line("overall", st.overall.as_ref()),
+        shell_line("inner", st.inner.as_ref()),
+        shell_line("outer", st.outer.as_ref()),
+    ];
+    let mut sections = vec![Section::new(Sub::Shells, rule_title("Shells"), shells), files];
 
     // crystal system // space group, then the edges, then the angles
     let head = match st.space_group.as_deref() {
@@ -910,7 +1163,7 @@ fn solve_sections(
         },
         None => "space group –".into(),
     };
-    let mut cell_lines = vec![Line::from(head).bold()];
+    let mut cell_lines = vec![Line::from(head.clone()).bold()];
     match st.cell {
         Some(c) => {
             for (names, unit, off) in [(["a", "b", "c"], " Å", 0), (["α", "β", "γ"], "°", 3)] {
@@ -925,68 +1178,181 @@ fn solve_sections(
         }
         None => cell_lines.push(Line::from("no cell yet").fg(Color::DarkGray)),
     }
+    let mut cell_sec = Section::new(Sub::Cell, rule_title("Cell"), cell_lines);
+    cell_sec.folded_title.push(Span::raw(format!("{head} ")).fg(Color::DarkGray));
+    sections.push(cell_sec);
+
+    // Similar cells: its own subtab, the hit count on its rule
     let mut hits = 0;
     if let Some(c) = st.cell {
         let skip = crate::cells::sample_key(date, &info.name);
         let found = app.cells.matches(c, st.space_group.as_deref(), app.cfg.cell_tolerance(), Some(&skip));
         hits = found.len();
-        cell_lines.extend(cell_hit_lines(app, &found, limit, usize::from(width)));
-    }
-    let mut cell_sec = Section::new(rule_title("Cell"), cell_lines);
-    if hits > CELL_HITS {
-        cell_sec.toggle = Some(StatsToggle::CellHits);
-        cell_sec.more_line = true;
-        cell_sec.hint = Some(if app.cell_hits_all {
-            format!("c closest {CELL_HITS}")
-        } else {
-            format!("c all {hits}")
-        });
-    }
-    sections.push(cell_sec);
-
-    // shells and checkCIF fold together
-    let fold = app.fold_details;
-    let arrow = if fold { "▸" } else { "▾" };
-    let hint = Some(if fold { "z unfold" } else { "z fold" }.to_string());
-    let shells = if fold {
-        Vec::new()
-    } else {
-        vec![
-            Line::from(format!(
-                "{:<8} {:<13} {:>6} {:>5} {:>6} {:>7} {:>6} {:>6} {:>5}",
-                "shell", "d (Å)", "Cmpl%", "Mult", "I/σ", "Rmerge%", "Rmeas%", "Rpim%", "CC½"
-            ))
-            .fg(Color::Gray),
-            shell_line("overall", st.overall.as_ref()),
-            shell_line("inner", st.inner.as_ref()),
-            shell_line("outer", st.outer.as_ref()),
-        ]
-    };
-    sections.push(Section {
-        title: rule_title(&format!("{arrow} Shells")),
-        hint: hint.clone(),
-        lines: shells,
-        toggle: Some(StatsToggle::Details),
-        more_line: false,
-    });
-    if st.overall.is_some() && s.status != Status::Failed {
-        let alerts = alerts(app, s);
-        let mut title = rule_title(&format!("{arrow} checkCIF"));
-        let lines = if fold {
-            if alerts.is_empty() {
-                title.push(Span::raw("no alert ").fg(Color::DarkGray));
-            }
-            for a in &alerts {
-                title.push(alert_badge(a.level));
-                title.push(Span::raw(" "));
-            }
-            Vec::new()
-        } else {
-            alert_lines(&alerts)
+        let count = match hits {
+            0 => "none".to_string(),
+            1 => "1 hit".to_string(),
+            n => format!("{n} hits"),
         };
-        sections.push(Section { title, hint, lines, toggle: Some(StatsToggle::Details), more_line: false });
+        let title = vec![
+            Span::raw(" Similar cells ").fg(Color::LightMagenta).bold(),
+            Span::raw(format!("· {count} ")).fg(if hits > 0 { Color::LightMagenta } else { Color::DarkGray }),
+        ];
+        let mut sim = Section::new(Sub::Similar, title, cell_hit_lines(app, &found, limit, usize::from(width)));
+        if hits > CELL_HITS {
+            sim.more_line = true;
+            sim.hint = Some(if app.cell_hits_all {
+                format!("c closest {CELL_HITS}")
+            } else {
+                format!("c all {hits}")
+            });
+        }
+        sections.push(sim);
+    }
+    sections.push(csd_section(app, s, width));
+
+    // checkCIF: every alert on one row (two when the panel is narrow); folded, the badges
+    if has_checkcif(s) {
+        let alerts = alerts(app, s);
+        let mut sec = Section::new(Sub::CheckCif, rule_title("checkCIF"), vec![alert_line(&alerts)]);
+        if alerts.is_empty() {
+            sec.folded_title.push(Span::raw("no alert ").fg(Color::DarkGray));
+        }
+        for a in &alerts {
+            sec.folded_title.push(alert_badge(a.level));
+            sec.folded_title.push(Span::raw(" "));
+        }
+        sections.push(sec);
     }
     (sections, hits)
+}
+
+/// CellCheckCSD's hits for the solve's cell (DESIGN.md §2.18): closest first, each a
+/// cursor stop (Enter opens a CSD refcode's free CCDC page), or why there are none.
+fn csd_section(app: &App, s: &Solve, width: u16) -> Section {
+    let accent = Color::LightCyan;
+    let mut title = vec![Span::raw(" CellCheckCSD ").fg(accent).bold()];
+    let has_cell = s.stats.as_ref().is_some_and(|st| st.cell.is_some());
+    let data = |i: &crate::csd::Install, size: Option<u64>| {
+        let n = size.map(|n| format!("{} entries", thousands(n)));
+        let d = i.built.as_ref().map(|d| format!("data {d}"));
+        [n, d].into_iter().flatten().collect::<Vec<_>>().join(", ")
+    };
+    let required = app.csd_required();
+    let mut lines = Vec::new();
+    let mut items = Vec::new();
+    let mut hint = None;
+    let Some(install) = &app.cellcheck else {
+        lines.push(Line::from(vec![
+            Span::raw("Requires CellCheckCSD, free from the CCDC: ").fg(Color::Gray),
+            Span::raw(crate::csd::DOWNLOAD).fg(accent),
+        ]));
+        return Section::new(Sub::Csd, title, lines);
+    };
+
+    // the elements field: what the hits must contain
+    items.push((lines.len(), InfoItem::CsdFilter));
+    lines.push(match &app.csd_edit {
+        Some(buf) if app.info_sel == InfoItem::CsdFilter => Line::from(vec![
+            Span::raw("Elements: ").fg(Color::Gray),
+            Span::raw(format!("{buf}█")).fg(Color::White).bold(),
+            Span::raw("  ⏎ apply · Esc cancel · e.g. Cu N O").fg(Color::DarkGray),
+        ]),
+        _ if required.is_empty() => Line::from(vec![
+            Span::raw("Elements: ").fg(Color::Gray),
+            Span::raw("any").fg(Color::DarkGray),
+            Span::raw("  ⏎ to require some, e.g. Cu N O").fg(Color::DarkGray),
+        ]),
+        _ => Line::from(vec![
+            Span::raw("Elements: ").fg(Color::Gray),
+            Span::raw(required.join(" ")).fg(accent).bold(),
+            Span::raw("  hits must contain all of them · ⏎ edit").fg(Color::DarkGray),
+        ]),
+    });
+
+    match (has_cell, app.csd.get(&s.key())) {
+        (false, _) => lines.push(Line::from("no cell to search").fg(Color::DarkGray)),
+        (true, None | Some(CsdState::Searching(_))) => {
+            lines.push(Line::from("searching the CSD…").fg(Color::DarkGray));
+        }
+        (true, Some(CsdState::Failed(e))) => {
+            lines.push(Line::from(e.clone()).fg(Color::Red));
+            lines.push(Line::from("S tries again").fg(Color::DarkGray));
+        }
+        (true, Some(CsdState::Done(o))) if o.hits.is_empty() => {
+            title.push(Span::raw("· none ").fg(Color::DarkGray));
+            lines.push(Line::from(format!("not in the CSD or ICSD ({})", data(install, o.size))).fg(Color::DarkGray));
+        }
+        (true, Some(CsdState::Done(o))) => {
+            let all = o.hits.len();
+            let visible = crate::csd::filter(&o.hits, required);
+            let n = visible.len();
+            let count = if required.is_empty() {
+                format!("· {all} hit{} ", if all == 1 { "" } else { "s" })
+            } else {
+                format!("· {n} of {all} hits ")
+            };
+            title.push(Span::raw(count).fg(if n > 0 { accent } else { Color::DarkGray }));
+            if n == 0 {
+                lines.push(
+                    Line::from(format!("none of the {all} hits contain {}", required.join(" "))).fg(Color::DarkGray),
+                );
+            } else {
+                let shown = &visible[..app.csd_shown(n)];
+                let id = |h: &crate::csd::Hit| if h.is_icsd() { format!("ICSD {}", h.id) } else { h.id.clone() };
+                let id_w = shown.iter().map(|h| id(h).chars().count()).max().unwrap_or(2).max(2);
+                let sg_w = shown.iter().map(|h| h.sg.chars().count()).max().unwrap_or(2).clamp(2, 10);
+                // id, SG, a b c, α β γ, sim%, then the formula in what is left
+                let fixed = id_w + 1 + sg_w + 3 * 7 + 3 * 6 + 6;
+                let room = usize::from(width).saturating_sub(fixed + 2);
+                lines.push(
+                    Line::from(format!(
+                        "{:<id_w$} {:<sg_w$} {:>6} {:>6} {:>6} {:>5} {:>5} {:>5} {:>5}  formula",
+                        "ID", "SG", "a", "b", "c", "α", "β", "γ", "sim%"
+                    ))
+                    .fg(Color::DarkGray),
+                );
+                for (k, h) in shown.iter().enumerate() {
+                    let c = h.cell;
+                    items.push((lines.len(), InfoItem::CsdHit(k)));
+                    lines.push(Line::from(vec![
+                        Span::raw(format!("{:<id_w$}", id(h))).fg(if h.is_icsd() { Color::Gray } else { accent }).bold(),
+                        Span::raw(format!(" {:<sg_w$}", truncate(&h.sg, sg_w))).fg(Color::Gray),
+                        Span::raw(format!(
+                            " {:>6.2} {:>6.2} {:>6.2} {:>5.1} {:>5.1} {:>5.1}",
+                            c[0], c[1], c[2], c[3], c[4], c[5]
+                        )),
+                        Span::raw(format!(" {:>5.1}", h.sim)).bold(),
+                        Span::raw(format!("  {}", truncate(&h.formula, room))).fg(Color::Gray),
+                    ]));
+                }
+                let left = n - shown.len();
+                if left > 0 {
+                    lines.push(Line::from(format!("  +{left} more · c lists them all")).fg(Color::Gray));
+                }
+                if n > crate::app::CSD_HITS {
+                    hint = Some(if app.cell_hits_all { "c closest 5".to_string() } else { format!("c all {n}") });
+                }
+            }
+            lines.push(Line::from(format!("{} · ⏎ CCDC page", data(install, o.size))).fg(Color::DarkGray));
+        }
+    }
+    let mut sec = Section::new(Sub::Csd, title, lines);
+    sec.items = items;
+    sec.hint = hint;
+    sec
+}
+
+/// `1 805 887`
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(' ');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// The crystal system of a space group, from its number (`#15`, as ednaproc writes it)
@@ -1059,17 +1425,14 @@ fn crystal_system(sg: &str) -> Option<&'static str> {
 /// `limit` (closest first: code, date, SG, a b c α β γ, % similarity), each fitted to
 /// `width` by cutting the sample name, and how many are left out.
 fn cell_hit_lines(app: &App, found: &[crate::cells::Match], limit: usize, width: usize) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from("")];
+    let mut lines = Vec::new();
     if found.is_empty() {
         lines.push(
-            Line::from(format!("Similar cells: none in the unit-cell database ({} cells)", app.cells.len()))
-                .fg(Color::DarkGray),
+            Line::from(format!("none in the unit-cell database ({} cells)", app.cells.len())).fg(Color::DarkGray),
         );
         return lines;
     }
     let n = found.len();
-    let head = if n == 1 { "Similar cells: 1 hit".to_string() } else { format!("Similar cells: {n} hits") };
-    lines.push(Line::from(head).fg(Color::LightMagenta).bold());
     let shown = &found[..n.min(limit)];
     // compact symbols (P 21 21 21 → P212121) leave more room for the name
     let sg = |m: &crate::cells::Match| m.entry.sg.as_deref().map_or_else(|| "–".to_string(), |s| s.replace(' ', ""));
@@ -1109,7 +1472,7 @@ fn cell_hit_lines(app: &App, found: &[crate::cells::Match], limit: usize, width:
     let left = n - shown.len();
     let wanted = if app.cell_hits_all { n } else { n.min(CELL_HITS) };
     if shown.len() < wanted {
-        let tip = if app.fold_details { "" } else { ", z folds the shells" };
+        let tip = if app.folded.contains(&Sub::Shells) { "" } else { ", ← on Shells folds them" };
         lines.push(Line::from(format!("  +{left} more: no room{tip}")).fg(Color::Gray));
     } else if left > 0 {
         lines.push(Line::from(format!("  +{left} more · c lists them all")).fg(Color::Gray));
@@ -1213,12 +1576,15 @@ fn draw_console(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Focus::Console;
     let c = &app.console;
     let cwd = app.local.cwd.display().to_string();
+    // the running badge matters more than the folder: the path gives it room
+    let badge = c.pty.as_ref().map(|r| format!(" {} running: type the answer, Enter sends it ", r.label));
+    let badge_w = badge.as_ref().map_or(0, |b| b.chars().count() + 1);
     let mut t = title(
-        format!("Console  {}", shorten(&cwd, area.width.saturating_sub(40) as usize)),
+        format!("Console  {}", shorten(&cwd, area.width.saturating_sub(40 + badge_w as u16).max(12) as usize)),
         focused,
     );
-    if let Some(r) = &c.pty {
-        t.spans.push(Span::raw(format!(" {} running: type the answer, Enter sends it ", r.label)).black().on_yellow());
+    if let Some(b) = badge {
+        t.spans.push(Span::raw(b).black().on_yellow());
         t.spans.push(Span::raw(" "));
     }
     if c.scroll > 0 {
@@ -1817,9 +2183,12 @@ fn help_lines() -> Vec<Line<'static>> {
         row("s", "rescan sample      S  fetch stats for the whole beamtime"),
         sec("Stats"),
         row("Space / a", "mark a solve or tick a frames run / mark all with HKL files"),
-        row("c / z", "all similar cells / fold shells and checkCIF (or click the title)"),
         row("d", "download marked solves into xia2chem_r3/, ednaproc_r3/ …"),
-        row("F", "download ticked frame runs (asks); HKL/logs go first"),
+        row("F / →", "download ticked frame runs (asks) / into Info, under the table"),
+        sec("Info (the highlighted solve; c all similar cells, S searches the CSD again)"),
+        row("↑↓  ⏎ ← →", "move between subtabs, HKL and logs / fold, show (← folded: back)"),
+        row("⏎ on logs", "download just the logs (on HKL: that solve)"),
+        row("⏎ on Elements", "type elements the CSD hits must contain (Cu N O), ⏎ applies"),
         sec("Console (a terminal in the Local panel's folder)"),
         row("Enter", "run; a bare program name gets the selected file"),
         row("", "while a program runs (SADABS…), Enter sends your answer"),
@@ -2572,8 +2941,12 @@ mod tests {
     }
 
     fn key(app: &mut App, c: char) {
-        use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-        app.handle(crate::event::AppEvent::Input(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))));
+        press(app, ratatui::crossterm::event::KeyCode::Char(c));
+    }
+
+    fn press(app: &mut App, code: ratatui::crossterm::event::KeyCode) {
+        use ratatui::crossterm::event::{Event, KeyEvent, KeyModifiers};
+        app.handle(crate::event::AppEvent::Input(Event::Key(KeyEvent::new(code, KeyModifiers::NONE))));
     }
 
     #[test]
@@ -2646,7 +3019,7 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let mut app = demo_app(&base);
         let screen = render(&app, 170, 42);
-        assert!(screen.contains("Similar cells: none in the unit-cell database (0 cells)"), "{screen}");
+        assert!(screen.contains("none in the unit-cell database (0 cells)"), "{screen}");
 
         // JSG285b itself is in the database, but not listed as its own match
         let own = app.info("20251211", "JSG285b").unwrap().clone();
@@ -2665,10 +3038,10 @@ mod tests {
         app.cells.record("20250704", &other("NOT-IT", 2.0));
         let screen = render(&app, 170, 52);
         println!("{screen}");
-        assert!(screen.contains("Similar cells: 1 hit"), "{screen}");
-        assert!(screen.contains("┃ID     date     SG      a      b      c     α     β     γ  sim%"), "{screen}");
+        assert!(screen.contains("Similar cells · 1 hit"), "{screen}");
+        assert!(screen.contains("│ID     date     SG      a      b      c     α     β     γ  sim%"), "{screen}");
         // the cell is 0.05 Å longer on a: 99.8 % similar
-        assert!(screen.contains("┃JSG270 20250704 P4  28.50  28.45  14.39  90.0  90.0  90.0  99.8"), "{screen}");
+        assert!(screen.contains("│JSG270 20250704 P4  28.50  28.45  14.39  90.0  90.0  90.0  99.8"), "{screen}");
         assert!(!screen.contains("NOT-IT") && !screen.contains("JSG285b 20251211"));
         // nothing to expand: no key hint on the rule
         assert!(!screen.contains("c all"));
@@ -2679,8 +3052,8 @@ mod tests {
         }
         let screen = render(&app, 170, 52);
         println!("{screen}");
-        let at = |s: &str, code: &str| s.lines().position(|l| l.contains(&format!("┃{code} "))).unwrap();
-        assert!(screen.contains("Similar cells: 9 hits") && screen.contains("c all 9"));
+        let at = |s: &str, code: &str| s.lines().position(|l| l.contains(&format!("│{code} "))).unwrap();
+        assert!(screen.contains("Similar cells · 9 hits") && screen.contains("c all 9"));
         assert!(!screen.contains("closest first"));
         assert!(at(&screen, "JSG300") < at(&screen, "JSG301") && at(&screen, "JSG301") < at(&screen, "JSG304"));
         // the same cell is 100 % similar
@@ -2702,12 +3075,14 @@ mod tests {
         click(&mut app, x, y);
         assert!(app.cell_hits_all && render(&app, 170, 60).contains("JSG307"));
 
-        // a shorter panel: the list gets shorter and says why; folding makes room
-        let screen = render(&app, 170, 52);
+        // a shorter panel: the list gets shorter and says why; folding the shells makes room
+        app.folded.remove(&Sub::Shells);
+        let screen = render(&app, 170, 38);
         println!("{screen}");
-        assert!(screen.contains("more: no room, z folds the shells"), "{screen}");
-        key(&mut app, 'z');
-        assert!(render(&app, 170, 52).contains("JSG307"));
+        assert!(screen.contains("more: no room, ← on Shells folds them"), "{screen}");
+        app.folded.insert(Sub::Shells);
+        let screen = render(&app, 170, 38);
+        assert!(screen.contains("JSG304") && !screen.contains("folds them"), "{screen}");
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -2721,57 +3096,309 @@ mod tests {
         app.cells.record("20260711", &long);
         let screen = render(&app, 170, 52);
         println!("{screen}");
-        let row = screen.lines().find(|l| l.contains("┃Sample-20-02")).unwrap();
+        let row = screen.lines().find(|l| l.contains("│Sample-20-02")).unwrap();
         // the name is cut, the rest of the row stays on its line
         assert!(row.contains("…") && !row.contains("THF"), "{row}");
-        assert!(row.contains("20260711 P4  28.45  28.45  14.39  90.0  90.0  90.0 100.0┃"), "{row}");
+        assert!(row.contains("20260711 P4  28.45  28.45  14.39  90.0  90.0  90.0 100.0│"), "{row}");
         std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
-    fn stats_details_are_sections_that_fold() {
+    fn info_panel_subtabs_fold_and_navigate() {
+        use crate::app::Focus;
+        use ratatui::crossterm::event::KeyCode;
         let base = std::env::temp_dir().join(format!("amanece_fold_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let mut app = demo_app(&base);
+        app.focus = Focus::Stats;
         let screen = render(&app, 170, 42);
         println!("{screen}");
-        // the table takes only its rows; the details start right below it, after a blank row
+        // the table panel takes only its rows; the Info panel, titled with the solve, follows
         let lines: Vec<&str> = screen.lines().collect();
         let last_row = lines.iter().position(|l| l.contains("frames 720")).unwrap();
-        assert!(!lines[last_row + 1].contains("xia2chem"));
         assert!(lines[last_row + 2].contains("xia2chem · run 3 · images 1–720 · done"), "{screen}");
+        // shells first, folded to their rule
+        assert!(lines[last_row + 3].contains("▸ Shells"), "{screen}");
+        assert!(!screen.contains("overall  12.84"));
+        let row_of = |s: &str| lines.iter().position(|l| l.contains(s)).unwrap_or_else(|| panic!("{s}\n{screen}"));
+        // then Files, the cell, similar cells, the CSD check and checkCIF last
+        let order = ["▸ Shells", "▾ Files", "▾ Cell ", "▾ Similar cells", "▾ CellCheckCSD", "▾ checkCIF"];
+        let rows: Vec<usize> = order.iter().map(|s| row_of(s)).collect();
+        assert!(rows.windows(2).all(|w| w[0] < w[1]), "{rows:?}\n{screen}");
         assert!(screen.contains("HKL: shelxt.hkl (5.6 MB), shelxt.ins (514 B)"));
+        assert!(screen.contains("no resolution, completeness or Rint alert"));
+        assert!(screen.contains("Requires CellCheckCSD"), "{screen}");
         // the cell: system // SG, the edges, the angles
         assert!(screen.contains("  //  "), "{screen}");
         assert!(screen.contains("a:  28.450 Å   b:  28.450 Å   c:  14.390 Å"), "{screen}");
         assert!(screen.contains("α:   90.00°    β:   90.00°    γ:   90.00°"), "{screen}");
-        for title in [" Cell ", "▾ Shells", "▾ checkCIF"] {
-            assert!(screen.contains(title), "{title}");
-        }
-        assert!(screen.contains("overall  12.84–0.73"));
 
-        // z folds shells and checkCIF to their titles, z again unfolds them
-        key(&mut app, 'z');
+        // → goes into Info, on Shells; Enter shows them, ← folds them again
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.focus, Focus::Info);
+        assert_eq!(app.info_sel, InfoItem::Head(Sub::Shells));
+        press(&mut app, KeyCode::Enter);
         let screen = render(&app, 170, 42);
         println!("{screen}");
-        assert!(!screen.contains("overall  12.84") && !screen.contains("Rint alert"));
-        assert!(screen.contains("▸ Shells") && screen.contains("▸ checkCIF no alert") && screen.contains("z unfold"));
-        // a folded checkCIF shows its alert levels on the title
-        app.stats_sel = 1;
-        let screen = render(&app, 170, 42);
-        assert!(screen.contains("▸ checkCIF  A"), "{screen}");
+        assert!(screen.contains("▾ Shells") && screen.contains("overall  12.84–0.73"), "{screen}");
+        press(&mut app, KeyCode::Left);
+        assert!(!render(&app, 170, 42).contains("inner    "));
+        // ↓ to Files, then its HKL line; ← there folds Files and goes back to its title
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.info_sel, InfoItem::Head(Sub::Files));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.info_sel, InfoItem::Hkl);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.info_sel, InfoItem::Head(Sub::Files));
+        assert!(!render(&app, 170, 42).contains("HKL: shelxt.hkl"));
+        // → shows it again; ← on a folded title goes back to the table
+        press(&mut app, KeyCode::Right);
+        assert!(render(&app, 170, 42).contains("HKL: shelxt.hkl"));
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.focus, Focus::Stats);
+        app.folded.remove(&Sub::Files);
+        // z does nothing any more
         key(&mut app, 'z');
-        assert!(render(&app, 170, 42).contains("inner    "));
+        assert_eq!(app.folded, std::collections::HashSet::from([Sub::Shells]));
 
-        // a click on a section title folds too
-        let (x, y) = find(&render(&app, 170, 42), "▾ Shells");
+        // every alert of a solve on one row; folded, checkCIF shows the badges on its rule
+        app.stats_sel = 1;
+        let screen = render(&app, 170, 42).replace('\u{a0}', " ");
+        println!("{screen}");
+        let alert_row = screen.lines().find(|l| l.contains("sinθ/λ")).expect("resolution alert");
+        assert!(alert_row.contains(" A  d 0.94Å"), "{alert_row}");
+        app.folded.insert(Sub::CheckCif);
+        assert!(render(&app, 170, 42).contains("▸ checkCIF  A"));
+        app.folded.remove(&Sub::CheckCif);
+
+        // a click on a subtab title folds/shows it and puts the cursor there
+        let (x, y) = find(&render(&app, 170, 42), "▸ Shells");
         click(&mut app, x, y);
-        assert!(app.fold_details);
+        assert!(!app.folded.contains(&Sub::Shells));
+        assert_eq!((app.focus, app.info_sel), (Focus::Info, InfoItem::Head(Sub::Shells)));
 
-        // a frames row has its own section
+        // a frames row has its own subtab
         app.stats_sel = 4;
         let screen = render(&app, 170, 42);
         assert!(screen.contains(" Raw frames · run 3 ") && screen.contains("prefix manually-mounted"), "{screen}");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_solve_that_used_fewer_images_does_not_shrink_the_run() {
+        let base = std::env::temp_dir().join(format!("amanece_imgs_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        // the first solve of the run with frames integrated only 1–635 (as autoPROC did on XAIRA)
+        let rows = App::stats_rows(app.info("20251211", "JSG285b").unwrap());
+        let (ri, si, sel) = rows
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| match *r {
+                StatsRow::Solve { run, solve } => Some((run, solve, i)),
+                _ => None,
+            })
+            .unwrap();
+        let info = app.cache.experiments.get_mut("20251211").unwrap().infos.get_mut("JSG285b").unwrap();
+        info.runs[ri].solves[si].stats.as_mut().unwrap().images = Some((1, 635));
+        assert_eq!(info.runs[ri].images(), Some((1, 720)));
+        app.stats_sel = sel;
+        let screen = render(&app, 170, 42);
+        println!("{screen}");
+        // the frames row keeps the run's 720; the short solve says so
+        assert!(screen.contains("frames 720"), "{screen}");
+        assert!(screen.contains("images 1–635 of 720"), "{screen}");
+        assert!(screen.contains("used images 1–635 of the run's 1–720: 85 left out"), "{screen}");
+        // the others don't
+        app.stats_sel = (sel + 1) % 3;
+        assert!(!render(&app, 170, 42).contains(" of 720"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn csd_hits_are_listed_ranked_and_navigable() {
+        use crate::app::Focus;
+        use crate::csd::{Hit, Install, Outcome};
+        use ratatui::crossterm::event::KeyCode;
+        let base = std::env::temp_dir().join(format!("amanece_csd_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        // without CellCheckCSD: where to get it
+        assert!(render(&app, 170, 60).contains("Requires CellCheckCSD"));
+        app.cellcheck = Some(Install { dir: base.clone(), built: Some("2026-11-10".into()) });
+        let s = app.highlighted_solve().unwrap();
+        // while it runs
+        app.csd.insert(s.key(), CsdState::Searching(1));
+        assert!(render(&app, 170, 60).contains("searching the CSD…"));
+        let hit = |id: &str, a: f64, formula: &str, sim: f64| Hit {
+            id: id.into(),
+            cell: [a, 28.45, 14.39, 90.0, 90.0, 90.0],
+            sg: "P4".into(),
+            formula: formula.into(),
+            sim,
+        };
+        let hits = vec![
+            hit("ABCDEF", 28.45, "C20 H16 N4 O4", 100.0),
+            hit("170089", 28.5, "Cl1 K1 O4", 99.8),
+            hit("GHIJKL", 28.6, "C9 H7 N1 O1", 99.5),
+            hit("MNOPQR", 28.7, "C9 H7 N1 O1", 99.1),
+            hit("STUVWX", 28.8, "C9 H7 N1 O1", 98.8),
+            hit("YZABCD", 28.9, "C12 H8 Cu1 N2 O4", 98.4),
+        ];
+        app.csd.insert(s.key(), CsdState::Done(Outcome { hits, size: Some(1_805_887) }));
+        let screen = render(&app, 170, 60);
+        println!("{screen}");
+        assert!(screen.contains("CellCheckCSD · 6 hits"), "{screen}");
+        assert!(screen.contains("Elements: any"), "{screen}");
+        // ICSD numbers say so; five listed, the rest counted
+        assert!(screen.contains("ICSD 170089") && !screen.contains("YZABCD"), "{screen}");
+        assert!(screen.contains("+1 more · c lists them all") && screen.contains("c all 6"), "{screen}");
+        assert!(screen.contains("1 805 887 entries, data 2026-11-10"), "{screen}");
+
+        // under the title: the elements field, then each listed hit; ← folds back to the title
+        app.focus = Focus::Info;
+        app.info_sel = InfoItem::Head(Sub::Csd);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.info_sel, InfoItem::CsdFilter);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.info_sel, InfoItem::CsdHit(0));
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.info_sel, InfoItem::Head(Sub::Csd));
+        assert!(app.folded.contains(&Sub::Csd));
+        assert!(render(&app, 170, 60).contains("▸ CellCheckCSD · 6 hits"));
+        app.folded.remove(&Sub::Csd);
+
+        // typing elements: Enter on the field, letters (even q, S, c) go into it, Enter applies
+        app.info_sel = InfoItem::CsdFilter;
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.csd_edit.as_deref(), Some(""));
+        for c in "cu, n o".chars() {
+            key(&mut app, c);
+        }
+        assert!(render(&app, 170, 60).contains("Elements: cu, n o█"));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.csd_edit, None);
+        assert_eq!(app.csd_required(), ["Cu", "N", "O"]);
+        let screen = render(&app, 170, 60);
+        println!("{screen}");
+        // only the hit with Cu, N and O is left (it has C and H too)
+        assert!(screen.contains("CellCheckCSD · 1 of 6 hits") && screen.contains("YZABCD"), "{screen}");
+        assert!(!screen.contains("ABCDEF") && !screen.contains("ICSD 170089"), "{screen}");
+        assert!(screen.contains("Elements: Cu N O"), "{screen}");
+        // the cursor stops follow the filtered list
+        assert_eq!(app.info_items().iter().filter(|i| matches!(i, InfoItem::CsdHit(_))).count(), 1);
+        // nothing has them all
+        app.csd_filter.insert(app.selected_sample().unwrap(), vec!["Pt".into()]);
+        let screen = render(&app, 170, 60);
+        assert!(screen.contains("· 0 of 6 hits") && screen.contains("none of the 6 hits contain Pt"), "{screen}");
+        // Esc while typing leaves the filter as it was; an empty field clears it
+        press(&mut app, KeyCode::Enter);
+        key(&mut app, 'x');
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.csd_required(), ["Pt"]);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.csd_required().is_empty());
+        assert!(render(&app, 170, 60).contains("CellCheckCSD · 6 hits"));
+
+        // c lists every hit (and every similar cell)
+        key(&mut app, 'c');
+        assert!(render(&app, 170, 70).contains("YZABCD"));
+        // a failed search says why
+        app.csd.insert(s.key(), CsdState::Failed("ccdc_searcher failed: bad query".into()));
+        let screen = render(&app, 170, 60);
+        assert!(screen.contains("ccdc_searcher failed: bad query") && screen.contains("S tries again"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn info_scrolls_to_keep_the_cursor_in_view() {
+        use crate::app::Focus;
+        use crate::csd::{Hit, Install, Outcome};
+        use ratatui::crossterm::event::KeyCode;
+        let base = std::env::temp_dir().join(format!("amanece_scroll_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        app.cellcheck = Some(Install { dir: base.clone(), built: None });
+        let s = app.highlighted_solve().unwrap();
+        // a big search: 60 hits, all listed (c)
+        let hits = (0..60)
+            .map(|i| Hit {
+                id: format!("HIT{i:03}"),
+                cell: [28.45, 28.45, 14.39, 90.0, 90.0, 90.0],
+                sg: "P4".into(),
+                formula: "C1 H1".into(),
+                sim: 100.0 - f64::from(i) * 0.01,
+
+            })
+            .collect();
+        app.csd.insert(s.key(), CsdState::Done(Outcome { hits, size: None }));
+        app.cell_hits_all = true;
+        app.focus = Focus::Info;
+        app.info_sel = InfoItem::CsdFilter;
+        let (w, h) = (170, 42);
+        let selected_row = |app: &App| {
+            let screen = render(app, w, h);
+            let InfoItem::CsdHit(k) = app.info_sel else { return (screen, false) };
+            let id = format!("HIT{k:03}");
+            let shown = screen.contains(&id);
+            (screen, shown)
+        };
+        // walk down every hit: the highlighted one is always on screen
+        for k in 0..60 {
+            press(&mut app, KeyCode::Down);
+            assert_eq!(app.info_sel, InfoItem::CsdHit(k));
+            let (screen, shown) = selected_row(&app);
+            assert!(shown, "HIT{k:03} off screen\n{screen}");
+        }
+        // the border says how much is above; the top of the panel scrolled away
+        let screen = render(&app, w, h);
+        println!("{screen}");
+        assert!(screen.contains(" ↑"), "{screen}");
+        assert!(!screen.contains("▸ Shells"), "{screen}");
+        // and back up to the first subtab
+        for _ in 0..80 {
+            press(&mut app, KeyCode::Up);
+        }
+        assert_eq!(app.info_sel, InfoItem::Head(Sub::Shells));
+        let screen = render(&app, w, h);
+        assert!(screen.contains("▸ Shells") && screen.contains(" ↓"), "{screen}");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn enter_on_the_logs_line_downloads_just_the_logs() {
+        use crate::app::{Conn, Focus};
+        use ratatui::crossterm::event::KeyCode;
+        let base = std::env::temp_dir().join(format!("amanece_logs_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        // the highlighted solve gets two logs
+        let StatsRow::Solve { run, solve } = App::stats_rows(app.info("20251211", "JSG285b").unwrap())[app.stats_sel]
+        else {
+            unreachable!()
+        };
+        let info = app.cache.experiments.get_mut("20251211").unwrap().infos.get_mut("JSG285b").unwrap();
+        let s = &mut info.runs[run].solves[solve];
+        s.logs.clear();
+        for name in ["xia2.txt", "xia2.html"] {
+            let mut log = s.hkl[0].clone();
+            log.path = log.path.replace("shelxt.hkl", name);
+            s.logs.push(log);
+        }
+        app.focus = Focus::Info;
+        app.info_sel = InfoItem::Logs;
+        let screen = render(&app, 170, 42);
+        assert!(screen.contains("logs: xia2.txt, xia2.html"), "{screen}");
+        app.conn = Conn::Connected("u".into());
+        press(&mut app, KeyCode::Enter);
+        // the two logs, not the HKL and INS files
+        assert_eq!(app.downloads.queued, 2);
+        let said = app.console.lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("\n");
+        assert!(said.contains("queued 2 file(s)"), "{said}");
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -2962,18 +3589,17 @@ mod tests {
         }
         let [best, edna, autoproc] = &screens[..] else { unreachable!() };
         assert!(best.contains("no resolution, completeness or Rint alert"));
-        assert!(best.contains("★ best of 3: 94.8/100, next autoPROC noanom r3") && best.contains("? why"));
-        // the breakdown is in the ? help
+        // the ★ score is a table column; the breakdown is in the ? help
+        let best_row = best.lines().find(|l| l.contains("★ xia2chem")).unwrap();
+        assert!(best_row.contains(" 94.8"), "{best_row}");
         assert!(!best.contains("R inner 14.4/20"));
         app.stats_sel = 0;
         app.dialog = Some(Dialog::Help);
         let help = render(&app, 170, 80).replace('\u{a0}', " ");
         assert!(help.contains("Cmpl 30.0/30  CC½ 30.0/30  R inner 14.4/20  d_min 20.0/20  +0.5 xia2chem"), "{help}");
         app.dialog = None;
-        assert!(edna.contains(" A  d_min 0.94 Å = sin θ/λ 0.532 < 0.550"));
-        assert!(edna.contains("#3 of 3:") && edna.contains("behind ★ xia2chem r3, mostly on d_min"));
-        assert!(autoproc.contains(" C  d_min 0.86 Å = sin θ/λ 0.582 < 0.590"));
-        assert!(autoproc.contains("#2 of 3:"));
+        assert!(edna.contains(" A  d 0.94Å sinθ/λ .532<.550"), "{edna}");
+        assert!(autoproc.contains(" C  d 0.86Å sinθ/λ .582<.590"), "{autoproc}");
         // a solve without HKL files says why it isn't ranked
         let info = app.cache.experiments.get_mut("20251211").unwrap().infos.get_mut("JSG285b").unwrap();
         info.runs[1].solves[1].hkl.clear();
@@ -3007,7 +3633,7 @@ mod tests {
         app.dialog = Some(Dialog::Help);
         // tall enough: symbols stacked under the keys
         let screen = render(&app, 120, 60);
-        assert!(screen.contains("fold shells and checkCIF"));
+        assert!(screen.contains("move between subtabs, HKL and logs"));
         assert!(screen.contains("U               update amanece"));
         assert!(screen.contains("Windows GUI programs (xprep, shelxle, olex2…)"));
         assert!(!screen.contains("best solve: Cmpl"), "keys box holds keys only");
@@ -3169,7 +3795,7 @@ mod tests {
         // status bar: keys on the left, state on the right
         let bar = wide.lines().last().unwrap();
         assert!(bar.trim_start().starts_with("Tab panels"));
-        assert!(bar.contains("poll manual") && bar.contains("sound on") && bar.contains("logs off"));
+        assert!(bar.contains("poll manual") && bar.contains("sound on") && bar.contains("logs on"));
         std::fs::remove_dir_all(&base).ok();
     }
 }

@@ -87,6 +87,9 @@ pub struct Config {
     pub cell_match_deg: f64,
     /// Ask GitHub for a newer amanece at startup and once a day (`U` updates).
     pub check_updates: bool,
+    /// CellCheckCSD install folder, when it is not in the default place
+    /// (`%ProgramFiles%\CCDC\CellCheckCSD`).
+    pub cellcheck_dir: Option<String>,
 }
 
 impl Default for Config {
@@ -98,7 +101,7 @@ impl Default for Config {
             slow_poll_minutes: 10.0,
             fast_poll_minutes: 2.0,
             sound: true,
-            include_logs: false,
+            include_logs: true,
             show_test: false,
             external_window: vec!["xprep".into()],
             max_requests_per_second: 3.0,
@@ -111,6 +114,7 @@ impl Default for Config {
             cell_match_pct: 1.5,
             cell_match_deg: 2.0,
             check_updates: true,
+            cellcheck_dir: None,
         }
     }
 }
@@ -129,7 +133,7 @@ fast_poll_minutes = 2.0
 # beep when a new named sample gets processing results
 sound = true
 # also download logs (summary.html, xia2.txt, CORRECT.LP, ...) with the HKL files
-include_logs = false
+include_logs = true
 # show samples named "test..." and characterisation-only samples
 show_test = false
 
@@ -162,6 +166,10 @@ cell_match_deg = 2.0
 # ask GitHub for a newer amanece at startup and once a day (one small request;
 # nothing is downloaded until you press U and say yes)
 check_updates = true
+
+# CellCheckCSD (free from the CCDC) checks a cell against the CSD, offline. amanece finds
+# it in the default install folder; set this if you installed it elsewhere.
+# cellcheck_dir = "C:/Program Files/CCDC/CellCheckCSD"
 
 # checkCIF-style alerts in the Stats panel. Each list gives the limits for alert
 # levels C, B, A; a value past one turns its cell yellow (C), orange (B) or red (A).

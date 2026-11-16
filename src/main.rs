@@ -5,6 +5,7 @@ mod cells;
 mod checkcif;
 mod config;
 mod console;
+mod csd;
 mod download;
 mod event;
 mod ispyb;
