@@ -1718,41 +1718,66 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
             f.render_widget(Paragraph::new(lines).block(dialog_block(title)), r);
         }
         Dialog::Help => {
-            let boxes = [
-                ("Keys (any key closes)", help_lines()),
-                ("Symbols", symbol_lines()),
-                ("★ ranking", star_lines(app)),
+            let mut keys = help_lines();
+            let symbols = symbol_lines();
+            let star = star_lines(app);
+            let h = |l: &[Line]| l.len() as u16 + 2;
+            let w = |l: &[Line]| l.iter().map(Line::width).max().unwrap_or(0) as u16 + 2;
+            let all = h(&keys) + h(&symbols) + h(&star);
+            // Two columns when stacked doesn't fit and the screen is wide enough: the keys
+            // split at Stats, each half over one of the other boxes so the columns come out
+            // about as tall; each column as wide as its longest line, if there's room.
+            let more = keys.split_off(
+                keys.iter().position(|l| l.to_string() == "Stats").unwrap_or(keys.len()),
+            );
+            let cols = [
+                vec![("Keys (any key closes)", keys), ("★ ranking", star)],
+                vec![("More keys", more), ("Symbols", symbols)],
             ];
-            let h = |b: &(&str, Vec<Line>)| b.1.len() as u16 + 2;
-            let all: u16 = boxes.iter().map(h).sum();
-            // Stacked when it fits; otherwise keys on the left and the rest on the right,
-            // if the screen is wide enough; else stacked and cut at the bottom.
-            let side = all > area.height.saturating_sub(2) && area.width >= 164;
-            let rects: Vec<Rect> = if side {
-                let right: u16 = boxes[1..].iter().map(h).sum();
-                let r = centered(162, h(&boxes[0]).max(right), area);
-                let mut y = r.y;
-                let mut v = vec![Rect { width: 80, height: h(&boxes[0]).min(r.height), ..r }];
-                for b in &boxes[1..] {
-                    let bh = h(b).min((r.y + r.height).saturating_sub(y));
-                    v.push(Rect { x: r.x + 82, y, width: 80, height: bh });
-                    y += bh;
+            let col_w = |c: &Vec<(&str, Vec<Line>)>| c.iter().map(|b| w(&b.1)).max().unwrap_or(0);
+            let mut cw = [col_w(&cols[0]), col_w(&cols[1])];
+            let over = (cw[0] + cw[1] + 2).saturating_sub(area.width.saturating_sub(2));
+            // too wide: the left column gives up its long lines first, down to 80
+            let take = over.min(cw[0].saturating_sub(80));
+            cw = [cw[0] - take, cw[1].saturating_sub(over - take)];
+            let side = all > area.height.saturating_sub(2) && cw[0] >= 80 && cw[1] >= 80;
+            let mut placed: Vec<(&str, Vec<Line>, Rect)> = Vec::new();
+            if side {
+                let col_h = |c: &Vec<(&str, Vec<Line>)>| c.iter().map(|b| h(&b.1)).sum::<u16>();
+                let ch = col_h(&cols[0]).max(col_h(&cols[1])).min(area.height);
+                let total_w = cw[0] + 2 + cw[1];
+                let x0 = area.x + area.width.saturating_sub(total_w) / 2;
+                let y0 = area.y + (area.height - ch) / 2;
+                let mut x = x0;
+                for (col, width) in cols.into_iter().zip(cw) {
+                    let (mut y, n) = (y0, col.len());
+                    for (i, (t, lines)) in col.into_iter().enumerate() {
+                        let left = (y0 + ch).saturating_sub(y);
+                        // the last box reaches the bottom, so both columns end level
+                        let bh = if i + 1 == n { left } else { h(&lines).min(left) };
+                        placed.push((t, lines, Rect::new(x, y, width, bh)));
+                        y += bh;
+                    }
+                    x += width + 2;
                 }
-                v
             } else {
+                // stacked: the keys whole, then symbols and ranking; cut at the bottom
+                let [c0, c1] = cols;
+                let mut it0 = c0.into_iter();
+                let mut it1 = c1.into_iter();
+                let (t, mut keys) = it0.next().unwrap();
+                let (_, more) = it1.next().unwrap();
+                keys.extend(more);
+                let boxes = [(t, keys), it1.next().unwrap(), it0.next().unwrap()];
                 let r = centered(80, all, area);
                 let mut y = r.y;
-                boxes
-                    .iter()
-                    .map(|b| {
-                        let bh = h(b).min((r.y + r.height).saturating_sub(y));
-                        let rr = Rect { y, height: bh, ..r };
-                        y += bh;
-                        rr
-                    })
-                    .collect()
-            };
-            for ((t, lines), r) in boxes.into_iter().zip(rects) {
+                for (t, lines) in boxes {
+                    let bh = h(&lines).min((r.y + r.height).saturating_sub(y));
+                    placed.push((t, lines, Rect { y, height: bh, ..r }));
+                    y += bh;
+                }
+            }
+            for (t, lines, r) in placed {
                 if r.height > 2 {
                     f.render_widget(Clear, r);
                     f.render_widget(Paragraph::new(lines).block(dialog_block(t)), r);
@@ -1801,12 +1826,12 @@ fn help_lines() -> Vec<Line<'static>> {
         row("", "xprep → xprep XDS_ASCII.HKL, shelxt → shelxt <name>"),
         row("↑ / ↓", "history        PgUp / PgDn  scroll"),
         row("Ctrl-C", "interrupt (twice: kill)    Esc  leave console"),
-        sec("Mouse"),
-        row("click", "focus a panel, select a row; double-click opens"),
-        row("", "click a Stats checkbox to mark; wheel scrolls; click status badges"),
         row("cd <dir>", "change folder   clear  wipe the log"),
         Line::from("  Windows GUI programs (xprep, shelxle, olex2…) start directly in their own window.")
             .fg(Color::DarkGray),
+        sec("Mouse"),
+        row("click", "focus a panel, select a row; double-click opens"),
+        row("", "click a Stats checkbox to mark; wheel scrolls; click status badges"),
     ]
 }
 
