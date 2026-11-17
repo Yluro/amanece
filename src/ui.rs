@@ -438,6 +438,12 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), area);
         return;
     };
+    if app.cfg.nas && name.ends_with('/') {
+        let block = panel(title(format!("Folder: {name}"), focused), focused, &[]);
+        f.render_widget(Paragraph::new("Press Enter in the NAS panel to open this folder. Select an .ins, .res or XDS_ASCII.HKL file inside to read its unit cell. S scans files in the open folder only.")
+            .wrap(Wrap { trim: false }).block(block), area);
+        return;
+    }
     let block = panel(
         title(format!("{name} · {}", layout::beamtime_label(&date)), focused),
         focused,
@@ -1500,6 +1506,20 @@ fn cell_hit_lines(app: &App, found: &[crate::cells::Match], limit: usize, width:
 
 fn date_summary(app: &App, date: &str) -> Vec<Line<'static>> {
     let exp = app.cache.experiments.get(date);
+    if app.cfg.nas {
+        let mut lines = vec![Line::from(format!("Folder: {}", layout::beamtime_label(date))).bold()];
+        if let Some(names) = exp.and_then(|e| e.samples.as_ref()) {
+            let folders = names.iter().filter(|n| n.ends_with('/')).count();
+            let files = names.len() - folders;
+            lines.push(Line::from(format!("{folders} subfolders, {files} metadata files here")));
+            if files > 0 {
+                let scanned = exp.map(|e| names.iter().filter(|n| !n.ends_with('/') && e.infos.contains_key(*n)).count()).unwrap_or(0);
+                lines.push(Line::from(format!("{scanned} of {files} files scanned in this folder")));
+            }
+        }
+        lines.push(Line::from("Enter opens the folder. Select a metadata file to read its cell; S scans files in the open folder only."));
+        return lines;
+    }
     let total = exp.and_then(|e| e.samples.as_ref()).map(|s| s.len());
     let scanned = exp.map(|e| e.infos.len()).unwrap_or(0);
     let mut lines = vec![Line::from(format!("Beamtime {}", layout::beamtime_label(date))).bold()];
@@ -2821,6 +2841,10 @@ mod tests {
         app.alba_sel = 1;
         app.focus = Focus::Alba;
         assert!(app.selected_sample().is_none());
+        let screen = render(&app, 180, 45);
+        assert!(screen.contains("Press Enter in the NAS panel"));
+        assert!(!screen.contains("Not scanned yet"));
+        assert!(!date_summary(&app, parent).iter().any(|l| l.to_string().contains("scanned")));
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.alba_date.as_deref(), Some(child));
         assert_eq!(app.focus, Focus::Alba);

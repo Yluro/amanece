@@ -2224,6 +2224,17 @@ impl App {
             .filter(|n| self.info(&date, n).is_none_or(|i| i.has_running()))
             .collect();
         if todo.is_empty() {
+            if self.cfg.nas {
+                let files = self.cache.experiments.get(&date).and_then(|e| e.samples.as_ref())
+                    .map(|names| names.iter().filter(|n| !n.ends_with('/')).count());
+                let message = match files {
+                    None => "Folder listing is not ready yet. Wait for it to finish, then press S.",
+                    Some(0) => "No supported metadata files in this folder. Open a subfolder with Enter; S does not scan subfolders.",
+                    Some(_) => "All metadata files in this folder are already scanned. Open a subfolder to scan its files.",
+                };
+                self.say(LineKind::Info, message);
+                return;
+            }
             self.say(LineKind::Info, format!("all samples of {date} already have stats"));
             return;
         }
