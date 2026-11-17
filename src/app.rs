@@ -468,9 +468,9 @@ impl App {
         let last_user = user
             .filter(|u| !u.trim().is_empty())
             .or_else(|| saved_users.first().cloned());
-        let cache = Cache::load_startup(state_dir.as_deref(), &cfg.host, last_user.as_deref(), &base);
+        let cache = Cache::load_startup(state_dir.as_deref(), &cfg.cache_host(), last_user.as_deref(), &base);
         let mut cells = CellDb::load(state_dir.as_deref());
-        for c in Cache::load_all(state_dir.as_deref(), &cfg.host) {
+        for c in Cache::load_all(state_dir.as_deref(), &cfg.cache_host()) {
             cells.record_cache(&c);
         }
         cells.record_cache(&cache);
@@ -660,7 +660,7 @@ impl App {
     /// After a login: switch to that account's cache, or claim the one shown before
     /// logging in (empty, or carried over from an old version's `.amanece/` folder).
     fn use_account_cache(&mut self, user: &str) {
-        let key = crate::cache::account_key(user, &self.cfg.host);
+        let key = crate::cache::account_key(user, &self.cfg.cache_host());
         match self.cache.account.as_deref() {
             Some(k) if k == key => {}
             None => {
@@ -669,7 +669,7 @@ impl App {
             }
             Some(_) => {
                 self.save_cache();
-                self.cache = Cache::load_account(self.state_dir.as_deref(), &self.cfg.host, &key);
+                self.cache = Cache::load_account(self.state_dir.as_deref(), &self.cfg.cache_host(), &key);
                 self.cells.record_cache(&self.cache);
                 self.alba_date = None;
                 self.alba_sel = 0;
@@ -707,7 +707,7 @@ impl App {
     /// Shown dimmed: named "test…", or only test shots once scanned. Only the name-based
     /// ones are hidden (by default), so scanning never removes rows from the list.
     pub fn is_test_sample(&self, date: &str, name: &str) -> bool {
-        layout::is_test_name(name) || self.info(date, name).is_some_and(SampleInfo::test_shots_only)
+        (!self.cfg.nas && layout::is_test_name(name)) || self.info(date, name).is_some_and(SampleInfo::test_shots_only)
     }
 
     /// After the rows changed, put the highlight back on the same beamtime or sample.
@@ -729,7 +729,7 @@ impl App {
         let mut rows = vec![AlbaRow::Up];
         if let Some(names) = self.cache.experiments.get(date).and_then(|e| e.samples.as_ref()) {
             for n in names {
-                if self.show_test || !layout::is_test_name(n) {
+                if self.cfg.nas || self.show_test || !layout::is_test_name(n) {
                     rows.push(AlbaRow::Sample {
                         date: date.clone(),
                         name: n.clone(),
@@ -759,7 +759,9 @@ impl App {
             }
         }
         for ri in 0..info.runs.len() {
-            rows.push(StatsRow::Frames { run: ri });
+            if !info.runs[ri].solves.iter().any(|s| s.kind == crate::model::SolveKind::Archive) {
+                rows.push(StatsRow::Frames { run: ri });
+            }
         }
         rows
     }
@@ -1062,9 +1064,9 @@ impl App {
                         Some(p) => format!("set remote_root in {}", p.display()),
                         None => "set remote_root in config.toml".into(),
                     };
-                    self.alba_note = Some(format!(
-                        "No beamtime folders (YYYYMMDD) in {home}. If your data is elsewhere, {hint}."
-                    ));
+                    self.alba_note = Some(if self.cfg.nas {
+                        format!("No archive folders or supported metadata in {home}. Check remote_root and permissions.")
+                    } else { format!("No beamtime folders (YYYYMMDD) in {home}. If your data is elsewhere, {hint}.") });
                     self.say(
                         LineKind::Warn,
                         format!("no beamtime folders in {home}; it contains: {}", shown.join(", ")),
@@ -1144,7 +1146,7 @@ impl App {
                 self.cache_dirty = true;
                 if !baseline {
                     for n in names.iter().filter(|n| !old.contains(n)) {
-                        if layout::is_test_name(n) {
+                        if !self.cfg.nas && layout::is_test_name(n) {
                             continue;
                         }
                         self.console
@@ -2909,6 +2911,7 @@ mod live {
                 known_hosts: Some(std::env::temp_dir().join("amanece_live_known_hosts")),
                 beamlines: vec!["bl13".into(), "bl06".into()],
                 remote_root: None,
+                nas: false,
                 parallel_downloads: 3,
             },
             tx.clone(),
@@ -3078,6 +3081,7 @@ mod trash_check {
                 known_hosts: None,
                 beamlines: vec!["bl13".into(), "bl06".into()],
                 remote_root: None,
+                nas: false,
                 parallel_downloads: 3,
             },
             tx.clone(),
@@ -3127,6 +3131,7 @@ mod poll_tests {
                 known_hosts: None,
                 beamlines: vec!["bl13".into(), "bl06".into()],
                 remote_root: None,
+                nas: false,
                 parallel_downloads: 3,
             },
             tx.clone(),
@@ -3189,6 +3194,7 @@ mod login_tests {
                 known_hosts: None,
                 beamlines: vec!["bl13".into()],
                 remote_root: None,
+                nas: false,
                 parallel_downloads: 3,
             },
             tx.clone(),

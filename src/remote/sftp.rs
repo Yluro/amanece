@@ -57,6 +57,7 @@ impl Limiter {
 pub struct Entry {
     pub name: String,
     pub is_dir: bool,
+    pub is_symlink: bool,
     pub size: Option<u64>,
     pub mtime: Option<u32>,
 }
@@ -74,6 +75,7 @@ pub struct ReadOnlySftp {
     root: String,
     /// Proposal folders holding beamtimes, relative to `root` (`""` = the root itself).
     proposals: Vec<String>,
+    pub nas_id: Option<String>,
 }
 
 impl ReadOnlySftp {
@@ -84,6 +86,7 @@ impl ReadOnlySftp {
             limiter,
             downloads,
             root: "/".into(),
+            nas_id: None,
             proposals: vec![String::new()],
         }
     }
@@ -158,6 +161,36 @@ impl ReadOnlySftp {
         Ok(())
     }
 
+    pub fn configure_nas(&mut self, host: &str, port: u16, root: &str) -> Result<()> {
+        super::nas::validate_root(root)?;
+        self.root = root.trim_end_matches('/').to_string();
+        self.nas_id = Some(super::nas::source_id(host, port, &self.root));
+        Ok(())
+    }
+
+    /// Check resolved paths too: a symlink must not escape the selected archive.
+    async fn check_nas_path(&self, path: &str) -> Result<()> {
+        if self.nas_id.is_none() {
+            return Ok(());
+        }
+        super::nas::validate_relative(path.trim_start_matches('/'))?;
+        self.limiter.acquire().await;
+        let resolved = self.inner.canonicalize(self.full(path)).await?;
+        anyhow::ensure!(resolved == self.root || resolved.starts_with(&format!("{}/", self.root)),
+            "path is outside the NAS archive: {path}");
+        Ok(())
+    }
+
+    /// Only a bounded header is read, even for large reflection files.
+    pub async fn read_prefix(&self, path: &str, max_bytes: u64) -> Result<Vec<u8>> {
+        let mut r = self.open_read(path).await?;
+        let mut buf = Vec::new();
+        let result = (&mut r.file).take(max_bytes).read_to_end(&mut buf).await;
+        r.close().await;
+        result?;
+        Ok(buf)
+    }
+
     pub fn proposals(&self) -> &[String] {
         &self.proposals
     }
@@ -194,6 +227,7 @@ impl ReadOnlySftp {
 
     /// Lists a folder given relative to the root (`/20251211/...`).
     pub async fn list(&self, path: &str) -> Result<Vec<Entry>> {
+        self.check_nas_path(path).await?;
         self.list_abs(&self.full(path)).await
     }
 
@@ -214,6 +248,7 @@ impl ReadOnlySftp {
                 Entry {
                     name: e.file_name(),
                     is_dir: md.is_dir(),
+                    is_symlink: md.is_symlink(),
                     size: md.size,
                     mtime: md.mtime,
                 }
@@ -255,6 +290,7 @@ impl ReadOnlySftp {
     }
 
     async fn open_with(&self, limiter: &Limiter, path: &str) -> Result<RemoteReader> {
+        self.check_nas_path(path).await?;
         limiter.acquire().await;
         let file = self
             .inner

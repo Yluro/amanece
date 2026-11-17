@@ -77,6 +77,8 @@ pub struct Config {
     pub beamlines: Vec<String>,
     /// Proposal folder on the server, if automatic detection doesn't find it.
     pub remote_root: Option<String>,
+    /// Opt-in generic archive layout; requires an explicit absolute remote_root.
+    pub nas: bool,
     /// Local folder amanece always opens in, wherever it was started from.
     pub default_folder: Option<String>,
     /// Limits for the checkCIF-style alerts in the Stats panel.
@@ -109,6 +111,7 @@ impl Default for Config {
             parallel_downloads: 3,
             beamlines: vec!["bl13".into(), "bl06".into()],
             remote_root: None,
+            nas: false,
             default_folder: None,
             checkcif: crate::checkcif::Limits::default(),
             cell_match_pct: 1.5,
@@ -153,6 +156,8 @@ parallel_downloads = 3
 # on each of these beamlines (bl13 = XALOC, bl06 = XAIRA)
 beamlines = ["bl13", "bl06"]
 # remote_root = "/bl13/projects/cycle2026-I/<account digits>-<pi>"
+# For a generic SFTP archive: nas = true, remote_root = "/data/XRay"
+nas = false
 
 # Local folder amanece always opens in, wherever it was started from. Unset, it opens
 # where it was when it was last closed (and the folder it was started in the first time).
@@ -183,6 +188,16 @@ rint = [10.0, 15.0, 20.0]
 "#;
 
 impl Config {
+    /// Keep NAS caches separate from ALBA and from other roots on the same server.
+    pub fn cache_host(&self) -> String {
+        if self.nas {
+            format!("nas:{}:{}:{}", self.host, self.port,
+                self.remote_root.as_deref().unwrap_or("").trim_end_matches('/'))
+        } else {
+            self.host.clone()
+        }
+    }
+
     pub fn dir() -> Option<PathBuf> {
         let dir = directories::ProjectDirs::from("", "", "amanece")?.config_dir().to_path_buf();
         // The app used to be called alba_watch: carry its settings and pinned host key over.

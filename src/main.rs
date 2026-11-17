@@ -45,6 +45,12 @@ struct Args {
     /// Start without the login dialog (cached data and local files only)
     #[arg(long)]
     offline: bool,
+    /// Browse a generic NAS archive instead of ALBA proposal folders
+    #[arg(long)]
+    nas: bool,
+    /// Absolute SFTP archive path (required for NAS mode)
+    #[arg(long)]
+    remote_root: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -55,6 +61,16 @@ fn main() -> Result<()> {
     }
     if let Some(p) = args.port {
         cfg.port = p;
+    }
+    if args.nas {
+        cfg.nas = true;
+    }
+    if let Some(root) = args.remote_root {
+        cfg.remote_root = Some(root);
+    }
+    if cfg.nas {
+        remote::nas::validate_root(cfg.remote_root.as_deref().unwrap_or(""))?;
+        cfg.check_updates = false; // Do not replace this local build with an upstream release.
     }
     let base = local::strip_verbatim(std::env::current_dir()?.canonicalize()?);
 
@@ -73,6 +89,7 @@ fn main() -> Result<()> {
             known_hosts: config::Config::known_hosts_path(),
             beamlines: cfg.beamlines.clone(),
             remote_root: cfg.remote_root.clone(),
+            nas: cfg.nas,
             parallel_downloads: cfg.parallel_downloads,
         },
         tx.clone(),

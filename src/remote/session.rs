@@ -116,6 +116,7 @@ pub struct Target<'a> {
     pub beamlines: &'a [String],
     /// Config override for the proposal folder.
     pub remote_root: Option<&'a str>,
+    pub nas: bool,
 }
 
 /// russh drops the session when it renegotiates keys in the middle of a transfer
@@ -234,9 +235,14 @@ pub async fn connect_with(
         .await
         .map_err(|e| other(&e))?;
     let mut sftp = ReadOnlySftp::new(sftp, t.limiter.clone());
-    sftp.locate_proposals(user, t.beamlines, t.remote_root)
-        .await
-        .map_err(|e| ConnectError::Other(format!("cannot find the proposal folder: {e:#}")))?;
+    if t.nas {
+        sftp.configure_nas(t.host, t.port, t.remote_root.unwrap_or(""))
+            .map_err(|e| ConnectError::Other(e.to_string()))?;
+    } else {
+        sftp.locate_proposals(user, t.beamlines, t.remote_root)
+            .await
+            .map_err(|e| ConnectError::Other(format!("cannot find the proposal folder: {e:#}")))?;
+    }
     Ok((
         Connection {
             handle,

@@ -130,6 +130,7 @@ pub struct Settings {
     pub known_hosts: Option<PathBuf>,
     pub beamlines: Vec<String>,
     pub remote_root: Option<String>,
+    pub nas: bool,
     /// Bulk download workers (frames); clamped to 1..=MAX_PARALLEL_DOWNLOADS.
     pub parallel_downloads: usize,
 }
@@ -258,6 +259,7 @@ async fn command_loop(
         limiter,
         beamlines: &settings.beamlines,
         remote_root: settings.remote_root.as_deref(),
+        nas: settings.nas,
     };
     let mut conn: Option<Connection> = None;
     let mut creds: Option<(String, String)> = None;

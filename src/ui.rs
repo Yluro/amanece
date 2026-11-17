@@ -231,7 +231,7 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
         area,
         ..ListHit::default()
     };
-    let mut t = title("ALBA", focused);
+    let mut t = title(if app.cfg.nas { "NAS" } else { "ALBA" }, focused);
     t.spans.push(conn_label(app));
     t.spans.push(Span::raw(" "));
     let root = app.remote_root.clone().unwrap_or_else(|| "/".into());
@@ -283,7 +283,7 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
                     let colour = if bl == "XAIRA" { Color::LightMagenta } else { Color::LightCyan };
                     spans.push(Span::raw(format!("{bl:<6} ")).fg(colour).bold());
                 }
-                spans.push(Span::raw(format!("{}/", layout::beamtime_date(d))).fg(Color::LightBlue).bold());
+                spans.push(Span::raw(format!("{}/", if app.cfg.nas { layout::beamtime_label(d) } else { layout::beamtime_date(d).to_string() })).fg(Color::LightBlue).bold());
                 spans.push(Span::raw(count).fg(Color::DarkGray));
                 ListItem::new(Line::from(spans))
             }
@@ -417,7 +417,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         let block = panel(title("Stats", focused), focused, &[]);
         let text = match selected {
             Some(AlbaRow::Date(d)) => date_summary(app, &d),
-            _ => vec![Line::from("Select a sample in the ALBA panel.").fg(Color::DarkGray)],
+            _ => vec![Line::from("Select a sample in the remote panel.").fg(Color::DarkGray)],
         };
         f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), area);
         return;
@@ -1946,7 +1946,7 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                 let outer = Rect::new(r.x, area.y + (area.height - total) / 2, r.width, total);
                 r.y = outer.y + BANNER.len() as u16 + 1;
                 f.render_widget(Clear, outer);
-                f.render_widget(dialog_block("Connect to ALBA"), outer);
+                f.render_widget(dialog_block(if app.cfg.nas { "Connect to NAS" } else { "Connect to ALBA" }), outer);
                 let b = Rect::new(outer.x + (outer.width - BANNER_W) / 2, outer.y + 1, BANNER_W, BANNER.len() as u16);
                 f.render_widget(Paragraph::new(banner_lines()), b);
             } else {
@@ -2036,7 +2036,7 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                 let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
                 f.render_widget(Paragraph::new(lines), inner);
             } else {
-                f.render_widget(Paragraph::new(lines).block(dialog_block("Connect to ALBA")), r);
+                f.render_widget(Paragraph::new(lines).block(dialog_block(if app.cfg.nas { "Connect to NAS" } else { "Connect to ALBA" })), r);
             }
             if !l.busy {
                 let (y, len) = match l.field {
@@ -2759,6 +2759,35 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    #[test]
+    fn nas_metadata_renders_without_raw_frames_or_pipeline_quality() {
+        let base = std::env::temp_dir().join(format!("amanece_nas_ui_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        app.cfg.nas = true;
+        let date = "nas-fixture/user";
+        let mut solve = Solve::new(SolveKind::Archive, "/user/sample.res", 1);
+        solve.status = Status::Done;
+        solve.stats = Some(crate::remote::nas::parse_header("sample.res", "CELL 1 10 20 30 90 100 90\nLATT -7").unwrap());
+        solve.hkl = vec![RemoteFile::new("/user/sample.res", Some(50))];
+        let info = SampleInfo { name: "sample.res".into(), scanned_at: 0, runs: vec![Run {
+            prefix: "sample.res".into(), run: 1, characterisation: false, solves: vec![solve],
+        }] };
+        assert!(crate::rank::best(&info).is_none());
+        app.cache.set_dates(vec![date.into()]);
+        let exp = app.cache.experiment_mut(date);
+        exp.samples = Some(vec![info.name.clone()]);
+        exp.infos.insert(info.name.clone(), info);
+        app.alba_date = Some(date.into());
+        app.alba_sel = 1;
+        app.stats_sel = 0;
+        app.focus = Focus::Stats;
+        let screen = render(&app, 180, 45);
+        assert!(screen.contains("NAS") && screen.contains("archive") && screen.contains("sample.res"), "{screen}");
+        assert!(!screen.contains("Raw frames"), "{screen}");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     fn fixture_stats(name: &str, kind: SolveKind) -> crate::model::Stats {
         let xml = std::fs::read_to_string(format!("{}/docs/server_samples/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap();
         crate::ispyb::parse(&xml, matches!(kind, SolveKind::Xia2 | SolveKind::Xia2Chem)).unwrap()
@@ -2777,6 +2806,7 @@ mod tests {
                 known_hosts: None,
                 beamlines: vec!["bl13".into()],
                 remote_root: None,
+                nas: false,
                 parallel_downloads: 3,
             },
             tx.clone(),
