@@ -204,6 +204,8 @@ pub struct Experiment {
     pub date: String,
     /// Sample folder names under RESULTS; `None` until listed.
     pub samples: Option<Vec<String>>,
+    #[serde(default)]
+    pub listing_error: Option<String>,
     /// No RESULTS folder: samples sit directly in PROCESSED_DATA (2026 layout).
     #[serde(default)]
     pub flat: bool,

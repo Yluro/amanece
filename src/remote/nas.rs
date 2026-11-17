@@ -6,9 +6,6 @@ use anyhow::{Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
 const HEADER_BYTES: u64 = 64 * 1024;
-const MAX_DIRS: usize = 2048;
-const MAX_DEPTH: usize = 16;
-const MAX_FILES: usize = 20_000;
 
 pub fn validate_root(root: &str) -> Result<()> {
     ensure!(
@@ -59,7 +56,11 @@ fn group_path(sftp: &ReadOnlySftp, date: &str) -> Result<String> {
     let group = date
         .strip_prefix(&format!("{id}/"))
         .ok_or_else(|| anyhow::anyhow!("wrong NAS source"))?;
-    ensure!(visible(group), "invalid NAS group");
+    validate_relative(group)?;
+    ensure!(
+        !group.is_empty() && group.split('/').all(visible),
+        "invalid NAS group"
+    );
     Ok(format!("/{group}"))
 }
 
@@ -86,47 +87,19 @@ pub async fn list_experiments(sftp: &ReadOnlySftp) -> Result<Experiments> {
 
 pub async fn list_samples(sftp: &ReadOnlySftp, date: &str) -> Result<(Vec<String>, bool)> {
     let base = group_path(sftp, date)?;
-    let recurse = !base.is_empty();
-    let mut pending = vec![(String::new(), 0usize)];
-    let mut visited = 0;
+    let entries = sftp.list(if base.is_empty() { "/" } else { &base }).await?;
     let mut samples = Vec::new();
-    while let Some((relative, depth)) = pending.pop() {
-        visited += 1;
-        ensure!(
-            visited <= MAX_DIRS,
-            "NAS scan exceeds {MAX_DIRS} folders; choose a narrower remote_root"
-        );
-        let path = format!("{base}/{relative}");
-        let path = if path == "/" {
-            path
-        } else {
-            path.trim_end_matches('/').to_string()
-        };
-        for e in sftp.list(&path).await? {
-            if e.is_symlink || !visible(&e.name) {
-                continue;
-            }
-            let child = if relative.is_empty() {
-                e.name
-            } else {
-                format!("{relative}/{}", e.name)
-            };
-            if e.is_dir && recurse {
-                ensure!(
-                    depth < MAX_DEPTH,
-                    "NAS scan exceeds depth {MAX_DEPTH}; choose a narrower remote_root"
-                );
-                pending.push((child, depth + 1));
-            } else if !e.is_dir && metadata(&child.rsplit('/').next().unwrap_or(&child)) {
-                samples.push(child);
-                ensure!(
-                    samples.len() <= MAX_FILES,
-                    "too many NAS metadata files; choose a narrower remote_root"
-                );
-            }
+    for e in entries {
+        if e.is_symlink || !visible(&e.name) {
+            continue;
+        }
+        if e.is_dir {
+            samples.push(format!("{}/", e.name));
+        } else if metadata(&e.name) {
+            samples.push(e.name);
         }
     }
-    samples.sort();
+    samples.sort_by(|a, b| b.ends_with('/').cmp(&a.ends_with('/')).then(a.cmp(b)));
     Ok((samples, false))
 }
 
@@ -374,21 +347,58 @@ mod live {
         let sftp = &conn.sftp;
         let listed = super::super::scan::list_experiments(sftp).await.unwrap();
         let id = sftp.nas_id.as_ref().unwrap();
-        let date = if group.is_empty() {
+        let mut date = if group.is_empty() {
             id.clone()
         } else {
             format!("{id}/{group}")
         };
         assert!(listed.ids.contains(&date));
-        let (samples, _) = super::super::scan::list_samples(sftp, &date).await.unwrap();
-        assert!(samples.contains(&sample));
+        if std::env::var("NAS_PROBE_ALL_FOLDERS").is_ok() {
+            for folder in &listed.ids {
+                let start = std::time::Instant::now();
+                let (entries, _) = super::super::scan::list_samples(sftp, folder)
+                    .await
+                    .unwrap();
+                println!(
+                    "Immediate folder listing: {} entries in {:.2}s",
+                    entries.len(),
+                    start.elapsed().as_secs_f64()
+                );
+            }
+        }
+        let count = target
+            .limiter
+            .count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let (mut samples, _) = super::super::scan::list_samples(sftp, &date).await.unwrap();
+        assert_eq!(
+            target
+                .limiter
+                .count
+                .load(std::sync::atomic::Ordering::Relaxed)
+                - count,
+            2,
+            "opening a folder must only resolve/list that directory, not walk descendants"
+        );
         if let Ok(expected) = std::env::var("NAS_EXPECT_FILES") {
             assert_eq!(samples.len(), expected.parse::<usize>().unwrap());
         }
         if let Ok(forbidden) = std::env::var("NAS_FORBIDDEN_PATH") {
             assert!(sftp.read_prefix(&forbidden, 1).await.is_err());
         }
-        let info = super::super::scan::scan_sample(sftp, &date, &sample, false, None, |_| {})
+        let mut components = sample.split('/').peekable();
+        let mut basename = "";
+        while let Some(component) = components.next() {
+            if components.peek().is_some() {
+                assert!(samples.contains(&format!("{component}/")));
+                date = format!("{date}/{component}");
+                (samples, _) = super::super::scan::list_samples(sftp, &date).await.unwrap();
+            } else {
+                basename = component;
+            }
+        }
+        assert!(samples.contains(&basename.to_string()));
+        let info = super::super::scan::scan_sample(sftp, &date, basename, false, None, |_| {})
             .await
             .unwrap();
         let (solve, cell) = crate::cells::sample_cell(&info).expect("indexed cell");

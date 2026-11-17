@@ -41,14 +41,17 @@ build with an upstream binary that lacks this feature.
 ## Browse and download
 
 The NAS panel shows the root's immediate subfolders as archive groups. Open a
-group to list supported metadata files recursively. Metadata files directly in
-the root appear in a separate **Archive root** group. A sample row is the
-relative path to one metadata file, preserving separate cells even when several
+group to list only its immediate subfolders and supported metadata files.
+Enter opens a subfolder; Left/Backspace goes to its parent. No recursive scan
+runs when opening a folder, so a large tree does not block navigation. Empty
+folders and listing failures have explicit messages; `r` retries a failed listing.
+Metadata files directly in the root appear in a separate **Archive root** group.
+A sample row is one metadata file, preserving separate cells even when several
 crystals share a folder. `.ins` and `.res` variants remain separate entries;
 they can appear as similar-cell matches.
 
 Select a file to read its cell; `S` fetches metadata for the group's unscanned
-files, `s` rescans the selected file, and `r` refreshes folder listings. Already
+files in that directory (not its subfolders), `s` rescans the selected file, and `r` refreshes folder listings. Already
 indexed archive files may change: use `s` to refresh their metadata. The existing
 cell database and matching UI work with these records, and caches are separated
 by mode, host, port and root. Archive source IDs also keep cell database entries
@@ -73,9 +76,11 @@ No raw-frame discovery or bulk frame download is offered in this mode.
 Each metadata scan reads at most 64 KiB, using the existing request limiter.
 Hidden/system directories and symlinks are skipped. Resolved paths are checked
 against the selected root. Server-side permissions remain the security boundary.
-Listings fail explicitly at 2,048 directories, depth 16 or 20,000 metadata files;
-choose a narrower root if a limit is reached. Inaccessible directories are
-reported as errors rather than silently presenting a complete archive.
+Each folder opening issues just a path check and one directory listing, independent
+of the size of its descendant tree. Inaccessible directories are reported as
+errors rather than leaving an indefinite loading indicator. Nested folder caches
+survive a refresh of the archive root. The old recursive-list cache is kept in a
+separate namespace and is not reused by this version.
 
 CIF-only datasets, zipped archives and arbitrary detector formats are not indexed
 in this initial patch. Missing/invalid cells or unknown centring are reported,

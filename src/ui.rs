@@ -236,6 +236,10 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     t.spans.push(Span::raw(" "));
     let root = app.remote_root.clone().unwrap_or_else(|| "/".into());
     let path = match &app.alba_date {
+        Some(d) if app.cfg.nas => match d.split_once('/') {
+            Some((_, relative)) => format!("{}/{relative}", root.trim_end_matches('/')),
+            None => root.clone(),
+        },
         // beamline-tree accounts: the id is the path under /
         Some(d) if d.contains('/') => format!("/{d}"),
         Some(d) => format!("{}/{d}", root.trim_end_matches('/')),
@@ -244,7 +248,9 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     };
     let room = area.width.saturating_sub(28) as usize;
     t.spans.push(Span::raw(format!("{} ", shorten(&path, room))).fg(Color::Gray));
-    let keys: &[(&str, &str)] = if app.alba_date.is_some() {
+    let keys: &[(&str, &str)] = if app.cfg.nas && app.alba_date.is_some() {
+        &[("⏎", "open"), ("←", "back"), ("S", "scan files here")]
+    } else if app.alba_date.is_some() {
         &[("⏎", "stats"), ("←", "back"), ("S", "scan all")]
     } else {
         &[("⏎", "open"), ("r", "refresh")]
@@ -265,7 +271,7 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     let listing = app
         .alba_date
         .as_ref()
-        .is_some_and(|d| app.cache.experiments.get(d).is_some_and(|e| e.samples.is_none()));
+        .is_some_and(|d| app.cache.experiments.get(d).is_some_and(|e| e.samples.is_none() && e.listing_error.is_none()));
     let mut items: Vec<ListItem> = rows
         .iter()
         .map(|r| match r {
@@ -294,6 +300,13 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
         items.push(ListItem::new(Line::from("  listing…").fg(Color::DarkGray)));
     }
     let rows = block.inner(area);
+    if let Some(exp) = app.alba_date.as_ref().and_then(|d| app.cache.experiments.get(d)) {
+        if let Some(error) = &exp.listing_error {
+            items.push(ListItem::new(Line::from(format!("  Cannot list: {error}. Press r to retry.")).fg(Color::Red)));
+        } else if app.cfg.nas && exp.samples.as_ref().is_some_and(Vec::is_empty) {
+            items.push(ListItem::new(Line::from("  No subfolders or supported metadata here.").fg(Color::DarkGray)));
+        }
+    }
     let list = List::new(items)
         .block(block)
         .highlight_style(highlight(focused));
@@ -347,6 +360,9 @@ fn local_mark(app: &App, date: &str, name: &str) -> Option<LocalMark> {
 }
 
 fn sample_item(app: &App, date: &str, name: &str, width: usize) -> ListItem<'static> {
+    if app.cfg.nas && name.ends_with('/') {
+        return ListItem::new(Line::from(format!("  {name}")).fg(Color::LightBlue).bold());
+    }
     let mark = match local_mark(app, date, name) {
         Some(LocalMark::Downloaded) => Span::raw("◆").green(),
         Some(LocalMark::SameName) => Span::raw("◆").yellow(),
@@ -2785,6 +2801,44 @@ mod tests {
         let screen = render(&app, 180, 45);
         assert!(screen.contains("NAS") && screen.contains("archive") && screen.contains("sample.res"), "{screen}");
         assert!(!screen.contains("Raw frames"), "{screen}");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn nas_folder_navigation_cache_and_listing_errors() {
+        use ratatui::crossterm::event::KeyCode;
+        let base = std::env::temp_dir().join(format!("amanece_nas_nav_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        app.cfg.nas = true;
+        app.remote_root = Some("/data/XRay".into());
+        let parent = "nas-fixture/user";
+        let child = "nas-fixture/user/work";
+        app.cache.set_dates(vec![parent.into()]);
+        app.cache.experiment_mut(parent).samples = Some(vec!["work/".into()]);
+        app.cache.experiment_mut(child).samples = Some(vec!["latest.res".into()]);
+        app.alba_date = Some(parent.into());
+        app.alba_sel = 1;
+        app.focus = Focus::Alba;
+        assert!(app.selected_sample().is_none());
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.alba_date.as_deref(), Some(child));
+        assert_eq!(app.focus, Focus::Alba);
+        assert!(render(&app, 180, 45).contains("/data/XRay/user/work"));
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.alba_date.as_deref(), Some(parent));
+        assert!(app.selected_sample().is_none());
+        app.cache.set_dates(vec![parent.into()]);
+        assert!(app.cache.experiments.contains_key(child));
+        app.cache.experiment_mut(parent).samples = Some(vec![]);
+        assert!(render(&app, 180, 45).contains("No subfolders or supported metadata"));
+        app.cache.experiment_mut(parent).samples = None;
+        app.handle(crate::event::AppEvent::Remote(crate::remote::RemoteEvent::SamplesFailed {
+            date: parent.into(), message: "permission denied".into(),
+        }));
+        let screen = render(&app, 180, 45);
+        assert!(screen.contains("permission denied"));
+        assert!(!screen.contains("listing…"));
         std::fs::remove_dir_all(base).unwrap();
     }
 

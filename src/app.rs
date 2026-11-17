@@ -746,7 +746,8 @@ impl App {
 
     pub fn selected_sample(&self) -> Option<(String, String)> {
         match self.selected_row()? {
-            AlbaRow::Sample { date, name } => Some((date, name)),
+            AlbaRow::Sample { date, name } if !(self.cfg.nas && name.ends_with('/')) => Some((date, name)),
+            AlbaRow::Sample { .. } => None,
             AlbaRow::Date(_) | AlbaRow::Up => None,
         }
     }
@@ -788,6 +789,7 @@ impl App {
         if !self.connected() {
             return;
         }
+        if self.cfg.nas && sample.ends_with('/') { return; }
         let key = (date.to_string(), sample.to_string());
         if !background && self.scanning.contains(&key) {
             return;
@@ -1129,6 +1131,11 @@ impl App {
                 self.alba_note = Some(format!("Listing beamtimes failed: {message}"));
                 self.say(LineKind::Error, format!("listing beamtimes failed: {message}"));
             }
+            RemoteEvent::SamplesFailed { date, message } => {
+                let exp = self.cache.experiment_mut(&date);
+                exp.listing_error = Some(message.clone());
+                self.say(LineKind::Error, message);
+            }
             RemoteEvent::Samples {
                 date,
                 mut names,
@@ -1136,17 +1143,18 @@ impl App {
                 from_poll,
             } => {
                 let prev = self.selected_row();
-                names.sort_by_key(|n| n.to_lowercase());
+                names.sort_by_key(|n| (self.cfg.nas && !n.ends_with('/'), n.to_lowercase()));
                 let baseline = self.listed_this_session.insert(date.clone());
                 let exp = self.cache.experiment_mut(&date);
                 let old = exp.samples.clone().unwrap_or_default();
                 exp.infos.retain(|k, _| names.contains(k));
                 exp.samples = Some(names.clone());
+                exp.listing_error = None;
                 exp.flat = flat;
                 self.cache_dirty = true;
                 if !baseline {
                     for n in names.iter().filter(|n| !old.contains(n)) {
-                        if !self.cfg.nas && layout::is_test_name(n) {
+                        if (self.cfg.nas && n.ends_with('/')) || (!self.cfg.nas && layout::is_test_name(n)) {
                             continue;
                         }
                         self.console
@@ -2126,6 +2134,10 @@ impl App {
             Some(AlbaRow::Date(d)) => self.open_date(&d),
             Some(AlbaRow::Up) => self.close_date(),
             Some(AlbaRow::Sample { date, name }) => {
+                if self.cfg.nas && name.ends_with('/') {
+                    self.open_date(&format!("{date}/{}", name.trim_end_matches('/')));
+                    return;
+                }
                 if self.info(&date, &name).is_none() {
                     self.request_scan(&date, &name, false);
                 }
@@ -2160,6 +2172,16 @@ impl App {
         let Some(date) = self.alba_date.take() else {
             return;
         };
+        if self.cfg.nas {
+            if let Some((parent, child)) = date.rsplit_once('/') {
+                if !self.cache.dates.contains(&date) {
+                    self.open_date(parent);
+                    self.alba_sel = self.alba_rows().iter().position(|row| matches!(row,
+                        AlbaRow::Sample { name, .. } if name == &format!("{child}/"))).unwrap_or(0);
+                    return;
+                }
+            }
+        }
         self.alba_sel = self.cache.dates.iter().position(|d| *d == date).unwrap_or(0);
         self.stats_sel = 0;
     }
@@ -2198,6 +2220,7 @@ impl App {
                 AlbaRow::Sample { date: d, name } if d == date => Some(name),
                 _ => None,
             })
+            .filter(|n| !(self.cfg.nas && n.ends_with('/')))
             .filter(|n| self.info(&date, n).is_none_or(|i| i.has_running()))
             .collect();
         if todo.is_empty() {

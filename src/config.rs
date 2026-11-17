@@ -191,7 +191,7 @@ impl Config {
     /// Keep NAS caches separate from ALBA and from other roots on the same server.
     pub fn cache_host(&self) -> String {
         if self.nas {
-            format!("nas:{}:{}:{}", self.host, self.port,
+            format!("nas:browse-v2:{}:{}:{}", self.host, self.port,
                 self.remote_root.as_deref().unwrap_or("").trim_end_matches('/'))
         } else {
             self.host.clone()

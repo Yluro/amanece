@@ -115,6 +115,7 @@ pub enum RemoteEvent {
     SampleProgress { date: String, info: SampleInfo },
     SampleScanned { date: String, info: SampleInfo },
     ScanFailed { date: String, sample: String, message: String },
+    SamplesFailed { date: String, message: String },
     Frames { date: String, sample: String, files: Vec<RemoteFile> },
     Download(DownloadEvent),
     /// Something worth a line in the console (not an error).
@@ -497,7 +498,7 @@ async fn run_op(sftp: &ReadOnlySftp, op: RemoteCmd, events: &std::sync::mpsc::Se
                 },
             ),
             Err(e) => {
-                emit(events, RemoteEvent::Error(format!("{e:#}")));
+                emit(events, RemoteEvent::SamplesFailed { date, message: format!("{e:#}") });
                 return Err(e);
             }
         },
