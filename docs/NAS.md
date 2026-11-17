@@ -23,8 +23,10 @@ Only one archive root is open per process. Alternatively set `nas = true` and
 or in command-line arguments; enter the account password in the login dialog.
 
 Employees need the NAS host, forwarded port, account name and password, archive
-path, and the trusted SSH host-key fingerprint. The university network restriction
-and the NAS account's server-side read-only permissions must remain in place.
+path, and the trusted SSH host-key fingerprint. Keep the NAS account's server-side
+read-only permissions in place. Router source-IP restrictions are optional and
+configured separately from the application; removing them does not remove SSH
+authentication or grant write access.
 Distribute a verified `known_hosts` entry before first login, using amanece's
 existing format (not OpenSSH's public-key format):
 
