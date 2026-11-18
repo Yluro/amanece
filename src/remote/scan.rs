@@ -1,6 +1,7 @@
 //! Walks one sample's results and fills in its solves: XALOC's EDNA layout
 //! (DESIGN.md §2.2–2.4) and XAIRA's EDNA2 folders with STATUS + all_files (§2.9).
 
+use crate::config::ServerKind;
 use super::sftp::{Entry, ReadOnlySftp};
 use crate::ispyb;
 use crate::layout::{self, DirKind, Pipeline};
@@ -20,6 +21,10 @@ pub struct Experiments {
 }
 
 pub async fn list_experiments(sftp: &ReadOnlySftp) -> Result<Experiments> {
+    match sftp.kind() {
+        ServerKind::Alba => {}
+        ServerKind::Folders => return super::nas::list_experiments(sftp).await,
+    }
     let mut ids = Vec::new();
     let mut top_names = Vec::new();
     for p in sftp.proposals().to_vec() {
@@ -37,6 +42,10 @@ pub async fn list_experiments(sftp: &ReadOnlySftp) -> Result<Experiments> {
 
 /// Sample folders of a beamtime, and whether it uses the flat 2026 layout.
 pub async fn list_samples(sftp: &ReadOnlySftp, date: &str) -> Result<(Vec<String>, bool)> {
+    match sftp.kind() {
+        ServerKind::Alba => {}
+        ServerKind::Folders => return super::nas::list_samples(sftp, date).await,
+    }
     let dirs = |v: Vec<Entry>| -> Vec<String> {
         v.into_iter()
             .filter(|e| e.is_dir && e.name != "RESULTS")
@@ -59,6 +68,10 @@ pub async fn list_frames(
     sample: &str,
     runs: &[(String, u32)],
 ) -> Result<Vec<RemoteFile>> {
+    match sftp.kind() {
+        ServerKind::Alba => {}
+        ServerKind::Folders => anyhow::bail!("frames are only found on ALBA servers"),
+    }
     let base = layout::raw_sample_dir(date, sample);
     let top = sftp.list(&base).await?;
     let mut dirs = vec![(base.clone(), top.clone())];
@@ -145,6 +158,14 @@ pub async fn scan_sample(
     known: Option<&SampleInfo>,
     mut progress: impl FnMut(&SampleInfo),
 ) -> Result<SampleInfo> {
+    match sftp.kind() {
+        ServerKind::Alba => {}
+        ServerKind::Folders => {
+            let info = super::nas::scan_sample(sftp, date, sample).await?;
+            progress(&info);
+            return Ok(info);
+        }
+    }
     let base = layout::sample_results_dir(date, sample, flat);
     let mut found = Found::default();
 
@@ -245,7 +266,7 @@ fn processed_files(kind: SolveKind) -> (Option<&'static str>, &'static [&'static
             &["fast_dp.xml", "fast_dp.log", "CORRECT.LP", "aimless.log"],
         ),
         // not seen succeed on XAIRA yet: status only
-        SolveKind::Xia2 | SolveKind::Xia2Chem | SolveKind::EdnaProc => (None, &[], &[]),
+        SolveKind::Archive | SolveKind::Xia2 | SolveKind::Xia2Chem | SolveKind::EdnaProc => (None, &[], &[]),
     }
 }
 

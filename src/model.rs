@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 /// One autoprocessing result ("solve") for one run of a sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SolveKind {
+    Archive,
     Xia2Chem,
     EdnaProc,
     AutoProcNoAnom,
@@ -24,6 +25,7 @@ impl SolveKind {
             SolveKind::AutoProcAnom => "autoPROC anom",
             SolveKind::FastDp => "fast_dp",
             SolveKind::Xia2 => "xia2",
+            SolveKind::Archive => "archive",
         }
     }
 
@@ -36,6 +38,7 @@ impl SolveKind {
             SolveKind::AutoProcAnom => "autoproc_anom",
             SolveKind::FastDp => "fastdp",
             SolveKind::Xia2 => "xia2",
+            SolveKind::Archive => "archive",
         }
     }
 }
@@ -201,6 +204,8 @@ pub struct Experiment {
     pub date: String,
     /// Sample folder names under RESULTS; `None` until listed.
     pub samples: Option<Vec<String>>,
+    #[serde(default)]
+    pub listing_error: Option<String>,
     /// No RESULTS folder: samples sit directly in PROCESSED_DATA (2026 layout).
     #[serde(default)]
     pub flat: bool,

@@ -53,9 +53,54 @@ pub fn interval_label(d: Duration) -> String {
     }
 }
 
+/// The layout of a server's folders: a facility amanece knows (`type = "alba"`), or
+/// plain folders (no `type`, or `type = "nas"`). A new facility is a new variant plus
+/// its scan code; every `match` on the type then asks for it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerKind {
+    /// Browse folders one at a time from `root` (or the login folder); cells from
+    /// SHELX and XDS headers.
+    #[default]
+    #[serde(alias = "nas")]
+    #[value(alias = "nas")]
+    Folders,
+    /// ALBA proposal folders: beamtimes by date, autoprocessing results, frames.
+    Alba,
+}
+
+impl ServerKind {
+    pub fn is_folders(self) -> bool {
+        self == ServerKind::Folders
+    }
+}
+
+/// One server the login dialog can connect to: a built-in one or a `[[servers]]` entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerProfile {
+    pub name: String,
+    pub host: String,
+    /// SFTP port, 22 unless set.
+    #[serde(default = "default_port")]
+    pub port: u16,
+    #[serde(default, rename = "type")]
+    pub kind: ServerKind,
+    /// Folders: where browsing starts (absolute SFTP path; default the login folder).
+    /// ALBA: the proposal folder, if automatic detection doesn't find it.
+    #[serde(default, alias = "remote_root")]
+    pub root: Option<String>,
+}
+
+fn default_port() -> u16 {
+    22
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// ALBA's address (old configs may still set it; new ones leave it out). After
+    /// startup: the active server's.
     pub host: String,
     pub port: u16,
     pub poll_mode: PollMode,
@@ -75,8 +120,17 @@ pub struct Config {
     /// Beamline folders searched for the proposal (`/bl13/projects/cycle*/...`):
     /// bl13 = XALOC, bl06 = XAIRA.
     pub beamlines: Vec<String>,
-    /// Proposal folder on the server, if automatic detection doesn't find it.
+    /// ALBA's proposal folder, if automatic detection doesn't find it. After startup:
+    /// the active server's `root`.
     pub remote_root: Option<String>,
+    /// The active server's type, set at startup and on every server switch.
+    #[serde(skip)]
+    pub kind: ServerKind,
+    /// How the first NAS patch described a NAS server; refused, see `Config::load`.
+    #[serde(skip_serializing)]
+    pub nas: bool,
+    /// Servers of your own (`[[servers]]` at the end of the file), after the built-in ones.
+    pub servers: Vec<ServerProfile>,
     /// Local folder amanece always opens in, wherever it was started from.
     pub default_folder: Option<String>,
     /// Limits for the checkCIF-style alerts in the Stats panel.
@@ -109,6 +163,9 @@ impl Default for Config {
             parallel_downloads: 3,
             beamlines: vec!["bl13".into(), "bl06".into()],
             remote_root: None,
+            kind: ServerKind::Alba,
+            nas: false,
+            servers: Vec::new(),
             default_folder: None,
             checkcif: crate::checkcif::Limits::default(),
             cell_match_pct: 1.5,
@@ -120,8 +177,7 @@ impl Default for Config {
 }
 
 const TEMPLATE: &str = r#"# amanece configuration. Credentials are never stored here.
-host = "userdata.cells.es"
-port = 443
+# ALBA is built in; servers of your own go in [[servers]] at the end of this file.
 
 # "manual", "slow", "fast", "30s" or "5s" at startup (cycle with `p` in the app).
 # At 30 s / 5 s a poll only re-lists the open beamtime; the beamtime list and
@@ -148,7 +204,7 @@ burst = 6
 # always get a slot of their own on top and never wait behind frames
 parallel_downloads = 3
 
-# Where the beamtime folders (YYYYMMDD) live. Normally found automatically:
+# ALBA: where the beamtime folders (YYYYMMDD) live. Normally found automatically:
 # either the login folder itself, or /<beamline>/projects/cycle*/<account digits>-<pi>
 # on each of these beamlines (bl13 = XALOC, bl06 = XAIRA)
 beamlines = ["bl13", "bl06"]
@@ -180,9 +236,85 @@ sin_theta_lambda = [0.590, 0.575, 0.550]
 completeness = [99.0, 97.0, 95.0]
 # RINTA01: Rint in %, above; compared with the overall Rmerge (Rmeas if no Rmerge)
 rint = [10.0, 15.0, 20.0]
+
+# Servers of your own, offered in the login dialog after the built-in ALBA (←→ in its
+# first row picks one). Put them at the END of the file: any [table] after a
+# [[servers]] entry belongs to that entry.
+#   type: a facility amanece knows ("alba"), or leave it out (or "nas") to browse
+#         plain folders: any SFTP server, cells read from SHELX and XDS files
+#   root: where browsing starts (absolute SFTP path); default the login folder
+#   port: 22 unless set
+#
+# [[servers]]
+# name = "xray-nas"
+# host = "nas.example.org"
+# port = 22222
+# root = "/data/XRay"
 "#;
 
 impl Config {
+    /// Servers amanece knows without any config, each with its layout in code; a new
+    /// facility adds its entry here. Old configs' top-level `host`/`port`/`remote_root`
+    /// still point ALBA elsewhere.
+    pub fn builtin_servers(&self) -> Vec<ServerProfile> {
+        vec![ServerProfile {
+            name: "ALBA".into(),
+            host: self.host.clone(),
+            port: self.port,
+            kind: ServerKind::Alba,
+            root: self.remote_root.clone(),
+        }]
+    }
+
+    /// The servers the login dialog offers: the built-in ones, then `[[servers]]`.
+    pub fn server_list(&self) -> Vec<ServerProfile> {
+        let mut list = self.builtin_servers();
+        list.extend(self.servers.iter().cloned());
+        list
+    }
+
+    /// Makes `p` the active server: the fields the rest of the app reads.
+    pub fn apply(&mut self, p: &ServerProfile) {
+        self.host = p.host.clone();
+        self.port = p.port;
+        self.kind = p.kind;
+        self.remote_root = p.root.clone();
+    }
+
+    /// Each server needs a host and a name no other one has; a folders server's
+    /// `root`, if set, must be an absolute SFTP path.
+    pub fn check_servers(list: &[ServerProfile]) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for s in list {
+            anyhow::ensure!(!s.name.trim().is_empty(), "a [[servers]] entry has no name");
+            anyhow::ensure!(
+                seen.insert(s.name.as_str()),
+                "two servers are named \"{}\" (ALBA is built in)",
+                s.name
+            );
+            anyhow::ensure!(!s.host.trim().is_empty(), "server \"{}\" has no host", s.name);
+            match (s.kind, &s.root) {
+                (ServerKind::Folders, Some(root)) => crate::remote::nas::validate_root(root)
+                    .with_context(|| format!("server \"{}\"", s.name))?,
+                (ServerKind::Folders, None) | (ServerKind::Alba, _) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Caches of folder servers are kept apart per host, port and root.
+    pub fn cache_host(&self) -> String {
+        match self.kind {
+            ServerKind::Alba => self.host.clone(),
+            ServerKind::Folders => format!(
+                "nas:browse-v2:{}:{}:{}",
+                self.host,
+                self.port,
+                self.remote_root.as_deref().unwrap_or("").trim_end_matches('/')
+            ),
+        }
+    }
+
     pub fn dir() -> Option<PathBuf> {
         let dir = directories::ProjectDirs::from("", "", "amanece")?.config_dir().to_path_buf();
         // The app used to be called alba_watch: carry its settings and pinned host key over.
@@ -222,6 +354,11 @@ impl Config {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let cfg: Config =
             toml::from_str(&text).with_context(|| format!("cannot parse {}", path.display()))?;
+        anyhow::ensure!(
+            !cfg.nas,
+            "{}: `nas = true` is gone; describe the NAS as a [[servers]] entry instead (see the end of the file)",
+            path.display()
+        );
         Ok((cfg, Some(path)))
     }
 
@@ -434,5 +571,84 @@ mod tests {
         let cfg = Config::default();
         assert!(cfg.is_external("XPREP.exe"));
         assert!(!cfg.is_external("shelxt"));
+    }
+
+    #[test]
+    fn alba_is_built_in_and_servers_come_after_it() {
+        // nothing configured: ALBA alone, at its default address
+        let list = Config::default().server_list();
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0].name.as_str(), list[0].host.as_str(), list[0].port), ("ALBA", "userdata.cells.es", 443));
+        assert_eq!(list[0].kind, ServerKind::Alba);
+
+        let text = r#"
+            [[servers]]
+            name = "xray-nas"
+            host = "nas.example.org"
+            port = 22222
+            root = "/data/XRay"
+            [[servers]]
+            name = "old-style"
+            host = "h"
+            type = "nas"
+            remote_root = "/x"
+            [[servers]]
+            name = "alba-2"
+            host = "other.example.org"
+            type = "alba"
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        let list = cfg.server_list();
+        assert_eq!(
+            list.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["ALBA", "xray-nas", "old-style", "alba-2"]
+        );
+        // no type: plain folders; port 22 unless set
+        assert_eq!((list[1].kind, list[1].port, list[1].root.as_deref()), (ServerKind::Folders, 22222, Some("/data/XRay")));
+        assert_eq!((list[2].kind, list[2].port, list[2].root.as_deref()), (ServerKind::Folders, 22, Some("/x")));
+        assert_eq!(list[3].kind, ServerKind::Alba);
+        assert!(Config::check_servers(&list).is_ok());
+
+        // an old top-level host still moves the built-in ALBA
+        let cfg: Config = toml::from_str("host = \"h\"\nport = 2222\n").unwrap();
+        assert_eq!((cfg.server_list()[0].host.as_str(), cfg.server_list()[0].port), ("h", 2222));
+        // unknown keys in a server are an error, not silently ignored
+        assert!(toml::from_str::<Config>("[[servers]]\nname = \"a\"\nhost = \"h\"\nnas = true\n").is_err());
+    }
+
+    #[test]
+    fn apply_makes_a_server_the_active_one() {
+        let mut cfg = Config::default();
+        let alba = cfg.cache_host();
+        cfg.apply(&ServerProfile {
+            name: "xray-nas".into(),
+            host: "nas.example.org".into(),
+            port: 22222,
+            kind: ServerKind::Folders,
+            root: Some("/data/XRay".into()),
+        });
+        assert_eq!((cfg.host.as_str(), cfg.port, cfg.kind), ("nas.example.org", 22222, ServerKind::Folders));
+        assert_eq!(cfg.remote_root.as_deref(), Some("/data/XRay"));
+        assert!(cfg.cache_host().starts_with("nas:") && cfg.cache_host() != alba);
+    }
+
+    #[test]
+    fn server_names_must_be_unique_and_present() {
+        let p = |name: &str, host: &str| ServerProfile {
+            name: name.into(),
+            host: host.into(),
+            port: 22,
+            kind: ServerKind::Folders,
+            root: None,
+        };
+        assert!(Config::check_servers(&[p("a", "h"), p("a", "h2")]).is_err());
+        assert!(Config::check_servers(&Config::default().server_list().into_iter().chain([p("ALBA", "h")]).collect::<Vec<_>>()).is_err());
+        assert!(Config::check_servers(&[p("", "h")]).is_err());
+        assert!(Config::check_servers(&[p("a", " ")]).is_err());
+        // a folders server's root is optional, but absolute when set
+        let rooted = |root: &str| ServerProfile { root: Some(root.into()), ..p("x", "h") };
+        assert!(Config::check_servers(&[p("x", "h")]).is_ok());
+        assert!(Config::check_servers(&[rooted("data")]).is_err());
+        assert!(Config::check_servers(&[rooted("/data/XRay")]).is_ok());
     }
 }

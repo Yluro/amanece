@@ -1,6 +1,7 @@
 //! SSH connection, host-key pinning (trust on first use) and password login.
 
 use super::sftp::{Limiter, ReadOnlySftp};
+use crate::config::ServerKind;
 use russh::client::{self, AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{HashAlg, PublicKeyOrCertificate};
 use russh::MethodKind;
@@ -116,6 +117,7 @@ pub struct Target<'a> {
     pub beamlines: &'a [String],
     /// Config override for the proposal folder.
     pub remote_root: Option<&'a str>,
+    pub kind: ServerKind,
 }
 
 /// russh drops the session when it renegotiates keys in the middle of a transfer
@@ -234,9 +236,16 @@ pub async fn connect_with(
         .await
         .map_err(|e| other(&e))?;
     let mut sftp = ReadOnlySftp::new(sftp, t.limiter.clone());
-    sftp.locate_proposals(user, t.beamlines, t.remote_root)
-        .await
-        .map_err(|e| ConnectError::Other(format!("cannot find the proposal folder: {e:#}")))?;
+    match t.kind {
+        ServerKind::Alba => sftp
+            .locate_proposals(user, t.beamlines, t.remote_root)
+            .await
+            .map_err(|e| ConnectError::Other(format!("cannot find the proposal folder: {e:#}")))?,
+        ServerKind::Folders => sftp
+            .configure_nas(t.host, t.port, t.remote_root)
+            .await
+            .map_err(|e| ConnectError::Other(format!("{e:#}")))?,
+    }
     Ok((
         Connection {
             handle,

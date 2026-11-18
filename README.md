@@ -286,3 +286,9 @@ ALBA_USER=… ALBA_PASS=… cargo test live_ -- --ignored --nocapture
 ALBA_USER=… ALBA_PASS=… ALBA_DATE=… ALBA_SAMPLE=… ALBA_FRAMES_N=9 ALBA_DOWNLOAD=1 AMANECE_REKEY_MB=16 \
   cargo test --release live_app_flow -- --ignored --nocapture
 ```
+
+## Generic NAS archives (local branch)
+
+Add the archive as a `[[servers]]` entry in `config.toml` (or use `--nas --root /path/to/archive`)
+to browse a read-only SFTP archive next to the built-in ALBA server.
+See [NAS setup, supported formats and tests](docs/NAS.md).

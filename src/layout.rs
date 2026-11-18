@@ -159,7 +159,11 @@ pub fn frame_belongs(path: &str, prefix: &str, run: u32) -> bool {
 /// Beamtime ids are paths relative to the SFTP root: `20251211` for proposal accounts,
 /// `bl06/projects/cycle2026-I/<proposal>/20260711` for beamline-tree accounts.
 pub fn beamtime_date(id: &str) -> &str {
-    id.rsplit('/').next().unwrap_or(id)
+    if id.starts_with("nas-") {
+        id
+    } else {
+        id.rsplit('/').next().unwrap_or(id)
+    }
 }
 
 /// `XALOC`, `XAIRA` … from the id's beamline folder, if it has one.
@@ -177,6 +181,10 @@ pub fn beamline_name(id: &str) -> Option<String> {
 
 /// `XAIRA 20260711`, or just the date.
 pub fn beamtime_label(id: &str) -> String {
+    if id.starts_with("nas-") {
+        return id.split_once('/').map(|(_, group)| group.to_string())
+            .unwrap_or_else(|| "Archive root".into());
+    }
     match beamline_name(id) {
         Some(bl) => format!("{bl} {}", beamtime_date(id)),
         None => beamtime_date(id).to_string(),

@@ -155,7 +155,7 @@ impl CellDb {
     /// Adds or updates the entry of one sample from its best solve. Test samples and
     /// samples without a finished cell are skipped; hand-made entries are left alone.
     pub fn record(&mut self, beamtime: &str, info: &SampleInfo) {
-        if layout::is_test_name(&info.name) {
+        if !beamtime.starts_with("nas-") && layout::is_test_name(&info.name) {
             return;
         }
         let Some((solve, cell)) = sample_cell(info) else {

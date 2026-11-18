@@ -36,25 +36,66 @@ struct Args {
     /// Prefill the login username (overrides a remembered one; this flag stores nothing)
     #[arg(long)]
     user: Option<String>,
-    /// SFTP host (default from config: userdata.cells.es)
+    /// SFTP host of a server made from the command line (ALBA's, unless --type/--nas)
     #[arg(long)]
     host: Option<String>,
-    /// SFTP port (default from config: 443)
+    /// SFTP port of that server (default ALBA's: 443)
     #[arg(long)]
     port: Option<u16>,
     /// Start without the login dialog (cached data and local files only)
     #[arg(long)]
     offline: bool,
+    /// Type of that server: alba (default) or folders (plain folders, like a NAS)
+    #[arg(long = "type", value_enum)]
+    server_type: Option<config::ServerKind>,
+    /// Same as --type folders
+    #[arg(long, conflicts_with = "server_type")]
+    nas: bool,
+    /// Where browsing starts (folders; default the login folder) or ALBA's proposal folder
+    #[arg(long, visible_alias = "root")]
+    remote_root: Option<String>,
+    /// Server to select first in the login dialog (a name from config.toml's [[servers]])
+    #[arg(long)]
+    server: Option<String>,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
     let (mut cfg, cfg_path) = config::Config::load()?;
-    if let Some(h) = args.host {
-        cfg.host = h;
+    // Command-line server flags make one more server, selected first: ALBA's, changed.
+    let kind = if args.nas { Some(config::ServerKind::Folders) } else { args.server_type };
+    let mut servers = cfg.server_list();
+    if args.host.is_some() || args.port.is_some() || kind.is_some() || args.remote_root.is_some() {
+        let mut p = cfg.builtin_servers().remove(0);
+        p.name = "command line".into();
+        if let Some(h) = args.host {
+            p.host = h;
+        }
+        if let Some(port) = args.port {
+            p.port = port;
+        }
+        if let Some(k) = kind {
+            p.kind = k;
+            if k.is_folders() {
+                p.root = None; // ALBA's proposal folder means nothing here
+            }
+        }
+        if let Some(root) = args.remote_root {
+            p.root = Some(root);
+        }
+        servers.insert(0, p);
     }
-    if let Some(p) = args.port {
-        cfg.port = p;
+    if let Some(name) = &args.server {
+        let i = servers
+            .iter()
+            .position(|s| &s.name == name)
+            .ok_or_else(|| anyhow::anyhow!("no server named \"{name}\" in config.toml or on the command line"))?;
+        let s = servers.remove(i);
+        servers.insert(0, s);
+    }
+    config::Config::check_servers(&servers)?;
+    if servers.iter().any(|s| s.kind.is_folders()) {
+        cfg.check_updates = false; // Do not replace this local build with an upstream release.
     }
     let base = local::strip_verbatim(std::env::current_dir()?.canonicalize()?);
 
@@ -66,13 +107,10 @@ fn main() -> Result<()> {
     let remote = remote::spawn(
         &rt,
         remote::Settings {
-            host: cfg.host.clone(),
-            port: cfg.port,
             rate: cfg.request_rate(),
             burst: cfg.burst,
             known_hosts: config::Config::known_hosts_path(),
             beamlines: cfg.beamlines.clone(),
-            remote_root: cfg.remote_root.clone(),
             parallel_downloads: cfg.parallel_downloads,
         },
         tx.clone(),
@@ -96,7 +134,7 @@ fn main() -> Result<()> {
         }
     });
 
-    let mut app = app::App::new(cfg, cfg_path, base, remote, tx, args.user, args.offline);
+    let mut app = app::App::new(cfg, servers, cfg_path, base, remote, tx, args.user, args.offline);
     app.start_update_checks();
     if ui::splash::is_premiere_day() {
         app.egg = Some(ui::splash::Egg::new());

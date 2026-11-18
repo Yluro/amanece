@@ -8,6 +8,7 @@ use super::scan;
 use super::session::{self, ConnectError, Connection, HostKey, Target};
 use super::sftp::{Limiter, ReadOnlySftp};
 use crate::cbf;
+use crate::config::ServerProfile;
 use crate::event::AppEvent;
 use crate::model::{RemoteFile, SampleInfo};
 use anyhow::{Result, anyhow};
@@ -51,9 +52,23 @@ pub struct DownloadJob {
     pub priority: bool,
 }
 
+/// The connection target for `server`, with the shared settings for everything else.
+fn target_for<'a>(server: &'a ServerProfile, settings: &'a Settings, limiter: &Arc<Limiter>) -> Target<'a> {
+    Target {
+        host: &server.host,
+        port: server.port,
+        known_hosts: settings.known_hosts.clone(),
+        limiter: limiter.clone(),
+        beamlines: &settings.beamlines,
+        remote_root: server.root.as_deref(),
+        kind: server.kind,
+    }
+}
+
 #[derive(Debug)]
 pub enum RemoteCmd {
-    Connect { user: String, password: String },
+    /// Log in to `server`, closing any connection to the previous one first.
+    Connect { server: ServerProfile, user: String, password: String },
     ListExperiments,
     ListSamples { date: String, from_poll: bool },
     ScanSample {
@@ -115,6 +130,7 @@ pub enum RemoteEvent {
     SampleProgress { date: String, info: SampleInfo },
     SampleScanned { date: String, info: SampleInfo },
     ScanFailed { date: String, sample: String, message: String },
+    SamplesFailed { date: String, message: String },
     Frames { date: String, sample: String, files: Vec<RemoteFile> },
     Download(DownloadEvent),
     /// Something worth a line in the console (not an error).
@@ -122,14 +138,12 @@ pub enum RemoteEvent {
     Error(String),
 }
 
+/// What every connection shares; the server itself comes with each `RemoteCmd::Connect`.
 pub struct Settings {
-    pub host: String,
-    pub port: u16,
     pub rate: f64,
     pub burst: u32,
     pub known_hosts: Option<PathBuf>,
     pub beamlines: Vec<String>,
-    pub remote_root: Option<String>,
     /// Bulk download workers (frames); clamped to 1..=MAX_PARALLEL_DOWNLOADS.
     pub parallel_downloads: usize,
 }
@@ -251,16 +265,9 @@ async fn command_loop(
     limiter: Arc<Limiter>,
     events: std::sync::mpsc::Sender<AppEvent>,
 ) {
-    let target = Target {
-        host: &settings.host,
-        port: settings.port,
-        known_hosts: settings.known_hosts.clone(),
-        limiter,
-        beamlines: &settings.beamlines,
-        remote_root: settings.remote_root.as_deref(),
-    };
     let mut conn: Option<Connection> = None;
-    let mut creds: Option<(String, String)> = None;
+    // The last login the server accepted, for reconnecting: always to that same server.
+    let mut creds: Option<(ServerProfile, String, String)> = None;
     let mut backoff = Duration::from_secs(30);
     let mut reconnect_pending = false;
     let mut background: VecDeque<Background> = VecDeque::new();
@@ -289,17 +296,17 @@ async fn command_loop(
 
         match cmd {
             RemoteCmd::Shutdown => break,
-            RemoteCmd::Connect { user, password } => {
+            RemoteCmd::Connect { server, user, password } => {
                 if let Some(c) = conn.take() {
                     shared.set(None);
                     c.close().await;
                 }
-                match session::connect(&target, &user, &password).await {
+                match session::connect(&target_for(&server, &settings, &limiter), &user, &password).await {
                     Ok((c, host_key)) => {
                         let root = c.sftp.describe();
                         shared.install(c.sftp.clone());
                         conn = Some(c);
-                        creds = Some((user.clone(), password));
+                        creds = Some((server, user.clone(), password));
                         backoff = Duration::from_secs(30);
                         emit(&events, RemoteEvent::Connected { user, host_key, root });
                     }
@@ -317,10 +324,10 @@ async fn command_loop(
                 if conn.is_some() {
                     continue;
                 }
-                let Some((user, password)) = creds.clone() else {
+                let Some((server, user, password)) = creds.clone() else {
                     continue;
                 };
-                match session::connect(&target, &user, &password).await {
+                match session::connect(&target_for(&server, &settings, &limiter), &user, &password).await {
                     Ok((c, host_key)) => {
                         let root = c.sftp.describe();
                         shared.install(c.sftp.clone());
@@ -365,7 +372,7 @@ async fn command_loop(
                 if let Some(c) = conn.take() {
                     let _ = tokio::time::timeout(Duration::from_secs(2), c.close()).await;
                 }
-                let Some((user, password)) = creds.clone() else {
+                let Some((server, user, password)) = creds.clone() else {
                     let _ = reply.send(Recovery::Gone);
                     continue;
                 };
@@ -375,7 +382,7 @@ async fn command_loop(
                         message: "connection lost during a download; reconnecting".into(),
                     },
                 );
-                match session::connect(&target, &user, &password).await {
+                match session::connect(&target_for(&server, &settings, &limiter), &user, &password).await {
                     Ok((c, host_key)) => {
                         let root = c.sftp.describe();
                         shared.install(c.sftp.clone());
@@ -495,7 +502,7 @@ async fn run_op(sftp: &ReadOnlySftp, op: RemoteCmd, events: &std::sync::mpsc::Se
                 },
             ),
             Err(e) => {
-                emit(events, RemoteEvent::Error(format!("{e:#}")));
+                emit(events, RemoteEvent::SamplesFailed { date, message: format!("{e:#}") });
                 return Err(e);
             }
         },
