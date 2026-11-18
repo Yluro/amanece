@@ -1,6 +1,9 @@
 //! Rendering. Reads `App`, never mutates it.
 
-use crate::app::{AlbaRow, App, Badge, Conn, CsdState, Dialog, Focus, InfoItem, ListHit, StatsRow, Sub, has_checkcif};
+use crate::app::{
+    AlbaRow, App, Badge, Conn, CsdState, Dialog, Focus, InfoItem, LOGIN_PASS, LOGIN_REMEMBER, LOGIN_REMEMBER_PASS,
+    LOGIN_SERVER, LOGIN_USER, ListHit, StatsRow, Sub, has_checkcif,
+};
 use crate::checkcif::{self, Check, Level};
 use crate::config::PollMode;
 use crate::layout;
@@ -231,12 +234,12 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
         area,
         ..ListHit::default()
     };
-    let mut t = title(if app.cfg.nas { "NAS" } else { "ALBA" }, focused);
+    let mut t = title(app.servers.get(app.server_sel).map_or("ALBA", |s| s.name.as_str()), focused);
     t.spans.push(conn_label(app));
     t.spans.push(Span::raw(" "));
     let root = app.remote_root.clone().unwrap_or_else(|| "/".into());
     let path = match &app.alba_date {
-        Some(d) if app.cfg.nas => match d.split_once('/') {
+        Some(d) if app.cfg.kind.is_folders() => match d.split_once('/') {
             Some((_, relative)) => format!("{}/{relative}", root.trim_end_matches('/')),
             None => root.clone(),
         },
@@ -248,7 +251,7 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     };
     let room = area.width.saturating_sub(28) as usize;
     t.spans.push(Span::raw(format!("{} ", shorten(&path, room))).fg(Color::Gray));
-    let keys: &[(&str, &str)] = if app.cfg.nas && app.alba_date.is_some() {
+    let keys: &[(&str, &str)] = if app.cfg.kind.is_folders() && app.alba_date.is_some() {
         &[("⏎", "open"), ("←", "back"), ("S", "scan files here")]
     } else if app.alba_date.is_some() {
         &[("⏎", "stats"), ("←", "back"), ("S", "scan all")]
@@ -289,7 +292,7 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
                     let colour = if bl == "XAIRA" { Color::LightMagenta } else { Color::LightCyan };
                     spans.push(Span::raw(format!("{bl:<6} ")).fg(colour).bold());
                 }
-                spans.push(Span::raw(format!("{}/", if app.cfg.nas { layout::beamtime_label(d) } else { layout::beamtime_date(d).to_string() })).fg(Color::LightBlue).bold());
+                spans.push(Span::raw(format!("{}/", if app.cfg.kind.is_folders() { layout::beamtime_label(d) } else { layout::beamtime_date(d).to_string() })).fg(Color::LightBlue).bold());
                 spans.push(Span::raw(count).fg(Color::DarkGray));
                 ListItem::new(Line::from(spans))
             }
@@ -303,7 +306,7 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     if let Some(exp) = app.alba_date.as_ref().and_then(|d| app.cache.experiments.get(d)) {
         if let Some(error) = &exp.listing_error {
             items.push(ListItem::new(Line::from(format!("  Cannot list: {error}. Press r to retry.")).fg(Color::Red)));
-        } else if app.cfg.nas && exp.samples.as_ref().is_some_and(Vec::is_empty) {
+        } else if app.cfg.kind.is_folders() && exp.samples.as_ref().is_some_and(Vec::is_empty) {
             items.push(ListItem::new(Line::from("  No subfolders or supported metadata here.").fg(Color::DarkGray)));
         }
     }
@@ -360,7 +363,7 @@ fn local_mark(app: &App, date: &str, name: &str) -> Option<LocalMark> {
 }
 
 fn sample_item(app: &App, date: &str, name: &str, width: usize) -> ListItem<'static> {
-    if app.cfg.nas && name.ends_with('/') {
+    if app.cfg.kind.is_folders() && name.ends_with('/') {
         return ListItem::new(Line::from(format!("  {name}")).fg(Color::LightBlue).bold());
     }
     let mark = match local_mark(app, date, name) {
@@ -438,7 +441,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), area);
         return;
     };
-    if app.cfg.nas && name.ends_with('/') {
+    if app.cfg.kind.is_folders() && name.ends_with('/') {
         let block = panel(title(format!("Folder: {name}"), focused), focused, &[]);
         f.render_widget(Paragraph::new("Press Enter in the NAS panel to open this folder. Select an .ins, .res or XDS_ASCII.HKL file inside to read its unit cell. S scans files in the open folder only.")
             .wrap(Wrap { trim: false }).block(block), area);
@@ -1506,7 +1509,7 @@ fn cell_hit_lines(app: &App, found: &[crate::cells::Match], limit: usize, width:
 
 fn date_summary(app: &App, date: &str) -> Vec<Line<'static>> {
     let exp = app.cache.experiments.get(date);
-    if app.cfg.nas {
+    if app.cfg.kind.is_folders() {
         let mut lines = vec![Line::from(format!("Folder: {}", layout::beamtime_label(date))).bold()];
         if let Some(names) = exp.and_then(|e| e.samples.as_ref()) {
             let folders = names.iter().filter(|n| n.ends_with('/')).count();
@@ -1973,7 +1976,10 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
     let area = f.area();
     match d {
         Dialog::Login(l) => {
-            let mut r = centered(62, 13, area);
+            let mut r = centered(62, 14, area);
+            // the server in use for this login (the active one until it is switched)
+            let chosen = app.servers.get(l.server).or(app.servers.first());
+            let title = format!("Connect to {}", chosen.map_or("ALBA", |p| p.name.as_str()));
             // the sunrise at the top of the dialog, when the screen has room for it; `r` stays
             // the form's part, so the click and cursor positions below don't change
             let total = BANNER.len() as u16 + 1 + r.height;
@@ -1982,7 +1988,7 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                 let outer = Rect::new(r.x, area.y + (area.height - total) / 2, r.width, total);
                 r.y = outer.y + BANNER.len() as u16 + 1;
                 f.render_widget(Clear, outer);
-                f.render_widget(dialog_block(if app.cfg.nas { "Connect to NAS" } else { "Connect to ALBA" }), outer);
+                f.render_widget(dialog_block(&title), outer);
                 let b = Rect::new(outer.x + (outer.width - BANNER_W) / 2, outer.y + 1, BANNER_W, BANNER.len() as u16);
                 f.render_widget(Paragraph::new(banner_lines()), b);
             } else {
@@ -1999,7 +2005,14 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                     Span::styled(format!(" {value:<35}"), style),
                 ])
             };
-            let mut user_row = field("Username", l.user.clone(), l.field == 0);
+            // the server row first: ←→ picks one of the configured servers
+            let server_text = chosen.map(|p| format!("{}  {}:{}", p.name, p.host, p.port)).unwrap_or_default();
+            let mut server_row = field("Server", server_text, l.field == LOGIN_SERVER);
+            if app.servers.len() > 1 {
+                let color = if l.field == LOGIN_SERVER { Color::Gray } else { Color::DarkGray };
+                server_row.spans.push(Span::raw(format!(" ←→ {}/{}", l.server + 1, app.servers.len())).fg(color));
+            }
+            let mut user_row = field("Username", l.user.clone(), l.field == LOGIN_USER);
             if !app.saved_users.is_empty() {
                 // which remembered name this is; ←→ picks another
                 let n = app.saved_users.len();
@@ -2007,10 +2020,10 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                     Some(i) => format!(" ←→ {}/{n}", i + 1),
                     None => format!(" ←→ {n} saved"),
                 };
-                let color = if l.field == 0 { Color::Gray } else { Color::DarkGray };
+                let color = if l.field == LOGIN_USER { Color::Gray } else { Color::DarkGray };
                 user_row.spans.push(Span::raw(hint).fg(color));
             }
-            let mut pass_row = field("Password", "•".repeat(l.pass.chars().count()), l.field == 1);
+            let mut pass_row = field("Password", "•".repeat(l.pass.chars().count()), l.field == LOGIN_PASS);
             if l.stored_pass {
                 pass_row.spans.push(Span::raw(" saved").fg(Color::DarkGray));
             }
@@ -2029,15 +2042,22 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                 }
                 (Line::from(spans), width)
             };
-            let (remember_user, w_user) = tick_row("username", l.remember, 2);
-            let (remember_pass, w_pass) = tick_row("password", l.remember_pass, 3);
+            let (remember_user, w_user) = tick_row("username", l.remember, LOGIN_REMEMBER);
+            let (remember_pass, w_pass) = tick_row("password", l.remember_pass, LOGIN_REMEMBER_PASS);
             {
                 let mut hit = app.hit.borrow_mut();
-                hit.login_remember = Rect::new(r.x + 1 + 13, r.y + 5, w_user, 1);
-                hit.login_remember_pass = Rect::new(r.x + 1 + 13, r.y + 6, w_pass, 1);
+                hit.login_remember = Rect::new(r.x + 1 + 13, r.y + 6, w_user, 1);
+                hit.login_remember_pass = Rect::new(r.x + 1 + 13, r.y + 7, w_pass, 1);
             }
+            let detail = match chosen {
+                Some(p) if p.kind.is_folders() => {
+                    format!("  folders from {}", p.root.as_deref().unwrap_or("the login folder"))
+                }
+                _ => "  ALBA proposal folders".to_string(),
+            };
             let mut lines = vec![
-                Line::from(format!("  {}:{}", app.cfg.host, app.cfg.port)).fg(Color::DarkGray),
+                server_row,
+                Line::from(detail).fg(Color::DarkGray),
                 Line::from(""),
                 user_row,
                 pass_row,
@@ -2054,8 +2074,10 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
             lines.push(Line::from(""));
             let saved_here = app.saved_users.iter().any(|u| u == l.user.trim());
             let help = match l.field {
-                0 if saved_here => "  Enter next · ←→ saved names · Del forget it · Esc offline",
-                0 if !app.saved_users.is_empty() => "  Enter next · ←→ saved names · Esc work offline",
+                LOGIN_SERVER if app.servers.len() > 1 => "  Enter next · ←→ server · Esc work offline",
+                LOGIN_SERVER => "  Enter next · Esc work offline",
+                LOGIN_USER if saved_here => "  Enter next · ←→ saved names · Del forget it · Esc offline",
+                LOGIN_USER if !app.saved_users.is_empty() => "  Enter next · ←→ saved names · Esc work offline",
                 _ => "  Enter connect · Tab next field · Esc work offline",
             };
             lines.push(Line::from(help).fg(Color::DarkGray));
@@ -2072,15 +2094,17 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                 let inner = Rect::new(r.x + 1, r.y + 1, r.width - 2, r.height - 2);
                 f.render_widget(Paragraph::new(lines), inner);
             } else {
-                f.render_widget(Paragraph::new(lines).block(dialog_block(if app.cfg.nas { "Connect to NAS" } else { "Connect to ALBA" })), r);
+                f.render_widget(Paragraph::new(lines).block(dialog_block(&title)), r);
             }
             if !l.busy {
+                // rows sit one below the frame: server 0, its detail 1, blank 2, then the fields
                 let (y, len) = match l.field {
-                    0 => (r.y + 3, l.user.chars().count()),
-                    1 => (r.y + 4, l.pass.chars().count()),
+                    LOGIN_SERVER => (r.y + 1, 0),
+                    LOGIN_USER => (r.y + 4, l.user.chars().count()),
+                    LOGIN_PASS => (r.y + 5, l.pass.chars().count()),
                     // inside the [ ]
-                    2 => (r.y + 5, 1),
-                    _ => (r.y + 6, 1),
+                    LOGIN_REMEMBER => (r.y + 6, 1),
+                    _ => (r.y + 7, 1),
                 };
                 f.set_cursor_position((r.x + 1 + 12 + 1 + len as u16, y));
             }
@@ -2800,7 +2824,8 @@ mod tests {
         let base = std::env::temp_dir().join(format!("amanece_nas_ui_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let mut app = demo_app(&base);
-        app.cfg.nas = true;
+        app.cfg.kind = crate::config::ServerKind::Folders;
+        app.servers[0].name = "NAS".into();
         let date = "nas-fixture/user";
         let mut solve = Solve::new(SolveKind::Archive, "/user/sample.res", 1);
         solve.status = Status::Done;
@@ -2830,7 +2855,8 @@ mod tests {
         let base = std::env::temp_dir().join(format!("amanece_nas_nav_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let mut app = demo_app(&base);
-        app.cfg.nas = true;
+        app.cfg.kind = crate::config::ServerKind::Folders;
+        app.servers[0].name = "NAS".into();
         app.remote_root = Some("/data/XRay".into());
         let parent = "nas-fixture/user";
         let child = "nas-fixture/user/work";
@@ -2877,19 +2903,24 @@ mod tests {
         let remote = crate::remote::spawn(
             rt,
             crate::remote::Settings {
-                host: "h".into(),
-                port: 1,
                 rate: 1.0,
                 burst: 1,
                 known_hosts: None,
                 beamlines: vec!["bl13".into()],
-                remote_root: None,
-                nas: false,
                 parallel_downloads: 3,
             },
             tx.clone(),
         );
-        let mut app = App::new(crate::config::Config::default(), None, base.to_path_buf(), remote, tx, None, true);
+        let mut app = App::new(
+            crate::config::Config::default(),
+            crate::config::Config::default().server_list(),
+            None,
+            base.to_path_buf(),
+            remote,
+            tx,
+            None,
+            true,
+        );
         let solve = |kind, xml: &str, hkl: &[(&str, u64)]| {
             let mut s = Solve::new(kind, format!("/r/{}", kind.folder()), 1);
             s.status = Status::Done;
@@ -2964,14 +2995,57 @@ mod tests {
     }
 
     #[test]
+    fn login_shows_the_chosen_server_and_its_archive_folder() {
+        use crate::config::{ServerKind, ServerProfile};
+        let base = std::env::temp_dir().join(format!("amanece_ui_server_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        app.servers = vec![
+            ServerProfile {
+                name: "ALBA".into(),
+                host: "userdata.cells.es".into(),
+                port: 443,
+                kind: ServerKind::Alba,
+                root: None,
+            },
+            ServerProfile {
+                name: "xray".into(),
+                host: "nas.example.org".into(),
+                port: 22222,
+                kind: ServerKind::Folders,
+                root: Some("/data/XRay".into()),
+            },
+        ];
+        app.dialog = Some(crate::app::Dialog::Login(crate::app::Login {
+            server: 1,
+            user: String::new(),
+            pass: String::new(),
+            field: 0,
+            remember: false,
+            remember_pass: false,
+            stored_pass: false,
+            busy: false,
+            error: None,
+        }));
+        let screen = render(&app, 120, 40);
+        assert!(screen.contains("Connect to xray"), "title follows the chosen server");
+        assert!(screen.contains("xray  nas.example.org:22222"));
+        assert!(screen.contains("←→ 2/2"));
+        assert!(screen.contains("folders from /data/XRay"));
+        assert!(screen.contains("←→ server"), "help for the server row");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
     fn login_remember_box_renders_and_toggles_by_click() {
         let base = std::env::temp_dir().join(format!("amanece_ui_login_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let mut app = demo_app(&base);
         app.dialog = Some(crate::app::Dialog::Login(crate::app::Login {
+            server: 0,
             user: "u2025".into(),
             pass: String::new(),
-            field: 1,
+            field: 2,
             remember: false,
             remember_pass: false,
             stored_pass: false,
@@ -3012,8 +3086,10 @@ mod tests {
         let screen = render(&app, 120, 40);
         println!("{screen}");
         assert!(screen.contains("←→ 2/2"));
-        key(&mut app, KeyCode::Tab);
-        key(&mut app, KeyCode::Tab); // from the username box, past the password box, to the username
+        // from the "remember username" box, past the remember-password box and the server row, to the username
+        for _ in 0..3 {
+            key(&mut app, KeyCode::Tab);
+        }
         key(&mut app, KeyCode::Right);
         let screen = render(&app, 120, 40);
         assert!(screen.contains("u2024") && screen.contains("←→ 1/2"));

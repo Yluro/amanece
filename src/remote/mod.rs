@@ -33,7 +33,7 @@ mod live {
             limiter: Arc::new(Limiter::new(3.0, 6, count.clone())),
             beamlines: &beamlines,
             remote_root: None,
-            nas: false,
+            kind: crate::config::ServerKind::Alba,
         };
         let (conn, hk) = session::connect(&target, &user, &pass).await.expect("connect");
         println!("host key: {hk:?}");
@@ -160,7 +160,7 @@ mod live_rekey {
             limiter: Arc::new(Limiter::new(3.0, 6, Arc::new(AtomicU64::new(0)))),
             beamlines: &beamlines,
             remote_root: None,
-            nas: false,
+            kind: crate::config::ServerKind::Alba,
         };
         let (conn, _) = session::connect_with(&target, &user, &pass, cfg).await.expect("connect");
         let frames = scan::list_frames(&conn.sftp, &date, &sample, &[(sample.clone(), 1)]).await.unwrap();
@@ -234,7 +234,7 @@ mod live_bench {
             limiter: Arc::new(Limiter::new(100.0, 100, Arc::new(AtomicU64::new(0)))),
             beamlines: &beamlines,
             remote_root: None,
-            nas: false,
+            kind: crate::config::ServerKind::Alba,
         };
         let (conn, _) = session::connect_with(&target, &user, &pass, cfg).await.expect("connect");
         let frames = scan::list_frames(&conn.sftp, &date, &sample, &[(sample.clone(), 1)]).await.unwrap();

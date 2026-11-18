@@ -161,8 +161,29 @@ impl ReadOnlySftp {
         Ok(())
     }
 
-    pub fn configure_nas(&mut self, host: &str, port: u16, root: &str) -> Result<()> {
-        super::nas::validate_root(root)?;
+    /// What this session browses: plain folders once `configure_nas` ran, else ALBA.
+    pub fn kind(&self) -> crate::config::ServerKind {
+        match self.nas_id {
+            Some(_) => crate::config::ServerKind::Folders,
+            None => crate::config::ServerKind::Alba,
+        }
+    }
+
+    /// Browse plain folders from `root`, or from the login folder when there is none.
+    pub async fn configure_nas(&mut self, host: &str, port: u16, root: Option<&str>) -> Result<()> {
+        let root = match root.map(str::trim).filter(|r| !r.is_empty()) {
+            Some(r) => r.to_string(),
+            None => {
+                self.limiter.acquire().await;
+                self.inner
+                    .canonicalize(".")
+                    .await
+                    .ok()
+                    .filter(|r| r.starts_with('/'))
+                    .unwrap_or_else(|| "/".into())
+            }
+        };
+        super::nas::validate_root(&root)?;
         self.root = root.trim_end_matches('/').to_string();
         self.nas_id = Some(super::nas::source_id(host, port, &self.root));
         Ok(())

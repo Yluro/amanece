@@ -144,9 +144,11 @@ pub enum Conn {
 }
 
 pub struct Login {
+    /// Index into `App::servers` of the server this login goes to.
+    pub server: usize,
     pub user: String,
     pub pass: String,
-    /// 0 username, 1 password, 2 the "remember username" box, 3 "remember password".
+    /// The focused row, one of the `LOGIN_*` constants.
     pub field: usize,
     pub remember: bool,
     pub remember_pass: bool,
@@ -156,18 +158,24 @@ pub struct Login {
     pub error: Option<String>,
 }
 
-const LOGIN_FIELDS: usize = 4;
+/// Login dialog rows, top to bottom (`Login::field`).
+pub const LOGIN_SERVER: usize = 0;
+pub const LOGIN_USER: usize = 1;
+pub const LOGIN_PASS: usize = 2;
+pub const LOGIN_REMEMBER: usize = 3;
+pub const LOGIN_REMEMBER_PASS: usize = 4;
+const LOGIN_FIELDS: usize = 5;
 
 impl Login {
     /// Space (or a click) on one of the two boxes. A password is only remembered
     /// together with its username.
     pub fn toggle(&mut self, field: usize) {
         match field {
-            2 => {
+            LOGIN_REMEMBER => {
                 self.remember = !self.remember;
                 self.remember_pass &= self.remember;
             }
-            3 => {
+            LOGIN_REMEMBER_PASS => {
                 self.remember_pass = !self.remember_pass;
                 self.remember |= self.remember_pass;
             }
@@ -378,6 +386,9 @@ pub struct App {
     last_user: Option<String>,
     /// Remembered usernames, most recently used first; ←→ picks them in the login dialog.
     pub saved_users: Vec<String>,
+    /// The servers the login dialog offers, and the one in use.
+    pub servers: Vec<crate::config::ServerProfile>,
+    pub server_sel: usize,
     pub local: LocalPanel,
     pub cache: Cache,
     cache_dirty: bool,
@@ -440,8 +451,11 @@ pub struct App {
 }
 
 impl App {
+    /// `servers`: what the login dialog offers, the one to start with first.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        cfg: Config,
+        mut cfg: Config,
+        servers: Vec<crate::config::ServerProfile>,
         config_path: Option<PathBuf>,
         base: PathBuf,
         remote: RemoteHandle,
@@ -449,6 +463,7 @@ impl App {
         user: Option<String>,
         offline: bool,
     ) -> App {
+        cfg.apply(&servers[0]);
         let state_dir = config_path.as_ref().and_then(|p| p.parent()).map(PathBuf::from);
         // The Local panel opens in `default_folder` if set, else where it was when
         // amanece last closed, else in the folder it was started from.
@@ -491,6 +506,8 @@ impl App {
             login_attempts: 0,
             last_user,
             saved_users,
+            servers,
+            server_sel: 0,
             cache,
             cache_dirty: false,
             cells,
@@ -584,6 +601,7 @@ impl App {
 
     fn open_login(&mut self) {
         let mut l = Login {
+            server: self.server_sel,
             user: String::new(),
             pass: String::new(),
             field: 0,
@@ -594,16 +612,68 @@ impl App {
             error: None,
         };
         self.fill_login(&mut l, self.last_user.clone().unwrap_or_default());
-        l.field = if l.user.is_empty() { 0 } else { 1 };
+        l.field = if l.user.is_empty() { LOGIN_USER } else { LOGIN_PASS };
         self.dialog = Some(Dialog::Login(l));
     }
 
-    /// Puts `user` in the login dialog with its two boxes, and its saved password if
-    /// it has one (passwords are only kept for remembered usernames).
+    /// ←→ on the server row: the next (or previous) configured server.
+    fn cycle_server(&self, l: &mut Login, next: bool) {
+        let n = self.servers.len();
+        if n < 2 {
+            return;
+        }
+        l.server = if next { (l.server + 1) % n } else { (l.server + n - 1) % n };
+        // the password shown was typed for, or saved for, the other server
+        let user = l.user.clone();
+        self.fill_login(l, user);
+    }
+
+    /// Makes `servers[idx]` the server in use: the config fields the rest of the app
+    /// reads, and that server's cache. Downloads queued for the old one are cancelled.
+    /// Nothing is connected here; the login that follows goes there.
+    fn switch_server(&mut self, idx: usize) {
+        if idx == self.server_sel {
+            return;
+        }
+        self.cancel_downloads();
+        self.server_sel = idx;
+        let p = self.servers[idx].clone();
+        self.cfg.apply(&p);
+        let host = self.cfg.cache_host();
+        let dir = self.state_dir.clone();
+        for c in Cache::load_all(dir.as_deref(), &host) {
+            self.cells.record_cache(&c);
+        }
+        self.show_cache(Cache::load_startup(dir.as_deref(), &host, self.last_user.as_deref(), &self.base));
+        self.remote_root = None;
+        self.alba_note = None;
+        self.console
+            .push(LineKind::Info, format!("server {}: {}:{}", p.name, p.host, p.port));
+    }
+
+    /// Saves the cache shown and shows `cache` instead, from the beamtime list down.
+    fn show_cache(&mut self, cache: Cache) {
+        self.save_cache();
+        self.cache = cache;
+        self.cells.record_cache(&self.cache);
+        self.alba_date = None;
+        self.alba_sel = 0;
+        self.stats_sel = 0;
+        self.marks.clear();
+        self.frame_marks.clear();
+        self.pending_notify.clear();
+        self.listed_this_session.clear();
+        self.last_rescan.clear();
+        self.scanning.clear();
+        self.experiments_listed = false;
+    }
+
+    /// Puts `user` in the login dialog with its two boxes, and its saved password for
+    /// the dialog's server if it has one (passwords are only kept for remembered usernames).
     fn fill_login(&self, l: &mut Login, user: String) {
         l.remember = self.is_saved(&user);
         let stored = if l.remember {
-            crate::secret::load(&user, &self.cfg.host)
+            crate::secret::load(&user, &self.servers[l.server].host)
         } else {
             None
         };
@@ -628,16 +698,22 @@ impl App {
             Ok(users) => {
                 let gone: Vec<String> = self.saved_users.iter().filter(|u| !users.contains(u)).cloned().collect();
                 self.saved_users = users;
+                // a forgotten name takes its password on every server with it
+                let mut hosts: Vec<String> = self.servers.iter().map(|s| s.host.clone()).collect();
+                hosts.sort();
+                hosts.dedup();
                 for u in gone {
-                    self.forget_password(&u);
+                    for h in &hosts {
+                        self.forget_password(&u, h);
+                    }
                 }
             }
             Err(e) => self.say(LineKind::Warn, format!("cannot update the remembered usernames: {e}")),
         }
     }
 
-    fn forget_password(&mut self, user: &str) {
-        if let Err(e) = crate::secret::forget(user, &self.cfg.host) {
+    fn forget_password(&mut self, user: &str, host: &str) {
+        if let Err(e) = crate::secret::forget(user, host) {
             self.say(LineKind::Warn, format!("cannot remove the saved password of {}: {e}", user.trim()));
         }
     }
@@ -668,19 +744,7 @@ impl App {
                 self.cache_dirty = true;
             }
             Some(_) => {
-                self.save_cache();
-                self.cache = Cache::load_account(self.state_dir.as_deref(), &self.cfg.cache_host(), &key);
-                self.cells.record_cache(&self.cache);
-                self.alba_date = None;
-                self.alba_sel = 0;
-                self.stats_sel = 0;
-                self.marks.clear();
-                self.frame_marks.clear();
-                self.pending_notify.clear();
-                self.listed_this_session.clear();
-                self.last_rescan.clear();
-                self.scanning.clear();
-                self.experiments_listed = false;
+                self.show_cache(Cache::load_account(self.state_dir.as_deref(), &self.cfg.cache_host(), &key));
                 let n = self.cache.dates.len();
                 self.console
                     .push(LineKind::Info, format!("another account: its cached listing has {n} beamtimes"));
@@ -707,7 +771,7 @@ impl App {
     /// Shown dimmed: named "test…", or only test shots once scanned. Only the name-based
     /// ones are hidden (by default), so scanning never removes rows from the list.
     pub fn is_test_sample(&self, date: &str, name: &str) -> bool {
-        (!self.cfg.nas && layout::is_test_name(name)) || self.info(date, name).is_some_and(SampleInfo::test_shots_only)
+        (!self.cfg.kind.is_folders() && layout::is_test_name(name)) || self.info(date, name).is_some_and(SampleInfo::test_shots_only)
     }
 
     /// After the rows changed, put the highlight back on the same beamtime or sample.
@@ -729,7 +793,7 @@ impl App {
         let mut rows = vec![AlbaRow::Up];
         if let Some(names) = self.cache.experiments.get(date).and_then(|e| e.samples.as_ref()) {
             for n in names {
-                if self.cfg.nas || self.show_test || !layout::is_test_name(n) {
+                if self.cfg.kind.is_folders() || self.show_test || !layout::is_test_name(n) {
                     rows.push(AlbaRow::Sample {
                         date: date.clone(),
                         name: n.clone(),
@@ -746,7 +810,7 @@ impl App {
 
     pub fn selected_sample(&self) -> Option<(String, String)> {
         match self.selected_row()? {
-            AlbaRow::Sample { date, name } if !(self.cfg.nas && name.ends_with('/')) => Some((date, name)),
+            AlbaRow::Sample { date, name } if !(self.cfg.kind.is_folders() && name.ends_with('/')) => Some((date, name)),
             AlbaRow::Sample { .. } => None,
             AlbaRow::Date(_) | AlbaRow::Up => None,
         }
@@ -789,7 +853,7 @@ impl App {
         if !self.connected() {
             return;
         }
-        if self.cfg.nas && sample.ends_with('/') { return; }
+        if self.cfg.kind.is_folders() && sample.ends_with('/') { return; }
         let key = (date.to_string(), sample.to_string());
         if !background && self.scanning.contains(&key) {
             return;
@@ -1040,7 +1104,8 @@ impl App {
                     self.say(LineKind::Error, format!("connection lost: {message}"));
                 }
                 if let Some(user) = rejected {
-                    self.forget_password(&user);
+                    let host = self.cfg.host.clone();
+                    self.forget_password(&user, &host);
                     self.console.push(
                         LineKind::Warn,
                         format!("the server rejected the saved password of {user}; it was removed, type the new one"),
@@ -1066,7 +1131,7 @@ impl App {
                         Some(p) => format!("set remote_root in {}", p.display()),
                         None => "set remote_root in config.toml".into(),
                     };
-                    self.alba_note = Some(if self.cfg.nas {
+                    self.alba_note = Some(if self.cfg.kind.is_folders() {
                         format!("No archive folders or supported metadata in {home}. Check remote_root and permissions.")
                     } else { format!("No beamtime folders (YYYYMMDD) in {home}. If your data is elsewhere, {hint}.") });
                     self.say(
@@ -1143,7 +1208,7 @@ impl App {
                 from_poll,
             } => {
                 let prev = self.selected_row();
-                names.sort_by_key(|n| (self.cfg.nas && !n.ends_with('/'), n.to_lowercase()));
+                names.sort_by_key(|n| (self.cfg.kind.is_folders() && !n.ends_with('/'), n.to_lowercase()));
                 let baseline = self.listed_this_session.insert(date.clone());
                 let exp = self.cache.experiment_mut(&date);
                 let old = exp.samples.clone().unwrap_or_default();
@@ -1154,7 +1219,7 @@ impl App {
                 self.cache_dirty = true;
                 if !baseline {
                     for n in names.iter().filter(|n| !old.contains(n)) {
-                        if (self.cfg.nas && n.ends_with('/')) || (!self.cfg.nas && layout::is_test_name(n)) {
+                        if (self.cfg.kind.is_folders() && n.ends_with('/')) || (!self.cfg.kind.is_folders() && layout::is_test_name(n)) {
                             continue;
                         }
                         self.console
@@ -1645,7 +1710,7 @@ impl App {
                 && !l.busy
             {
                 let hit = self.hit.borrow();
-                for (rect, field) in [(hit.login_remember, 2), (hit.login_remember_pass, 3)] {
+                for (rect, field) in [(hit.login_remember, LOGIN_REMEMBER), (hit.login_remember_pass, LOGIN_REMEMBER_PASS)] {
                     if rect.contains(p) {
                         l.toggle(field);
                         l.field = field;
@@ -1831,23 +1896,30 @@ impl App {
                         );
                         return;
                     }
-                    KeyCode::Left | KeyCode::Right if l.field == 0 => {
+                    KeyCode::Left | KeyCode::Right if l.field == LOGIN_SERVER => {
+                        self.cycle_server(&mut l, key.code == KeyCode::Right)
+                    }
+                    KeyCode::Left | KeyCode::Right if l.field == LOGIN_USER => {
                         self.cycle_saved_user(&mut l, key.code == KeyCode::Right)
                     }
                     KeyCode::Tab | KeyCode::Down => l.field = (l.field + 1) % LOGIN_FIELDS,
                     KeyCode::BackTab | KeyCode::Up => l.field = (l.field + LOGIN_FIELDS - 1) % LOGIN_FIELDS,
-                    KeyCode::Char(' ') if l.field >= 2 => l.toggle(l.field),
+                    KeyCode::Char(' ') if l.field >= LOGIN_REMEMBER => l.toggle(l.field),
                     // forget the saved name shown (and its password), without logging in
-                    KeyCode::Delete if l.field == 0 && self.is_saved(&l.user) => {
+                    KeyCode::Delete if l.field == LOGIN_USER && self.is_saved(&l.user) => {
                         self.remember_login(&l.user, false);
                         l.remember = false;
                         l.remember_pass = false;
                         l.user_edited();
                     }
                     KeyCode::Enter => {
-                        if l.field == 0 && !l.user.is_empty() {
-                            l.field = 1;
+                        if l.field == LOGIN_SERVER {
+                            l.field = LOGIN_USER;
+                        } else if l.field == LOGIN_USER && !l.user.is_empty() {
+                            l.field = LOGIN_PASS;
                         } else if !l.user.trim().is_empty() && !l.pass.is_empty() {
+                            // the chosen server becomes the active one before anything is stored
+                            self.switch_server(l.server);
                             l.busy = true;
                             l.error = None;
                             self.conn = Conn::Connecting;
@@ -1855,7 +1927,8 @@ impl App {
                                 // forgets its saved password too
                                 self.remember_login(&l.user, false);
                             } else if !l.remember_pass && self.is_saved(&l.user) {
-                                self.forget_password(&l.user);
+                                let host = self.cfg.host.clone();
+                                self.forget_password(&l.user, &host);
                             }
                             // kept until the server answers only when it is to be saved
                             let password = if l.remember_pass {
@@ -1864,30 +1937,31 @@ impl App {
                                 std::mem::take(&mut l.pass)
                             };
                             self.remote.send(RemoteCmd::Connect {
+                                server: self.servers[self.server_sel].clone(),
                                 user: l.user.trim().to_string(),
                                 password,
                             });
                         }
                     }
                     KeyCode::Backspace => match l.field {
-                        0 => {
+                        LOGIN_USER => {
                             l.user.pop();
                             l.user_edited();
                         }
                         // a saved password is replaced as a whole, not edited
-                        1 if l.stored_pass => {
+                        LOGIN_PASS if l.stored_pass => {
                             l.pass.clear();
                             l.stored_pass = false;
                         }
-                        1 => _ = l.pass.pop(),
+                        LOGIN_PASS => _ = l.pass.pop(),
                         _ => {}
                     },
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => match l.field {
-                        0 => {
+                        LOGIN_USER => {
                             l.user.push(c);
                             l.user_edited();
                         }
-                        1 => {
+                        LOGIN_PASS => {
                             if l.stored_pass {
                                 l.pass.clear();
                                 l.stored_pass = false;
@@ -2134,7 +2208,7 @@ impl App {
             Some(AlbaRow::Date(d)) => self.open_date(&d),
             Some(AlbaRow::Up) => self.close_date(),
             Some(AlbaRow::Sample { date, name }) => {
-                if self.cfg.nas && name.ends_with('/') {
+                if self.cfg.kind.is_folders() && name.ends_with('/') {
                     self.open_date(&format!("{date}/{}", name.trim_end_matches('/')));
                     return;
                 }
@@ -2172,7 +2246,7 @@ impl App {
         let Some(date) = self.alba_date.take() else {
             return;
         };
-        if self.cfg.nas {
+        if self.cfg.kind.is_folders() {
             if let Some((parent, child)) = date.rsplit_once('/') {
                 if !self.cache.dates.contains(&date) {
                     self.open_date(parent);
@@ -2220,11 +2294,11 @@ impl App {
                 AlbaRow::Sample { date: d, name } if d == date => Some(name),
                 _ => None,
             })
-            .filter(|n| !(self.cfg.nas && n.ends_with('/')))
+            .filter(|n| !(self.cfg.kind.is_folders() && n.ends_with('/')))
             .filter(|n| self.info(&date, n).is_none_or(|i| i.has_running()))
             .collect();
         if todo.is_empty() {
-            if self.cfg.nas {
+            if self.cfg.kind.is_folders() {
                 let files = self.cache.experiments.get(&date).and_then(|e| e.samples.as_ref())
                     .map(|names| names.iter().filter(|n| !n.ends_with('/')).count());
                 let message = match files {
@@ -2938,21 +3012,17 @@ mod live {
         let remote = crate::remote::spawn(
             &rt,
             crate::remote::Settings {
-                host: "userdata.cells.es".into(),
-                port: 443,
                 rate: 3.0,
                 burst: 6,
                 known_hosts: Some(std::env::temp_dir().join("amanece_live_known_hosts")),
                 beamlines: vec!["bl13".into(), "bl06".into()],
-                remote_root: None,
-                nas: false,
                 parallel_downloads: 3,
             },
             tx.clone(),
         );
         let base = std::env::temp_dir().join(format!("amanece_flow_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
-        let mut app = App::new(Config::default(), None, base.clone(), remote, tx, Some(user.clone()), false);
+        let mut app = App::new(Config::default(), Config::default().server_list(), None, base.clone(), remote, tx, Some(user.clone()), false);
         if let Some(Dialog::Login(l)) = &mut app.dialog {
             l.pass = pass;
         }
@@ -3108,14 +3178,10 @@ mod trash_check {
         let remote = crate::remote::spawn(
             &rt,
             crate::remote::Settings {
-                host: "h".into(),
-                port: 1,
                 rate: 1.0,
                 burst: 1,
                 known_hosts: None,
                 beamlines: vec!["bl13".into(), "bl06".into()],
-                remote_root: None,
-                nas: false,
                 parallel_downloads: 3,
             },
             tx.clone(),
@@ -3124,7 +3190,7 @@ mod trash_check {
         std::fs::create_dir_all(&base).unwrap();
         let file = base.join("amanece_trash_test.txt");
         std::fs::write(&file, b"test file from amanece, safe to delete").unwrap();
-        let mut app = App::new(Config::default(), None, base.clone(), remote, tx, None, true);
+        let mut app = App::new(Config::default(), Config::default().server_list(), None, base.clone(), remote, tx, None, true);
         app.focus = Focus::Local;
         app.local.refresh();
         app.local.select_name("amanece_trash_test.txt");
@@ -3158,21 +3224,17 @@ mod poll_tests {
         let remote = crate::remote::spawn(
             &rt,
             crate::remote::Settings {
-                host: "h".into(),
-                port: 1,
                 rate: 1.0,
                 burst: 1,
                 known_hosts: None,
                 beamlines: vec!["bl13".into(), "bl06".into()],
-                remote_root: None,
-                nas: false,
                 parallel_downloads: 3,
             },
             tx.clone(),
         );
         let base = std::env::temp_dir().join(format!("amanece_poll_{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
-        let mut app = App::new(Config::default(), None, base.clone(), remote, tx, None, true);
+        let mut app = App::new(Config::default(), Config::default().server_list(), None, base.clone(), remote, tx, None, true);
         app.conn = Conn::Connected("u".into());
 
         // the beamtime list is asked for at most once a minute
@@ -3221,14 +3283,10 @@ mod login_tests {
         let remote = crate::remote::spawn(
             &rt,
             crate::remote::Settings {
-                host: "127.0.0.1".into(),
-                port: 1,
                 rate: 1.0,
                 burst: 1,
                 known_hosts: None,
                 beamlines: vec!["bl13".into()],
-                remote_root: None,
-                nas: false,
                 parallel_downloads: 3,
             },
             tx.clone(),
@@ -3238,7 +3296,8 @@ mod login_tests {
             ..Config::default()
         };
         let cfg_path = Some(root.join("config").join("config.toml"));
-        let app = App::new(cfg, cfg_path, root.join("launch"), remote, tx, user, false);
+        let servers = cfg.server_list();
+        let app = App::new(cfg, servers, cfg_path, root.join("launch"), remote, tx, user, false);
         (app, rt)
     }
 
@@ -3305,7 +3364,7 @@ mod login_tests {
         // this time log in as ub, box still ticked
         let (mut app, _rt2) = app_in(&root, None);
         assert_eq!(login(&app).user, "ua");
-        assert_eq!(login(&app).field, 1);
+        assert_eq!(login(&app).field, 2);
         assert!(login(&app).remember);
         assert_eq!(app.cache.dates, vec!["20251211"]);
         app.on_key(KeyEvent::from(KeyCode::BackTab));
@@ -3325,7 +3384,7 @@ mod login_tests {
         assert_eq!(login(&app).user, "ub");
         app.on_key(KeyEvent::from(KeyCode::Up));
         app.on_key(KeyEvent::from(KeyCode::Right));
-        assert_eq!((login(&app).user.as_str(), login(&app).field), ("ua", 0));
+        assert_eq!((login(&app).user.as_str(), login(&app).field), ("ua", 1));
         app.on_key(KeyEvent::from(KeyCode::Right));
         assert_eq!(login(&app).user, "ub");
         app.on_key(KeyEvent::from(KeyCode::Left));
@@ -3333,20 +3392,22 @@ mod login_tests {
         assert!(login(&app).remember);
         // ↑↓ still move between the fields
         app.on_key(KeyEvent::from(KeyCode::Down));
-        assert_eq!((login(&app).user.as_str(), login(&app).field), ("ua", 1));
+        assert_eq!((login(&app).user.as_str(), login(&app).field), ("ua", 2));
         app.on_key(KeyEvent::from(KeyCode::Left));
-        assert_eq!((login(&app).user.as_str(), login(&app).field), ("ua", 1));
+        assert_eq!((login(&app).user.as_str(), login(&app).field), ("ua", 2));
         app.on_key(KeyEvent::from(KeyCode::Up));
         // playing with the box changes nothing on disk
         app.on_key(KeyEvent::from(KeyCode::BackTab));
         app.on_key(KeyEvent::from(KeyCode::BackTab));
-        assert_eq!(login(&app).field, 2);
+        app.on_key(KeyEvent::from(KeyCode::BackTab));
+        assert_eq!(login(&app).field, 3);
         for _ in 0..3 {
             app.on_key(KeyEvent::from(KeyCode::Char(' ')));
         }
         assert!(!login(&app).remember);
         assert_eq!(saved(), ["ub", "ua"]);
         // Del in the username field forgets the name shown, without logging in
+        app.on_key(KeyEvent::from(KeyCode::Tab));
         app.on_key(KeyEvent::from(KeyCode::Tab));
         app.on_key(KeyEvent::from(KeyCode::Tab));
         app.on_key(KeyEvent::from(KeyCode::Delete));
@@ -3359,9 +3420,10 @@ mod login_tests {
         assert_eq!((login(&app).user.as_str(), login(&app).remember), ("ub", true));
         app.on_key(KeyEvent::from(KeyCode::BackTab));
         app.on_key(KeyEvent::from(KeyCode::BackTab));
+        app.on_key(KeyEvent::from(KeyCode::BackTab));
         app.on_key(KeyEvent::from(KeyCode::Char(' ')));
         app.on_key(KeyEvent::from(KeyCode::BackTab));
-        assert_eq!(login(&app).field, 1);
+        assert_eq!(login(&app).field, 2);
         assert_eq!(saved(), ["ub"]);
         typed(&mut app, "pw");
         app.on_key(KeyEvent::from(KeyCode::Enter));
@@ -3400,7 +3462,7 @@ mod login_tests {
         typed(&mut app, "s3cret");
         key(&mut app, KeyCode::Tab);
         key(&mut app, KeyCode::Tab);
-        assert_eq!(login(&app).field, 3);
+        assert_eq!(login(&app).field, 4);
         key(&mut app, KeyCode::Char(' '));
         assert!(login(&app).remember && login(&app).remember_pass);
         key(&mut app, KeyCode::Enter);
@@ -3423,7 +3485,7 @@ mod login_tests {
         let (mut app, _rt2) = app_in(&root, None);
         {
             let l = login(&app);
-            assert_eq!((l.user.as_str(), l.pass.as_str(), l.field), ("pa", "s3cret", 1));
+            assert_eq!((l.user.as_str(), l.pass.as_str(), l.field), ("pa", "s3cret", 2));
             assert!(l.stored_pass && l.remember_pass);
         }
         key(&mut app, KeyCode::Enter);
@@ -3465,7 +3527,7 @@ mod login_tests {
         for _ in 0..3 {
             key(&mut app, KeyCode::Tab);
         }
-        assert_eq!(login(&app).field, 3);
+        assert_eq!(login(&app).field, 4);
         key(&mut app, KeyCode::Char(' '));
         assert!(login(&app).remember && !login(&app).remember_pass);
         key(&mut app, KeyCode::Enter);
@@ -3487,6 +3549,67 @@ mod login_tests {
         assert_eq!(stored(), None);
         assert!(login(&app).pass.is_empty() && !login(&app).remember_pass);
         drop(app);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_server_row_picks_a_configured_server_and_the_login_goes_there() {
+        use crate::config::{ServerKind, ServerProfile};
+        let root = std::env::temp_dir().join(format!("amanece_server_pick_{}", std::process::id()));
+        std::fs::create_dir_all(root.join("launch")).unwrap();
+        let alba = ServerProfile {
+            name: "alba".into(),
+            host: "127.0.0.1".into(),
+            port: 1,
+            kind: ServerKind::Alba,
+            root: None,
+        };
+        let xray = ServerProfile {
+            name: "xray".into(),
+            host: "127.0.0.2".into(),
+            port: 2,
+            kind: ServerKind::Folders,
+            root: Some("/data/XRay".into()),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let remote = crate::remote::spawn(
+            &rt,
+            crate::remote::Settings {
+                rate: 1.0,
+                burst: 1,
+                known_hosts: None,
+                beamlines: vec!["bl13".into()],
+                parallel_downloads: 3,
+            },
+            tx.clone(),
+        );
+        let config_path = Some(root.join("config").join("config.toml"));
+        let mut app = App::new(Config::default(), vec![alba, xray], config_path, root.join("launch"), remote, tx, None, false);
+        // no user yet: the username box is first, the server row above it
+        assert_eq!((login(&app).field, login(&app).server), (1, 0));
+        app.on_key(KeyEvent::from(KeyCode::Up));
+        app.on_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(login(&app).server, 1);
+        // only the dialog changed: the active server is still the first one
+        assert_eq!((app.cfg.host.as_str(), app.server_sel), ("127.0.0.1", 0));
+        app.on_key(KeyEvent::from(KeyCode::Left));
+        app.on_key(KeyEvent::from(KeyCode::Right));
+        app.on_key(KeyEvent::from(KeyCode::Enter)); // server row -> username
+        typed(&mut app, "u9");
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        typed(&mut app, "pw");
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(login(&app).busy);
+        // the login was sent to the chosen server, which is now the active one
+        assert_eq!(app.server_sel, 1);
+        assert_eq!(app.cfg.host, "127.0.0.2");
+        assert_eq!(app.cfg.kind, ServerKind::Folders);
+        assert_eq!(app.cfg.remote_root.as_deref(), Some("/data/XRay"));
+        assert_eq!(app.cfg.port, 2);
+        app.shutdown();
+        drop(app);
+        drop(rt);
         std::fs::remove_dir_all(&root).ok();
     }
 }

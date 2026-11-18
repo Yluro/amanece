@@ -335,7 +335,7 @@ mod live {
             limiter: Arc::new(Limiter::new(3., 6, Arc::new(AtomicU64::new(0)))),
             beamlines: &[],
             remote_root: Some(&root),
-            nas: true,
+            kind: crate::config::ServerKind::Folders,
         };
         let (conn, key) = session::connect(&target, &env("NAS_USER"), &env("NAS_PASS"))
             .await
