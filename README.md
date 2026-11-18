@@ -289,5 +289,6 @@ ALBA_USER=… ALBA_PASS=… ALBA_DATE=… ALBA_SAMPLE=… ALBA_FRAMES_N=9 ALBA_D
 
 ## Generic NAS archives (local branch)
 
-Use `--nas --remote-root /path/to/archive` to browse a read-only SFTP archive.
+Add the archive as a `[[servers]]` entry in `config.toml` (or use `--nas --root /path/to/archive`)
+to browse a read-only SFTP archive next to the built-in ALBA server.
 See [NAS setup, supported formats and tests](docs/NAS.md).
