@@ -9,8 +9,8 @@ const HEADER_BYTES: u64 = 64 * 1024;
 
 pub fn validate_root(root: &str) -> Result<()> {
     ensure!(
-        root.starts_with('/') && root.trim_matches('/').len() > 0,
-        "NAS mode requires an absolute remote_root below / (the SFTP path, not the NAS filesystem path)"
+        root.starts_with('/'),
+        "root must be an absolute SFTP path (as the SFTP account sees it, not the NAS filesystem path)"
     );
     validate_relative(root.strip_prefix('/').unwrap_or(root).trim_end_matches('/'))
 }
@@ -293,10 +293,11 @@ mod tests {
     }
     #[test]
     fn paths_and_source_identity() {
-        for root in ["", "/", "relative", "/a/../b", "/a//b", "/a\nb"] {
+        for root in ["", "relative", "/a/../b", "/a//b", "/a\nb"] {
             assert!(validate_root(root).is_err(), "{root:?}");
         }
         assert!(validate_root("/Public/ALBA").is_ok());
+        assert!(validate_root("/").is_ok(), "the login folder can be the SFTP root");
         assert!(!visible("@eaDir"));
         assert!(!visible("../secret"));
         assert_ne!(source_id("nas", 22, "/a"), source_id("nas", 22, "/b"));
