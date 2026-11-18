@@ -282,7 +282,7 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         assert_eq!(cfg.cache_host(), cfg.host);
         let alba = cfg.cache_host();
-        cfg.nas = true;
+        cfg.kind = crate::config::ServerKind::Folders;
         cfg.remote_root = Some("/data/XRay".into());
         let xray = cfg.cache_host();
         assert_ne!(alba, xray);
