@@ -163,6 +163,8 @@ pub struct Login {
     pub stored_pass: bool,
     pub busy: bool,
     pub error: Option<String>,
+    /// Opened with C while connected: Esc keeps that connection instead of going offline.
+    pub reconnect: bool,
 }
 
 /// Login dialog rows, top to bottom (`Login::field`).
@@ -300,6 +302,10 @@ pub struct Hit {
     /// The login dialog's "remember username" and "remember password" boxes.
     pub login_remember: Rect,
     pub login_remember_pass: Rect,
+    /// The login dialog's server, username and password rows.
+    pub login_server: Rect,
+    pub login_user: Rect,
+    pub login_pass: Rect,
 }
 
 pub struct Active {
@@ -485,9 +491,27 @@ impl App {
                 .and_then(crate::config::last_local_folder)
                 .unwrap_or(base),
         };
+        // usernames are kept per server; older versions kept one list for all of them, whose
+        // names go to the servers they have a cache or a saved password for
+        let mut sort_error = None;
+        if let Some(dir) = state_dir.as_deref() {
+            let sorted = crate::config::sort_remembered(dir, |u| {
+                let mut hosts: Vec<String> = servers
+                    .iter()
+                    .filter(|p| {
+                        let key = crate::cache::account_key(u, &cfg.cache_host_of(p));
+                        dir.join(format!("cache-{key}.json")).exists() || crate::secret::load(u, &p.host).is_some()
+                    })
+                    .map(|p| p.host.clone())
+                    .collect();
+                hosts.dedup();
+                hosts
+            });
+            sort_error = sorted.err();
+        }
         let saved_users = state_dir
             .as_deref()
-            .map(crate::config::remembered_users)
+            .map(|d| crate::config::remembered_users(d, &servers[0].host))
             .unwrap_or_default();
         let last_user = user
             .filter(|u| !u.trim().is_empty())
@@ -587,6 +611,9 @@ impl App {
                 format!("unit-cell database: {} cells ({})", app.cells.len(), crate::cells::FILE),
             ),
         }
+        if let Some(e) = sort_error {
+            app.console.push(LineKind::Warn, format!("cannot sort the remembered usernames by server: {e}"));
+        }
         if offline {
             app.console
                 .push(LineKind::Info, "offline mode: press C to connect");
@@ -619,21 +646,47 @@ impl App {
             stored_pass: false,
             busy: false,
             error: None,
+            reconnect: self.connected(),
         };
-        self.fill_login(&mut l, self.last_user.clone().unwrap_or_default());
+        self.load_saved_users(l.server);
+        // the last login (or --user), unless it is another server's remembered name; then
+        // this server's last remembered name
+        let user = self.last_user.clone().filter(|u| self.is_saved(u) || !self.saved_elsewhere(u, l.server));
+        self.fill_login(&mut l, user.or_else(|| self.saved_users.first().cloned()).unwrap_or_default());
         l.field = if l.user.is_empty() { LOGIN_USER } else { LOGIN_PASS };
         self.dialog = Some(Dialog::Login(l));
     }
 
-    /// ←→ on the server row: the next (or previous) configured server.
-    fn cycle_server(&self, l: &mut Login, next: bool) {
+    /// Is `user` remembered for a server on another host than `servers[idx]`?
+    fn saved_elsewhere(&self, user: &str, idx: usize) -> bool {
+        let Some(dir) = self.state_dir.as_deref() else { return false };
+        let here = &self.servers[idx].host;
+        self.servers
+            .iter()
+            .filter(|p| &p.host != here)
+            .any(|p| crate::config::remembered_users(dir, &p.host).iter().any(|u| u == user.trim()))
+    }
+
+    /// The remembered usernames of `servers[idx]`, for the login dialog.
+    fn load_saved_users(&mut self, idx: usize) {
+        if let (Some(dir), Some(p)) = (self.state_dir.as_deref(), self.servers.get(idx)) {
+            self.saved_users = crate::config::remembered_users(dir, &p.host);
+        }
+    }
+
+    /// ←→ (or a click) on the server row: the next (or previous) configured server, with
+    /// its own remembered usernames.
+    fn cycle_server(&mut self, l: &mut Login, next: bool) {
         let n = self.servers.len();
         if n < 2 {
             return;
         }
+        // a name typed by hand stays; one picked from the old server's list is replaced
+        let picked = l.user.trim().is_empty() || self.is_saved(&l.user);
         l.server = if next { (l.server + 1) % n } else { (l.server + n - 1) % n };
+        self.load_saved_users(l.server);
+        let user = if picked { self.saved_users.first().cloned().unwrap_or_default() } else { l.user.clone() };
         // the password shown was typed for, or saved for, the other server
-        let user = l.user.clone();
         self.fill_login(l, user);
     }
 
@@ -696,26 +749,20 @@ impl App {
         self.saved_users.iter().any(|u| u == user.trim())
     }
 
-    /// Puts the username first in the remembered list (`keep`) or forgets it. A name
-    /// that leaves the list (forgotten, or the oldest past the limit) takes its saved
-    /// password with it.
-    fn remember_login(&mut self, user: &str, keep: bool) {
+    /// Puts the username first in the remembered list of the server at `host` (`keep`)
+    /// or forgets it there. A name that leaves the list (forgotten, or the oldest past the
+    /// limit) takes its saved password for that server with it.
+    fn remember_login(&mut self, host: &str, user: &str, keep: bool) {
         let Some(dir) = self.state_dir.clone() else {
             return;
         };
-        match crate::config::remember_user(&dir, user, keep) {
+        let before = crate::config::remembered_users(&dir, host);
+        match crate::config::remember_user(&dir, host, user, keep) {
             Ok(users) => {
-                let gone: Vec<String> = self.saved_users.iter().filter(|u| !users.contains(u)).cloned().collect();
-                self.saved_users = users;
-                // a forgotten name takes its password on every server with it
-                let mut hosts: Vec<String> = self.servers.iter().map(|s| s.host.clone()).collect();
-                hosts.sort();
-                hosts.dedup();
-                for u in gone {
-                    for h in &hosts {
-                        self.forget_password(&u, h);
-                    }
+                for u in before.iter().filter(|u| !users.contains(u)) {
+                    self.forget_password(u, host);
                 }
+                self.saved_users = users;
             }
             Err(e) => self.say(LineKind::Warn, format!("cannot update the remembered usernames: {e}")),
         }
@@ -1102,7 +1149,8 @@ impl App {
                     let pass = std::mem::take(&mut l.pass);
                     self.dialog = None;
                     if remember {
-                        self.remember_login(&user, true);
+                        let host = self.cfg.host.clone();
+                        self.remember_login(&host, &user, true);
                     }
                     // only now that the server accepted it, and only for a remembered name
                     if remember && save_pass && self.is_saved(&user) {
@@ -1726,10 +1774,9 @@ impl App {
                     self.say(LineKind::Warn, "cancelling queued downloads…");
                 }
             }
+            // log in, or (connected) reconnect or change server: Esc keeps the connection
             KeyCode::Char('C') => {
-                if self.connected() {
-                    self.say(LineKind::Info, "already connected");
-                } else if self.login_attempts >= MAX_LOGIN_ATTEMPTS {
+                if self.login_attempts >= MAX_LOGIN_ATTEMPTS {
                     self.say(LineKind::Error, "too many failed logins this session");
                 } else {
                     self.open_login();
@@ -1776,18 +1823,31 @@ impl App {
         }
         if self.dialog.is_some() {
             let p = Position::new(m.column, m.row);
-            // the two "remember" boxes; nothing is saved or forgotten until a login is sent
-            if clicked
-                && let Some(Dialog::Login(l)) = &mut self.dialog
-                && !l.busy
+            let right = m.kind == MouseEventKind::Down(MouseButton::Right);
+            if (clicked || right)
+                && let Some(Dialog::Login(mut l)) = self.dialog.take()
             {
-                let hit = self.hit.borrow();
-                for (rect, field) in [(hit.login_remember, LOGIN_REMEMBER), (hit.login_remember_pass, LOGIN_REMEMBER_PASS)] {
-                    if rect.contains(p) {
-                        l.toggle(field);
-                        l.field = field;
+                if !l.busy {
+                    let hit = self.hit.borrow().clone();
+                    if hit.login_server.contains(p) {
+                        // the server row: a click picks the next server, a right click the previous
+                        l.field = LOGIN_SERVER;
+                        self.cycle_server(&mut l, clicked);
+                    } else if clicked && hit.login_user.contains(p) {
+                        l.field = LOGIN_USER;
+                    } else if clicked && hit.login_pass.contains(p) {
+                        l.field = LOGIN_PASS;
+                    } else if clicked {
+                        // the two "remember" boxes; nothing is saved or forgotten until a login is sent
+                        for (rect, field) in [(hit.login_remember, LOGIN_REMEMBER), (hit.login_remember_pass, LOGIN_REMEMBER_PASS)] {
+                            if rect.contains(p) {
+                                l.toggle(field);
+                                l.field = field;
+                            }
+                        }
                     }
                 }
+                self.dialog = Some(Dialog::Login(l));
             }
             return;
         }
@@ -1960,6 +2020,11 @@ impl App {
                     return;
                 }
                 match key.code {
+                    // opened with C while connected: nothing changes
+                    KeyCode::Esc if l.reconnect && self.connected() => {
+                        self.say(LineKind::Info, "still connected; nothing changed");
+                        return;
+                    }
                     KeyCode::Esc => {
                         self.conn = Conn::Offline;
                         self.console.push(
@@ -1979,7 +2044,8 @@ impl App {
                     KeyCode::Char(' ') if l.field >= LOGIN_REMEMBER => l.toggle(l.field),
                     // forget the saved name shown (and its password), without logging in
                     KeyCode::Delete if l.field == LOGIN_USER && self.is_saved(&l.user) => {
-                        self.remember_login(&l.user, false);
+                        let host = self.servers[l.server].host.clone();
+                        self.remember_login(&host, &l.user, false);
                         l.remember = false;
                         l.remember_pass = false;
                         l.user_edited();
@@ -1997,7 +2063,8 @@ impl App {
                             self.conn = Conn::Connecting;
                             if !l.remember {
                                 // forgets its saved password too
-                                self.remember_login(&l.user, false);
+                                let host = self.cfg.host.clone();
+                                self.remember_login(&host, &l.user, false);
                             } else if !l.remember_pass && self.is_saved(&l.user) {
                                 let host = self.cfg.host.clone();
                                 self.forget_password(&l.user, &host);
@@ -3427,6 +3494,73 @@ mod login_tests {
         }
     }
 
+    #[test]
+    fn each_server_offers_its_own_usernames_and_c_reconnects() {
+        use crate::config::{ServerKind, ServerProfile};
+        let root = std::env::temp_dir().join(format!("amanece_app_per_server_{}", std::process::id()));
+        let config = root.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(root.join("launch")).unwrap();
+        let cfg = Config { host: "127.0.0.1".into(), ..Config::default() };
+        let nas = ServerProfile { name: "nas".into(), host: "127.0.0.2".into(), port: 22, kind: ServerKind::Folders, root: None };
+        let mut servers = cfg.server_list();
+        servers.push(nas.clone());
+        // an older version's shared list; each name has a cache on one server only
+        std::fs::write(config.join("login.toml"), "users = [\"amanece\", \"u2025\"]\n").unwrap();
+        for (user, server) in [("amanece", &nas), ("u2025", &servers[0])] {
+            let key = crate::cache::account_key(user, &cfg.cache_host_of(server));
+            std::fs::write(config.join(format!("cache-{key}.json")), "{}").unwrap();
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let settings = crate::remote::Settings { rate: 1.0, burst: 1, known_hosts: None, beamlines: vec![], parallel_downloads: 1 };
+        let remote = crate::remote::spawn(&rt, settings, tx.clone());
+        let mut app = App::new(cfg, servers, Some(config.join("config.toml")), root.join("launch"), remote, tx, None, false);
+        let key = |app: &mut App, k| app.on_key(KeyEvent::from(k));
+
+        // ALBA, the first server, offers only its own name
+        assert_eq!(app.saved_users, ["u2025"]);
+        assert_eq!((login(&app).server, login(&app).user.as_str()), (0, "u2025"));
+        // on the server row, → goes to the NAS and its name
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Up);
+        assert_eq!(login(&app).field, LOGIN_SERVER);
+        key(&mut app, KeyCode::Right);
+        assert_eq!((login(&app).server, login(&app).user.as_str()), (1, "amanece"));
+        assert_eq!(app.saved_users, ["amanece"]);
+        // a name typed by hand stays when the server changes
+        key(&mut app, KeyCode::Tab);
+        typed(&mut app, "x");
+        key(&mut app, KeyCode::BackTab);
+        key(&mut app, KeyCode::Left);
+        assert_eq!((login(&app).server, login(&app).user.as_str()), (0, "amanecex"));
+
+        // C while connected opens the dialog again; Esc keeps the connection
+        key(&mut app, KeyCode::Esc);
+        app.on_remote(connected("u2025"));
+        assert!(app.connected() && app.dialog.is_none());
+        key(&mut app, KeyCode::Char('C'));
+        assert!(login(&app).reconnect);
+        assert_eq!(login(&app).user, "u2025", "the account in use");
+        key(&mut app, KeyCode::Esc);
+        assert!(app.connected() && app.dialog.is_none(), "still connected");
+        // and Enter logs in again (here: to the NAS), closing the old session first
+        key(&mut app, KeyCode::Char('C'));
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Right);
+        key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::Tab);
+        typed(&mut app, "pw");
+        key(&mut app, KeyCode::Enter);
+        assert!(login(&app).busy && app.conn == Conn::Connecting);
+        assert_eq!(app.cfg.host, "127.0.0.2", "the NAS is the server in use");
+        app.shutdown();
+        drop(app);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     fn typed(app: &mut App, s: &str) {
         for c in s.chars() {
             app.on_key(KeyEvent::from(KeyCode::Char(c)));
@@ -3460,7 +3594,7 @@ mod login_tests {
         assert_eq!(login(&app).pass, "p w");
         app.on_remote(connected("ua"));
         assert!(app.dialog.is_none());
-        let saved = || crate::config::remembered_users(&config);
+        let saved = || crate::config::remembered_users(&config, "127.0.0.1");
         assert_eq!(saved(), ["ua"]);
         let a = crate::cache::account_key("ua", "127.0.0.1");
         assert_eq!(app.cache.account.as_deref(), Some(a.as_str()));
@@ -3552,7 +3686,7 @@ mod login_tests {
         drop(app);
 
         // --user still wins over a remembered name, and isn't ticked unless it is saved
-        crate::config::remember_user(&config, "ua", true).unwrap();
+        crate::config::remember_user(&config, "127.0.0.1", "ua", true).unwrap();
         let (app, _rt4) = app_in(&root, Some("uc".into()));
         assert_eq!(login(&app).user, "uc");
         assert!(!login(&app).remember);
@@ -3588,7 +3722,7 @@ mod login_tests {
         assert_eq!(stored(), None);
         app.on_remote(connected("pa"));
         assert_eq!(stored().as_deref(), Some("s3cret"));
-        assert_eq!(crate::config::remembered_users(&config), ["pa"]);
+        assert_eq!(crate::config::remembered_users(&config, "127.0.0.1"), ["pa"]);
         app.save_cache();
         app.shutdown();
         drop(app);
@@ -3653,7 +3787,7 @@ mod login_tests {
         assert_eq!(stored(), None);
         app.on_remote(connected("pa"));
         assert_eq!(stored(), None);
-        assert_eq!(crate::config::remembered_users(&config), ["pa"]);
+        assert_eq!(crate::config::remembered_users(&config, "127.0.0.1"), ["pa"]);
         app.shutdown();
         drop(app);
 
@@ -3663,7 +3797,7 @@ mod login_tests {
         assert_eq!(login(&app).pass, "z");
         key(&mut app, KeyCode::BackTab);
         key(&mut app, KeyCode::Delete);
-        assert!(crate::config::remembered_users(&config).is_empty());
+        assert!(crate::config::remembered_users(&config, "127.0.0.1").is_empty());
         assert_eq!(stored(), None);
         assert!(login(&app).pass.is_empty() && !login(&app).remember_pass);
         drop(app);

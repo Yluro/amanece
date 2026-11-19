@@ -2321,6 +2321,11 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                 let mut hit = app.hit.borrow_mut();
                 hit.login_remember = Rect::new(r.x + 1 + 13, r.y + 6, w_user, 1);
                 hit.login_remember_pass = Rect::new(r.x + 1 + 13, r.y + 7, w_pass, 1);
+                // the fields from their label to the dialog's edge (the server row's ←→ too)
+                let row = |y: u16| Rect::new(r.x + 1, y, r.width.saturating_sub(2), 1);
+                hit.login_server = row(r.y + 1);
+                hit.login_user = row(r.y + 4);
+                hit.login_pass = row(r.y + 5);
             }
             let detail = match chosen {
                 Some(p) if p.kind.browses_folders() => {
@@ -2350,12 +2355,14 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
             lines.push(Line::from(""));
             let saved_here = app.saved_users.iter().any(|u| u == l.user.trim());
             let help = match l.field {
-                LOGIN_SERVER if app.servers.len() > 1 => "  Enter next · ←→ server · Esc work offline",
+                LOGIN_SERVER if app.servers.len() > 1 => "  Enter next · ←→ or click: server · Esc work offline",
                 LOGIN_SERVER => "  Enter next · Esc work offline",
                 LOGIN_USER if saved_here => "  Enter next · ←→ saved names · Del forget it · Esc offline",
                 LOGIN_USER if !app.saved_users.is_empty() => "  Enter next · ←→ saved names · Esc work offline",
                 _ => "  Enter connect · Tab next field · Esc work offline",
             };
+            // opened with C while connected: Esc keeps the connection
+            let help = if l.reconnect && app.connected() { help.replace("Esc work offline", "Esc cancel").replace("Esc offline", "Esc cancel") } else { help.to_string() };
             lines.push(Line::from(help).fg(Color::DarkGray));
             let note = if l.remember_pass {
                 format!("  The password goes to {}.", crate::secret::store_name())
@@ -2498,7 +2505,7 @@ fn help_lines() -> Vec<Line<'static>> {
         sec("Everywhere"),
         row("Tab / Shift-Tab", "next / previous panel"),
         row(":", "type in the console"),
-        row("C", "log in (when offline)"),
+        row("C", "log in; when connected, reconnect or change server (Esc keeps the connection)"),
         row("p", "polling: manual → 10 min → 2 min → 30 s → 5 s"),
         row("n", "new-sample sound on/off"),
         row("L", "include logs in downloads on/off"),
@@ -3523,6 +3530,7 @@ mod tests {
             field: 0,
             remember: false,
             remember_pass: false,
+            reconnect: false,
             stored_pass: false,
             busy: false,
             error: None,
@@ -3532,7 +3540,36 @@ mod tests {
         assert!(screen.contains("xray  nas.example.org:22222"));
         assert!(screen.contains("←→ 2/2"));
         assert!(screen.contains("folders from /data/XRay"));
-        assert!(screen.contains("←→ server"), "help for the server row");
+        assert!(screen.contains("←→ or click: server"), "help for the server row");
+
+        // the mouse: a click on the server row picks the next server, a right click the
+        // previous one; a click on a field focuses it
+        let login = |app: &App| match &app.dialog {
+            Some(crate::app::Dialog::Login(l)) => (l.server, l.field),
+            _ => panic!("no login dialog"),
+        };
+        let (x, y) = find(&screen, "xray  nas.example.org");
+        click(&mut app, x, y);
+        let screen = render(&app, 120, 40);
+        assert!(screen.contains("Connect to ALBA") && screen.contains("ALBA  userdata.cells.es:443"), "{screen}");
+        assert_eq!(login(&app), (0, crate::app::LOGIN_SERVER));
+        let (x, y) = find(&screen, "ALBA  userdata");
+        app.handle(crate::event::AppEvent::Input(ratatui::crossterm::event::Event::Mouse(
+            ratatui::crossterm::event::MouseEvent {
+                kind: ratatui::crossterm::event::MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Right),
+                column: x,
+                row: y,
+                modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+            },
+        )));
+        assert_eq!(login(&app).0, 1, "right click: the previous server");
+        let screen = render(&app, 120, 40);
+        let (x, y) = find(&screen, "Username");
+        click(&mut app, x, y);
+        assert_eq!(login(&app), (1, crate::app::LOGIN_USER));
+        let (x, y) = find(&render(&app, 120, 40), "Password");
+        click(&mut app, x + 15, y);
+        assert_eq!(login(&app).1, crate::app::LOGIN_PASS);
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -3548,6 +3585,7 @@ mod tests {
             field: 2,
             remember: false,
             remember_pass: false,
+            reconnect: false,
             stored_pass: false,
             busy: false,
             error: None,

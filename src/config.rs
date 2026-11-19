@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -324,6 +325,13 @@ impl Config {
     }
 
     /// Caches of folder servers are kept apart per host, port and root.
+    /// The cache scope of server `p`, as `cache_host` gives it once `p` is applied.
+    pub fn cache_host_of(&self, p: &ServerProfile) -> String {
+        let mut c = self.clone();
+        c.apply(p);
+        c.cache_host()
+    }
+
     pub fn cache_host(&self) -> String {
         match self.kind {
             ServerKind::Alba => self.host.clone(),
@@ -426,69 +434,124 @@ const LOGIN_FILE: &str = "login.toml";
 /// At most this many usernames are remembered; the least recently used one drops off.
 pub const MAX_REMEMBERED: usize = 10;
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, PartialEq, Debug)]
 struct Remembered {
-    /// Most recently used first.
-    #[serde(default)]
+    /// Before 0.5 one list served every server. Names still here belong to no server yet:
+    /// they are offered on all of them until a login (or `sort_remembered`) places them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     users: Vec<String>,
     /// 0.2.0 kept a single name here; still read, never written.
     #[serde(default, skip_serializing)]
     user: Option<String>,
+    /// The names of each server, by host (as its saved passwords), most recently used first.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    servers: BTreeMap<String, Names>,
 }
 
-/// The usernames saved by the login dialog's "remember username" box, most recently
-/// used first.
-pub fn remembered_users(dir: &Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(dir.join(LOGIN_FILE)) else {
-        return Vec::new();
-    };
-    let r: Remembered = toml::from_str(&text).unwrap_or_default();
-    let mut users: Vec<String> = Vec::new();
-    for u in r.users.into_iter().chain(r.user) {
+#[derive(Serialize, Deserialize, Default, PartialEq, Debug, Clone)]
+struct Names {
+    users: Vec<String>,
+}
+
+/// Trimmed, non-empty, each once, at most `MAX_REMEMBERED`.
+fn tidy_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for u in names {
         let u = u.trim().to_string();
-        if !u.is_empty() && !users.contains(&u) {
-            users.push(u);
+        if !u.is_empty() && !out.contains(&u) {
+            out.push(u);
         }
     }
-    users.truncate(MAX_REMEMBERED);
-    users
+    out.truncate(MAX_REMEMBERED);
+    out
 }
 
-/// Puts `user` first in the saved list (`keep`) or takes it out, and returns the new
-/// list. Only usernames are written, never a password; an empty list removes the file.
-pub fn remember_user(dir: &Path, user: &str, keep: bool) -> std::io::Result<Vec<String>> {
-    let user = user.trim();
-    let before = remembered_users(dir);
-    let mut users = before.clone();
-    users.retain(|u| u != user);
-    if keep && !user.is_empty() {
-        users.insert(0, user.to_string());
-        users.truncate(MAX_REMEMBERED);
+fn read_remembered(dir: &Path) -> Remembered {
+    let Ok(text) = std::fs::read_to_string(dir.join(LOGIN_FILE)) else {
+        return Remembered::default();
+    };
+    let mut r: Remembered = toml::from_str(&text).unwrap_or_default();
+    r.users = tidy_names(r.users.drain(..).chain(r.user.take()));
+    for n in r.servers.values_mut() {
+        n.users = tidy_names(n.users.drain(..));
     }
-    if users == before {
-        return Ok(users);
-    }
+    r.servers.retain(|_, n| !n.users.is_empty());
+    r
+}
+
+/// Writes `r`; nothing left removes the file. Only usernames, never a password.
+fn write_remembered(dir: &Path, r: &Remembered) -> std::io::Result<()> {
     let path = dir.join(LOGIN_FILE);
-    if users.is_empty() {
+    if r.users.is_empty() && r.servers.is_empty() {
         return match std::fs::remove_file(path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => Ok(users),
+            _ => Ok(()),
         };
     }
     std::fs::create_dir_all(dir)?;
-    let body = toml::to_string(&Remembered {
-        users: users.clone(),
-        user: None,
-    })
-    .unwrap_or_default();
+    let body = toml::to_string(r).unwrap_or_default();
     std::fs::write(
         path,
         format!(
             "# Written by amanece: usernames that had \"remember username\" ticked at login,\n\
-             # most recently used first. Never a password. Untick the box at login to drop one.\n{body}"
+             # per server host, most recently used first. Never a password. Untick the box\n\
+             # at login to drop one.\n{body}"
         ),
-    )?;
-    Ok(users)
+    )
+}
+
+/// The usernames saved for the server at `host` by the login dialog's "remember username"
+/// box, most recently used first; then names from before 0.5 that no server has claimed.
+pub fn remembered_users(dir: &Path, host: &str) -> Vec<String> {
+    let r = read_remembered(dir);
+    let own = r.servers.get(host).map(|n| n.users.clone()).unwrap_or_default();
+    tidy_names(own.into_iter().chain(r.users))
+}
+
+/// Puts `user` first in the server's list (`keep`) or takes it out, and returns the
+/// server's new list. Either way the name stops being one of the old shared ones.
+pub fn remember_user(dir: &Path, host: &str, user: &str, keep: bool) -> std::io::Result<Vec<String>> {
+    let user = user.trim();
+    let mut r = read_remembered(dir);
+    let before = read_remembered(dir);
+    r.users.retain(|u| u != user);
+    let names = r.servers.entry(host.to_string()).or_default();
+    names.users.retain(|u| u != user);
+    if keep && !user.is_empty() {
+        names.users.insert(0, user.to_string());
+        names.users.truncate(MAX_REMEMBERED);
+    }
+    r.servers.retain(|_, n| !n.users.is_empty());
+    if r != before {
+        write_remembered(dir, &r)?;
+    }
+    Ok(remembered_users(dir, host))
+}
+
+/// Gives each name of the old shared list to the server hosts `hosts_of` says it was
+/// used on (its cache, its saved password); names used nowhere stay shared. Runs at start.
+pub fn sort_remembered(dir: &Path, hosts_of: impl Fn(&str) -> Vec<String>) -> std::io::Result<()> {
+    let mut r = read_remembered(dir);
+    if r.users.is_empty() {
+        return Ok(());
+    }
+    let mut shared = Vec::new();
+    for u in std::mem::take(&mut r.users) {
+        let hosts = hosts_of(&u);
+        if hosts.is_empty() {
+            shared.push(u);
+            continue;
+        }
+        for h in hosts {
+            let names = r.servers.entry(h).or_default();
+            if !names.users.contains(&u) {
+                // the old list's order (most recent first) is kept
+                names.users.push(u.clone());
+            }
+        }
+    }
+    r.users = shared;
+    write_remembered(dir, &r)
 }
 
 const FOLDER_FILE: &str = "local_folder.txt";
@@ -527,29 +590,67 @@ mod tests {
     #[test]
     fn remembers_and_forgets_usernames() {
         let dir = std::env::temp_dir().join(format!("amanece_login_{}", std::process::id()));
-        assert!(remembered_users(&dir).is_empty());
-        remember_user(&dir, "u2025\"x", true).unwrap();
-        remember_user(&dir, "ub", true).unwrap();
-        assert_eq!(remembered_users(&dir), ["ub", "u2025\"x"]);
+        const H: &str = "alba.example";
+        assert!(remembered_users(&dir, H).is_empty());
+        remember_user(&dir, H, "u2025\"x", true).unwrap();
+        remember_user(&dir, H, "ub", true).unwrap();
+        assert_eq!(remembered_users(&dir, H), ["ub", "u2025\"x"]);
         // used again: back to the front, not twice
-        assert_eq!(remember_user(&dir, "u2025\"x", true).unwrap(), ["u2025\"x", "ub"]);
-        assert_eq!(remember_user(&dir, "ub", false).unwrap(), ["u2025\"x"]);
-        assert_eq!(remember_user(&dir, "never-saved", false).unwrap(), ["u2025\"x"]);
-        remember_user(&dir, "u2025\"x", false).unwrap();
+        assert_eq!(remember_user(&dir, H, "u2025\"x", true).unwrap(), ["u2025\"x", "ub"]);
+        assert_eq!(remember_user(&dir, H, "ub", false).unwrap(), ["u2025\"x"]);
+        assert_eq!(remember_user(&dir, H, "never-saved", false).unwrap(), ["u2025\"x"]);
+        remember_user(&dir, H, "u2025\"x", false).unwrap();
         assert!(!dir.join(LOGIN_FILE).exists());
-        remember_user(&dir, "u2025\"x", false).unwrap();
+        remember_user(&dir, H, "u2025\"x", false).unwrap();
         // the oldest name drops off past the limit
         for i in 0..MAX_REMEMBERED + 2 {
-            remember_user(&dir, &format!("u{i}"), true).unwrap();
+            remember_user(&dir, H, &format!("u{i}"), true).unwrap();
         }
-        let users = remembered_users(&dir);
+        let users = remembered_users(&dir, H);
         assert_eq!(users.len(), MAX_REMEMBERED);
         assert_eq!(users[0], format!("u{}", MAX_REMEMBERED + 1));
-        // the one-name file written by 0.2.0 still reads
+        // the one-name file written by 0.2.0 still reads, shared until a login places it
         std::fs::write(dir.join(LOGIN_FILE), "user = \"ua\"\n").unwrap();
-        assert_eq!(remembered_users(&dir), ["ua"]);
-        assert_eq!(remember_user(&dir, "ub", true).unwrap(), ["ub", "ua"]);
+        assert_eq!(remembered_users(&dir, H), ["ua"]);
+        assert_eq!(remember_user(&dir, H, "ub", true).unwrap(), ["ub", "ua"]);
         assert!(!std::fs::read_to_string(dir.join(LOGIN_FILE)).unwrap().contains("user ="));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn usernames_are_kept_per_server() {
+        let dir = std::env::temp_dir().join(format!("amanece_login_servers_{}", std::process::id()));
+        let (alba, nas) = ("userdata.example", "10.0.0.7");
+        remember_user(&dir, alba, "u2024", true).unwrap();
+        remember_user(&dir, nas, "amanece", true).unwrap();
+        assert_eq!(remembered_users(&dir, alba), ["u2024"]);
+        assert_eq!(remembered_users(&dir, nas), ["amanece"]);
+        assert!(remembered_users(&dir, "elsewhere").is_empty());
+        // forgetting on one server leaves the other alone
+        remember_user(&dir, nas, "u2024", false).unwrap();
+        assert_eq!(remembered_users(&dir, alba), ["u2024"]);
+
+        // the shared list of older versions: each name goes where it was used, the
+        // rest stay offered everywhere
+        std::fs::write(dir.join(LOGIN_FILE), "users = [\"amanece\", \"u2025\", \"u2024\", \"who\"]\n").unwrap();
+        sort_remembered(&dir, |u| match u {
+            "amanece" => vec![nas.to_string()],
+            "u2025" | "u2024" => vec![alba.to_string()],
+            _ => vec![],
+        })
+        .unwrap();
+        assert_eq!(remembered_users(&dir, alba), ["u2025", "u2024", "who"]);
+        assert_eq!(remembered_users(&dir, nas), ["amanece", "who"]);
+        // a login places the last one, and it leaves the other servers' lists
+        remember_user(&dir, nas, "who", true).unwrap();
+        assert_eq!(remembered_users(&dir, alba), ["u2025", "u2024"]);
+        assert_eq!(remembered_users(&dir, nas), ["who", "amanece"]);
+        let text = std::fs::read_to_string(dir.join(LOGIN_FILE)).unwrap();
+        // every name has a server now: no shared list left before the server tables
+        let shared = text.split("[servers.").next().unwrap();
+        assert!(text.contains("[servers.\"10.0.0.7\"]") && !shared.contains("users ="), "{text}");
+        // nothing to sort: the file is left as it is
+        sort_remembered(&dir, |_| panic!("not asked")).unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }
 

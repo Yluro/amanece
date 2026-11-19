@@ -85,10 +85,16 @@ amanece
 ```
 
 
+Pick the server on the dialogue's first row with `←`/`→` or a click (right click: the previous one).
+
 Tick **Remember username** in the login dialogue (`Tab` to it, `Space`, or click) to have the username
-prefilled next time. Up to 10 usernames are remembered: the last one used is prefilled and `←`/`→` in
-the username field picks another. Only usernames are saved, in `login.toml`. To forget one, pick it
-and press `Del` (or log in with the box unticked).
+prefilled next time. Usernames are remembered per server (up to 10 each), so an ALBA proposal account
+is never offered for the NAS: the last one used is prefilled and `←`/`→` in the username field picks
+another. Only usernames are saved, in `login.toml`. To forget one, pick it and press `Del` (or log in
+with the box unticked).
+
+Press `C` to log in again later: offline it connects, and while connected it reopens the dialogue to
+reconnect or change server (`Esc` keeps the current connection).
 
 **Remember password** (off by default) also keeps that account's password in your system's credential 
 manager under the name `amanece`. It is saved only after the server accepted it. If the server ever rejects 
@@ -103,6 +109,7 @@ The TUI is fully mouse compatible, although there are several useful key shortcu
 | Key | Action |
 |---|---|
 | `Tab` | cycle panels |
+| `C` | log in; when connected, reconnect or change server (`Esc` keeps the connection) |
 | `p` | cycle polling: manual → 10 min → 2 min → 30 s → 5 s (the fast rates only re-list the open beamtime; sample rescans stay at most once a minute) |
 | `n` | toggle the new-sample sound |
 | `E` | open the Local folder in the file explorer |
@@ -261,7 +268,7 @@ on Linux, `~/Library/Application Support/amanece/` on macOS). Press `O` in the a
 - `cache-<id>.json` – listings and stats already fetched, one file per account (`<id>` is a hash,
   not the username)****
 - `amanece.log` – console log (useful for bug reports)
-- `login.toml` – the usernames that have "Remember username" ticked
+- `login.toml` – the usernames that have "Remember username" ticked, per server
 - `cells.toml` – the unit-cell database: one entry per scanned sample (code, beamtime date, space
   group and cell of its ★ solve), from every account's cache. Add your own cells (starting materials,
   ligands, salts) as `[[cell]]` entries with a `code`, an `sg` and a `cell = [a, b, c, α, β, γ]`;
