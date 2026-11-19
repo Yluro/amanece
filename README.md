@@ -197,15 +197,14 @@ gets the selected file, e.g.: with `XDS_ASCII.HKL` selected, `xprep` runs `xprep
 Amanece's settings can be configured by editing: `config.toml`, in amanece's own folder (`O` in the app opens it; see
 [Files](#files)). It is written once, with comments; changes take effect the next time amanece starts. 
 
-Any key that is missing uses its default, so a `config.toml` from an older version
-keeps working and you only need the lines you want to change. It never holds credentials.
+Any key that is missing uses its default, so you only need the lines you want to change.
+It never holds credentials. Servers (ALBA at another address included) are `[[servers]]`
+entries.
 
 ### Connection and polling
 
 | Key | Default | Meaning |
 |---|---|---|
-| `host` | `"userdata.cells.es"` | SFTP server |
-| `port` | `443` | SFTP port |
 | `poll_mode` | `"manual"` | polling at startup: `"manual"`, `"slow"`, `"fast"`, `"30s"` or `"5s"` (`p` cycles them in the app) |
 | `slow_poll_minutes` | `10.0` | interval of the `slow` mode |
 | `fast_poll_minutes` | `2.0` | interval of the `fast` mode |
@@ -279,9 +278,9 @@ on Linux, `~/Library/Application Support/amanece/` on macOS). Press `O` in the a
 
 Saved passwords are not in this folder: they are in the system's credential store (see above).
 
-Older versions kept the cache and log in `.amanece/` inside the launch folder. amanece still reads
-an old cache from there (so nothing is fetched again) but never writes there. Once you have logged
-in with this version, you can delete those folders.
+Versions before 0.5 kept their state elsewhere (`.amanece/` or `.alba_watch/` in the launch
+folder, an `alba_watch` config folder, one username list for every server). amanece 0.5 ignores
+all of it: delete those folders, and tick "remember username" again at the next login.
 
 ## Tests
 

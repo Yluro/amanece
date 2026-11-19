@@ -491,24 +491,6 @@ impl App {
                 .and_then(crate::config::last_local_folder)
                 .unwrap_or(base),
         };
-        // usernames are kept per server; older versions kept one list for all of them, whose
-        // names go to the servers they have a cache or a saved password for
-        let mut sort_error = None;
-        if let Some(dir) = state_dir.as_deref() {
-            let sorted = crate::config::sort_remembered(dir, |u| {
-                let mut hosts: Vec<String> = servers
-                    .iter()
-                    .filter(|p| {
-                        let key = crate::cache::account_key(u, &cfg.cache_host_of(p));
-                        dir.join(format!("cache-{key}.json")).exists() || crate::secret::load(u, &p.host).is_some()
-                    })
-                    .map(|p| p.host.clone())
-                    .collect();
-                hosts.dedup();
-                hosts
-            });
-            sort_error = sorted.err();
-        }
         let saved_users = state_dir
             .as_deref()
             .map(|d| crate::config::remembered_users(d, &servers[0].host))
@@ -516,7 +498,7 @@ impl App {
         let last_user = user
             .filter(|u| !u.trim().is_empty())
             .or_else(|| saved_users.first().cloned());
-        let cache = Cache::load_startup(state_dir.as_deref(), &cfg.cache_host(), last_user.as_deref(), &base);
+        let cache = Cache::load_startup(state_dir.as_deref(), &cfg.cache_host(), last_user.as_deref());
         let mut cells = CellDb::load(state_dir.as_deref());
         for c in Cache::load_all(state_dir.as_deref(), &cfg.cache_host()) {
             cells.record_cache(&c);
@@ -611,9 +593,6 @@ impl App {
                 format!("unit-cell database: {} cells ({})", app.cells.len(), crate::cells::FILE),
             ),
         }
-        if let Some(e) = sort_error {
-            app.console.push(LineKind::Warn, format!("cannot sort the remembered usernames by server: {e}"));
-        }
         if offline {
             app.console
                 .push(LineKind::Info, "offline mode: press C to connect");
@@ -706,7 +685,7 @@ impl App {
         for c in Cache::load_all(dir.as_deref(), &host) {
             self.cells.record_cache(&c);
         }
-        self.show_cache(Cache::load_startup(dir.as_deref(), &host, self.last_user.as_deref(), &self.base));
+        self.show_cache(Cache::load_startup(dir.as_deref(), &host, self.last_user.as_deref()));
         self.remote_root = None;
         self.alba_note = None;
         self.console
@@ -789,8 +768,8 @@ impl App {
         self.fill_login(l, self.saved_users[i].clone());
     }
 
-    /// After a login: switch to that account's cache, or claim the one shown before
-    /// logging in (empty, or carried over from an old version's `.amanece/` folder).
+    /// After a login: switch to that account's cache, or claim the empty one shown
+    /// before logging in.
     fn use_account_cache(&mut self, user: &str) {
         let key = crate::cache::account_key(user, &self.cfg.cache_host());
         match self.cache.account.as_deref() {
@@ -3505,12 +3484,8 @@ mod login_tests {
         let nas = ServerProfile { name: "nas".into(), host: "127.0.0.2".into(), port: 22, kind: ServerKind::Folders, root: None };
         let mut servers = cfg.server_list();
         servers.push(nas.clone());
-        // an older version's shared list; each name has a cache on one server only
-        std::fs::write(config.join("login.toml"), "users = [\"amanece\", \"u2025\"]\n").unwrap();
-        for (user, server) in [("amanece", &nas), ("u2025", &servers[0])] {
-            let key = crate::cache::account_key(user, &cfg.cache_host_of(server));
-            std::fs::write(config.join(format!("cache-{key}.json")), "{}").unwrap();
-        }
+        crate::config::remember_user(&config, &nas.host, "amanece", true).unwrap();
+        crate::config::remember_user(&config, &servers[0].host, "u2025", true).unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (tx, _rx) = std::sync::mpsc::channel();

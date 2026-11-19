@@ -35,8 +35,7 @@ from `root` if set, else from the account's login folder. `type = "alba"` reads
 a server with ALBA's layout instead. `port` is 22 unless set. `--server xray-nas`
 starts with that server selected. The command-line flags above (`--nas` is short
 for `--type folders`) add one more server, named "command line", and select it.
-The first patch's top-level `nas = true` is refused with a pointer to
-`[[servers]]`. Passwords do not belong in that file or in command-line arguments; enter
+Passwords do not belong in that file or in command-line arguments; enter
 the account password in the login dialog.
 
 Employees need the NAS host, forwarded port, account name and password, archive

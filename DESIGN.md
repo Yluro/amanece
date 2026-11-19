@@ -466,8 +466,8 @@ Gotchas:
 3. **One request queue**, processed sequentially, rate-limited (3 req/s sustained, burst 6; config can lower it, never above 5 req/s). Scanning one sample costs ≈ 26 requests (~7 s); the status bar shows the running total.
 4. **Lazy:** login lists `/` (1 request). Expanding a date lists its `RESULTS/` (1). Selecting a sample discovers its
    solves and fetches their stats XMLs (≈ 10–15 requests, ~60 KB). "Fetch all stats" walks samples at ≤ 1 sample / 3 s.
-5. **Cache** in the config dir, one `cache-<hash of user@host>.json` per account *(changed 2026-11-05; was
-   `<launch>/.amanece/cache.json`, still read once so an upgrade fetches nothing again)*. Finished solves never change, so their stats are never fetched again.
+5. **Cache** in the config dir, one `cache-<hash of user@host>.json` per account *(changed 2026-11-05; the old
+   `<launch>/.amanece/cache.json` is no longer read since 0.5)*. Finished solves never change, so their stats are never fetched again.
    Unfinished solves are re-checked only by polling (1 `stat` of the marker each).
 6. **Max 3 login attempts per launch**, then exit, to stay clear of lockouts.
 7. **Downloads**: at most `parallel_downloads` (default 3, max 4) frames at a time plus one HKL/log slot (§2.12),

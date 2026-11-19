@@ -16,8 +16,8 @@ const VERSION: u32 = 2;
 pub struct Cache {
     pub version: u32,
     pub host: String,
-    /// `account_key` of the account the listing belongs to; `None` until the first
-    /// login (an empty cache, or one carried over from an old `.amanece/` folder).
+    /// `account_key` of the account the listing belongs to; `None` for the empty
+    /// cache shown before the first login.
     #[serde(default)]
     pub account: Option<String>,
     /// Experiment dates seen at the server root, newest first.
@@ -66,10 +66,9 @@ impl Cache {
     }
 
     /// What to show before logging in: the cache of `user` when it is known, else the
-    /// most recently saved one, else one an old version left in `<launch>/.amanece/`
-    /// (only read, never written; it is adopted by the first login).
-    pub fn load_startup(dir: Option<&Path>, host: &str, user: Option<&str>, launch: &Path) -> Cache {
-        let own = dir.and_then(|dir| match user {
+    /// most recently saved one, else an empty one (adopted by the first login).
+    pub fn load_startup(dir: Option<&Path>, host: &str, user: Option<&str>) -> Cache {
+        dir.and_then(|dir| match user {
             Some(u) => Self::read(&file(dir, &account_key(u, host)), host),
             None => {
                 let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
@@ -84,12 +83,6 @@ impl Cache {
                 files.sort_by_key(|f| std::cmp::Reverse(f.0));
                 files.iter().find_map(|(_, p)| Self::read(p, host))
             }
-        });
-        own.or_else(|| {
-            [".amanece", ".alba_watch"]
-                .iter()
-                .find_map(|old| Self::read(&launch.join(old).join("cache.json"), host))
-                .map(|c| Cache { account: None, ..c })
         })
         .unwrap_or_else(|| Self::fresh(host))
     }
@@ -123,7 +116,7 @@ impl Cache {
     }
 
     /// Replace the date list from a fresh root listing; forget experiments that vanished
-    /// (e.g. a cache carried over from an old version that belonged to another account).
+    /// (they no longer exist on the server).
     pub fn set_dates(&mut self, mut dates: Vec<String>) {
         let day = |s: &String| crate::layout::beamtime_date(s).to_string();
         dates.sort_by(|a, b| day(b).cmp(&day(a)).then(b.cmp(a)));
@@ -173,11 +166,9 @@ mod tests {
     fn roundtrip_per_account() {
         let root = std::env::temp_dir().join(format!("amanece_cache_test_{}", std::process::id()));
         let dir = root.join("config");
-        let launch = root.join("launch");
-        std::fs::create_dir_all(&launch).unwrap();
 
         // nothing claimed yet: not saved
-        let mut c = Cache::load_startup(Some(&dir), "h", None, &launch);
+        let mut c = Cache::load_startup(Some(&dir), "h", None);
         c.set_dates(vec!["20251211".into()]);
         c.save(&dir).unwrap();
         assert!(!dir.exists());
@@ -192,26 +183,8 @@ mod tests {
         assert_eq!(Cache::load_all(Some(&dir), "h").len(), 1);
         assert!(Cache::load_all(Some(&dir), "other-host").is_empty());
         // before login: the named account's, else the latest one
-        assert_eq!(Cache::load_startup(Some(&dir), "h", Some("ua"), &launch).dates, vec!["20251211"]);
-        assert_eq!(Cache::load_startup(Some(&dir), "h", None, &launch).account, Some(a));
-        // nothing written into the launch folder
-        assert_eq!(std::fs::read_dir(&launch).unwrap().count(), 0);
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn old_launch_folder_cache_is_read_not_moved() {
-        let root = std::env::temp_dir().join(format!("amanece_cache_old_{}", std::process::id()));
-        let launch = root.join("launch");
-        let old = launch.join(".amanece").join("cache.json");
-        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
-        let mut c = Cache::fresh("h");
-        c.set_dates(vec!["20250704".into()]);
-        std::fs::write(&old, serde_json::to_vec(&c).unwrap()).unwrap();
-        let back = Cache::load_startup(Some(&root.join("config")), "h", Some("ua"), &launch);
-        assert_eq!(back.dates, vec!["20250704"]);
-        assert_eq!(back.account, None);
-        assert!(old.exists());
+        assert_eq!(Cache::load_startup(Some(&dir), "h", Some("ua")).dates, vec!["20251211"]);
+        assert_eq!(Cache::load_startup(Some(&dir), "h", None).account, Some(a));
         std::fs::remove_dir_all(&root).ok();
     }
 }

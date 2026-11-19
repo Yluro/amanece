@@ -59,8 +59,7 @@ impl LocalPanel {
                     .flatten()
                     .filter_map(|e| {
                         let name = e.file_name().to_string_lossy().to_string();
-                        // .amanece / .alba_watch: state folders old versions left in the launch folder
-                        if name == ".amanece" || name == ".alba_watch" || name == SOURCE_FILE {
+                        if name == SOURCE_FILE {
                             return None;
                         }
                         let md = e.metadata().ok()?;

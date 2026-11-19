@@ -119,9 +119,11 @@ fn default_port() -> u16 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// ALBA's address (old configs may still set it; new ones leave it out). After
-    /// startup: the active server's.
+    /// The active server's address, set at startup and on every server switch
+    /// (built-in ALBA until then; not read from the file).
+    #[serde(skip)]
     pub host: String,
+    #[serde(skip)]
     pub port: u16,
     pub poll_mode: PollMode,
     pub slow_poll_minutes: f64,
@@ -146,9 +148,6 @@ pub struct Config {
     /// The active server's type, set at startup and on every server switch.
     #[serde(skip)]
     pub kind: ServerKind,
-    /// How the first NAS patch described a NAS server; refused, see `Config::load`.
-    #[serde(skip_serializing)]
-    pub nas: bool,
     /// Servers of your own (`[[servers]]` at the end of the file), after the built-in ones.
     pub servers: Vec<ServerProfile>,
     /// Local folder amanece always opens in, wherever it was started from.
@@ -184,7 +183,6 @@ impl Default for Config {
             beamlines: vec!["bl13".into(), "bl06".into()],
             remote_root: None,
             kind: ServerKind::Alba,
-            nas: false,
             servers: Vec::new(),
             default_folder: None,
             checkcif: crate::checkcif::Limits::default(),
@@ -275,8 +273,7 @@ rint = [10.0, 15.0, 20.0]
 
 impl Config {
     /// Servers amanece knows without any config, each with its layout in code; a new
-    /// facility adds its entry here. Old configs' top-level `host`/`port`/`remote_root`
-    /// still point ALBA elsewhere.
+    /// facility adds its entry here. A top-level `remote_root` sets ALBA's proposal folder.
     pub fn builtin_servers(&self) -> Vec<ServerProfile> {
         vec![ServerProfile {
             name: "ALBA".into(),
@@ -325,13 +322,6 @@ impl Config {
     }
 
     /// Caches of folder servers are kept apart per host, port and root.
-    /// The cache scope of server `p`, as `cache_host` gives it once `p` is applied.
-    pub fn cache_host_of(&self, p: &ServerProfile) -> String {
-        let mut c = self.clone();
-        c.apply(p);
-        c.cache_host()
-    }
-
     pub fn cache_host(&self) -> String {
         match self.kind {
             ServerKind::Alba => self.host.clone(),
@@ -352,18 +342,6 @@ impl Config {
 
     pub fn dir() -> Option<PathBuf> {
         let dir = directories::ProjectDirs::from("", "", "amanece")?.config_dir().to_path_buf();
-        // The app used to be called alba_watch: carry its settings and pinned host key over.
-        if !dir.exists() {
-            if let Some(old) = directories::ProjectDirs::from("", "", "alba_watch")
-                .map(|d| d.config_dir().to_path_buf())
-                .filter(|o| o.exists())
-            {
-                if let Some(parent) = dir.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = std::fs::rename(old, &dir);
-            }
-        }
         Some(dir)
     }
 
@@ -389,11 +367,6 @@ impl Config {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let cfg: Config =
             toml::from_str(&text).with_context(|| format!("cannot parse {}", path.display()))?;
-        anyhow::ensure!(
-            !cfg.nas,
-            "{}: `nas = true` is gone; describe the NAS as a [[servers]] entry instead (see the end of the file)",
-            path.display()
-        );
         Ok((cfg, Some(path)))
     }
 
@@ -436,13 +409,6 @@ pub const MAX_REMEMBERED: usize = 10;
 
 #[derive(Serialize, Deserialize, Default, PartialEq, Debug)]
 struct Remembered {
-    /// Before 0.5 one list served every server. Names still here belong to no server yet:
-    /// they are offered on all of them until a login (or `sort_remembered`) places them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    users: Vec<String>,
-    /// 0.2.0 kept a single name here; still read, never written.
-    #[serde(default, skip_serializing)]
-    user: Option<String>,
     /// The names of each server, by host (as its saved passwords), most recently used first.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     servers: BTreeMap<String, Names>,
@@ -471,7 +437,6 @@ fn read_remembered(dir: &Path) -> Remembered {
         return Remembered::default();
     };
     let mut r: Remembered = toml::from_str(&text).unwrap_or_default();
-    r.users = tidy_names(r.users.drain(..).chain(r.user.take()));
     for n in r.servers.values_mut() {
         n.users = tidy_names(n.users.drain(..));
     }
@@ -482,7 +447,7 @@ fn read_remembered(dir: &Path) -> Remembered {
 /// Writes `r`; nothing left removes the file. Only usernames, never a password.
 fn write_remembered(dir: &Path, r: &Remembered) -> std::io::Result<()> {
     let path = dir.join(LOGIN_FILE);
-    if r.users.is_empty() && r.servers.is_empty() {
+    if r.servers.is_empty() {
         return match std::fs::remove_file(path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
@@ -501,20 +466,17 @@ fn write_remembered(dir: &Path, r: &Remembered) -> std::io::Result<()> {
 }
 
 /// The usernames saved for the server at `host` by the login dialog's "remember username"
-/// box, most recently used first; then names from before 0.5 that no server has claimed.
+/// box, most recently used first.
 pub fn remembered_users(dir: &Path, host: &str) -> Vec<String> {
-    let r = read_remembered(dir);
-    let own = r.servers.get(host).map(|n| n.users.clone()).unwrap_or_default();
-    tidy_names(own.into_iter().chain(r.users))
+    read_remembered(dir).servers.remove(host).map(|n| n.users).unwrap_or_default()
 }
 
 /// Puts `user` first in the server's list (`keep`) or takes it out, and returns the
-/// server's new list. Either way the name stops being one of the old shared ones.
+/// server's new list.
 pub fn remember_user(dir: &Path, host: &str, user: &str, keep: bool) -> std::io::Result<Vec<String>> {
     let user = user.trim();
     let mut r = read_remembered(dir);
     let before = read_remembered(dir);
-    r.users.retain(|u| u != user);
     let names = r.servers.entry(host.to_string()).or_default();
     names.users.retain(|u| u != user);
     if keep && !user.is_empty() {
@@ -526,32 +488,6 @@ pub fn remember_user(dir: &Path, host: &str, user: &str, keep: bool) -> std::io:
         write_remembered(dir, &r)?;
     }
     Ok(remembered_users(dir, host))
-}
-
-/// Gives each name of the old shared list to the server hosts `hosts_of` says it was
-/// used on (its cache, its saved password); names used nowhere stay shared. Runs at start.
-pub fn sort_remembered(dir: &Path, hosts_of: impl Fn(&str) -> Vec<String>) -> std::io::Result<()> {
-    let mut r = read_remembered(dir);
-    if r.users.is_empty() {
-        return Ok(());
-    }
-    let mut shared = Vec::new();
-    for u in std::mem::take(&mut r.users) {
-        let hosts = hosts_of(&u);
-        if hosts.is_empty() {
-            shared.push(u);
-            continue;
-        }
-        for h in hosts {
-            let names = r.servers.entry(h).or_default();
-            if !names.users.contains(&u) {
-                // the old list's order (most recent first) is kept
-                names.users.push(u.clone());
-            }
-        }
-    }
-    r.users = shared;
-    write_remembered(dir, &r)
 }
 
 const FOLDER_FILE: &str = "local_folder.txt";
@@ -609,11 +545,6 @@ mod tests {
         let users = remembered_users(&dir, H);
         assert_eq!(users.len(), MAX_REMEMBERED);
         assert_eq!(users[0], format!("u{}", MAX_REMEMBERED + 1));
-        // the one-name file written by 0.2.0 still reads, shared until a login places it
-        std::fs::write(dir.join(LOGIN_FILE), "user = \"ua\"\n").unwrap();
-        assert_eq!(remembered_users(&dir, H), ["ua"]);
-        assert_eq!(remember_user(&dir, H, "ub", true).unwrap(), ["ub", "ua"]);
-        assert!(!std::fs::read_to_string(dir.join(LOGIN_FILE)).unwrap().contains("user ="));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -630,27 +561,9 @@ mod tests {
         remember_user(&dir, nas, "u2024", false).unwrap();
         assert_eq!(remembered_users(&dir, alba), ["u2024"]);
 
-        // the shared list of older versions: each name goes where it was used, the
-        // rest stay offered everywhere
-        std::fs::write(dir.join(LOGIN_FILE), "users = [\"amanece\", \"u2025\", \"u2024\", \"who\"]\n").unwrap();
-        sort_remembered(&dir, |u| match u {
-            "amanece" => vec![nas.to_string()],
-            "u2025" | "u2024" => vec![alba.to_string()],
-            _ => vec![],
-        })
-        .unwrap();
-        assert_eq!(remembered_users(&dir, alba), ["u2025", "u2024", "who"]);
-        assert_eq!(remembered_users(&dir, nas), ["amanece", "who"]);
-        // a login places the last one, and it leaves the other servers' lists
-        remember_user(&dir, nas, "who", true).unwrap();
-        assert_eq!(remembered_users(&dir, alba), ["u2025", "u2024"]);
-        assert_eq!(remembered_users(&dir, nas), ["who", "amanece"]);
-        let text = std::fs::read_to_string(dir.join(LOGIN_FILE)).unwrap();
-        // every name has a server now: no shared list left before the server tables
-        let shared = text.split("[servers.").next().unwrap();
-        assert!(text.contains("[servers.\"10.0.0.7\"]") && !shared.contains("users ="), "{text}");
-        // nothing to sort: the file is left as it is
-        sort_remembered(&dir, |_| panic!("not asked")).unwrap();
+        // a file of a version before 0.5 (one shared list) reads as empty
+        std::fs::write(dir.join(LOGIN_FILE), "users = [\"u2025\"]\n").unwrap();
+        assert!(remembered_users(&dir, alba).is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -737,11 +650,8 @@ mod tests {
         assert_eq!(list[3].kind, ServerKind::Alba);
         assert!(Config::check_servers(&list).is_ok());
 
-        // an old top-level host still moves the built-in ALBA
-        let cfg: Config = toml::from_str("host = \"h\"\nport = 2222\n").unwrap();
-        assert_eq!((cfg.server_list()[0].host.as_str(), cfg.server_list()[0].port), ("h", 2222));
         // unknown keys in a server are an error, not silently ignored
-        assert!(toml::from_str::<Config>("[[servers]]\nname = \"a\"\nhost = \"h\"\nnas = true\n").is_err());
+        assert!(toml::from_str::<Config>("[[servers]]\nname = \"a\"\nhost = \"h\"\ncolour = true\n").is_err());
     }
 
     #[test]
