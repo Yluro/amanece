@@ -1,0 +1,111 @@
+SAINT V8.34A
+C:\BN\SAINT\saint.exe vfrlxm.slm /BATCH /CONFIG:vfrlxm.ini /NOPROMPT /PLAIN /PRI&
+ORITY:4 /SOCKET:2001 /THREADS:1
+
+Global Integration Statistics for all runs ("*" => excluded from output)
+
+Spots with topped/rescanned pixels:            46
+Total topped/rescanned pixels:                553
+Minimum pixel ceiling(frame):             5947200(3570JSG276_01_0001.sfrm)
+Maximum pixel ceiling(frame):             5947200(3570JSG276_01_0001.sfrm)
+
+Total spots predicted:                      99815
+Spots with absolute HKL > 511:                  0*
+Spots outside resolution limit:                 9*
+Spots outside active detector area:          8712*
+Outside frame limits:                        1805*
+Spots exceeding frame queue size:           54493*
+Collisions(same XY, adjacent frame):            0*
+Spots exceeding dynamic range:                  0*
+Spots with too many spot components:            0*
+Spots with large Lorentz factor:               12*
+Spots with too much missing I:                  0*
+Spots with too few BG pixels:                   0*
+Spots below I/sigma threshold:                423*
+Spots left in Write-Behind Cache:            3196*
+Spots with unwanted components:                 0*
+Total unwanted components:                      0*
+Good spots written:                         30780
+Total spot components written:              42866
+Twin overlaps integrated:                    9555
+Partial, strong, full overlaps:              9318     219      18
+Full overlaps collapsed to singlet:             0
+Singlets (used in stats below):             21225
+Twin overlaps written:                       9555
+
+Average Intensity:                       194.4827
+Average I/sigma:                           15.305
+% over "strong" threshold:                  31.13
+% less than 2 sigma:                        36.57
+% which spanned more than 1 frame:          81.69
+
+Average X,Y,Z positional errors:            -0.04    0.00    0.03
+RMS X,Y,Z positional errors:                 0.69    0.60    0.44
+% X,Y,Z more than 0.5 pixel:                36.96   32.09   17.47
+% X,Y,Z more than 1.0 pixel:                12.32    8.85    3.66
+
+Avg % profile volume populated:             94.19
+Avg % profile volume integrated:            52.14
+Avg % profile missing I:                     3.07
+Avg % profile missing volume:                5.81
+Avg % volume overlap in H,K,L:               1.02    1.49    4.11
+Percent of profile used in X,Y,Z:          100.00  100.00  100.00
+Max % intensity on XYZ boundaries:          30.05   41.81   53.54
+
+Average spot-shape correlation:             0.449
+RMS spot-shape correlation:                 0.561
+
+...
+...................................................................................
+Integration of 3570JSG276
+Statistics for sample 1 of 1 in 3570JSG276_0m.mul
+
+Lattice:  P (Primitive)
+Point group "-1", #1 (internal number)
+2 symmetry operators
+...
+Coverage Statistics
+Integration of 3570JSG276
+ ...1.1(1):  component 1 in sample 1 (component 1 in 3570JSG276_0m.mul)
+
+Overlapping reflections are included below in quantities related to coverage, but not
+in intensity-related quantities.  Specifically, #Obs, %Compl, Redund, Pairs, and %Pairs
+include overlapping reflections;  Rsym, Rshell, #Sigma, and %<2s do not.
+
+                                                           .......Shell......
+  Angstrms   #Obs Theory %Compl Redund   Rsym Pairs %Pairs Rshell #Sigma %<2s
+ to  2.236   1056   1257  84.01   3.13  0.088   735  58.47  0.088  54.10 11.8
+ to  1.775   1891   2530  74.74   2.70  0.089  1152  45.53  0.092  25.39 15.2
+ to  1.550   2617   3772  69.38   2.50  0.094  1484  39.34  0.116  15.85 21.8
+ to  1.409   3253   5045  64.48   2.37  0.096  1729  34.27  0.109  11.40 23.6
+ to  1.308   3758   6310  59.56   2.28  0.097  1907  30.22  0.110   9.20 29.2
+ to  1.231   4200   7531  55.77   2.21  0.097  2051  27.23  0.111   7.25 35.1
+ to  1.169   4538   8828  51.40   2.16  0.097  2145  24.30  0.084   8.08 42.8
+ to  1.118   4840  10081  48.01   2.12  0.097  2231  22.13  0.102   6.63 42.4
+ to  1.075   5099  11357  44.90   2.08  0.097  2296  20.22  0.117   5.73 39.0
+ to  1.038   5425  12584  43.11   2.04  0.097  2398  19.06  0.099   5.69 44.2
+
+...................................................................................
+...
+Coverage Statistics
+Integration of 3570JSG276
+ ...1.2(2):  component 2 in sample 1 (component 2 in 3570JSG276_0m.mul)
+
+Overlapping reflections are included below in quantities related to coverage, but not
+in intensity-related quantities.  Specifically, #Obs, %Compl, Redund, Pairs, and %Pairs
+include overlapping reflections;  Rsym, Rshell, #Sigma, and %<2s do not.
+
+                                                           .......Shell......
+  Angstrms   #Obs Theory %Compl Redund   Rsym Pairs %Pairs Rshell #Sigma %<2s
+ to  2.236   1115   1257  88.70   3.30  0.238   807  64.20  0.238  38.21 18.0
+ to  1.775   1973   2530  77.98   2.81  0.229  1238  48.93  0.188  16.95 27.2
+ to  1.550   2699   3772  71.55   2.59  0.225  1571  41.65  0.174  11.91 32.2
+ to  1.409   3329   5045  65.99   2.44  0.224  1827  36.21  0.205   7.14 42.0
+ to  1.308   3884   6310  61.55   2.32  0.224  2004  31.76  0.197   4.94 47.8
+ to  1.231   4310   7531  57.23   2.24  0.223  2124  28.20  0.178   4.10 61.0
+ to  1.169   4629   8828  52.44   2.18  0.223  2197  24.89  0.197   3.43 60.2
+ to  1.118   4889  10081  48.50   2.13  0.223  2256  22.38  0.173   3.75 54.5
+ to  1.075   5162  11357  45.45   2.08  0.223  2297  20.23  0.280   2.57 61.8
+ to  1.038   5507  12584  43.76   2.03  0.223  2360  18.75  0.173   2.43 63.4
+
+...................................................................................

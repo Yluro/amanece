@@ -241,8 +241,8 @@ pub async fn connect_with(
             .locate_proposals(user, t.beamlines, t.remote_root)
             .await
             .map_err(|e| ConnectError::Other(format!("cannot find the proposal folder: {e:#}")))?,
-        ServerKind::Folders => sftp
-            .configure_nas(t.host, t.port, t.remote_root)
+        ServerKind::Folders | ServerKind::Bruker => sftp
+            .configure_folders(t.kind, t.host, t.port, t.remote_root)
             .await
             .map_err(|e| ConnectError::Other(format!("{e:#}")))?,
     }

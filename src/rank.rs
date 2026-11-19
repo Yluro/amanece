@@ -110,6 +110,10 @@ pub fn breakdown(s: &Solve) -> Result<Breakdown, Unranked> {
     if s.hkl.is_empty() {
         return Err(Unranked::NoHkl);
     }
+    // Bruker datasets are never ranked (docs/BRUKER.md §5): their statistics are shown, not scored
+    if s.kind.is_bruker() {
+        return Err(Unranked::NoStats);
+    }
     let st = s.stats.as_ref().ok_or(Unranked::NoStats)?;
     let o = st.overall.as_ref().ok_or(Unranked::NoStats)?;
     let b = Breakdown {
@@ -187,6 +191,7 @@ mod tests {
                     solve(SolveKind::AutoProcNoAnom, "autoproc_noanom_ispyb.xml"),
                     solve(SolveKind::Xia2Chem, "xia2chem_ispyb.xml"),
                 ],
+                kind: crate::model::RunKind::Data, frames: None, note: None, stamp: None,
             }],
         };
         let (key, v) = best(&info).unwrap();
@@ -217,6 +222,7 @@ mod tests {
                     solve(SolveKind::AutoProcNoAnom, "autoproc_noanom_ispyb.xml"),
                     solve(SolveKind::Xia2Chem, "xia2chem_ispyb.xml"),
                 ],
+                kind: crate::model::RunKind::Data, frames: None, note: None, stamp: None,
             }],
         }
     }

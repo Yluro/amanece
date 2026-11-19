@@ -1,0 +1,97 @@
+# matrix_01_0001.sfrm of a matrix-only experiment: first 15 header blocks (512 B each), non-empty 80-char cards, CELL/MATRIX are zero
+FORMAT :100
+VERSION:12
+HDRBLKS:15
+TYPE   :Omega Scan Image
+SITE   :BRUKER21
+MODEL  :D85 [11/09-3188] with FIXED CHI
+USER   :BrukerAdministrator
+SAMPLE :
+SETNAME:
+RUN    :1
+SAMPNUM:0
+TITLE  :
+TITLE  :
+TITLE  :
+TITLE  :
+TITLE  :
+TITLE  :
+TITLE  :
+TITLE  :
+NCOUNTS:10650254                            0
+NOVERFL:-1                      82                      0
+MINIMUM:0
+MAXIMUM:2612
+NONTIME:-2
+NLATE  :-1
+FILENAM:\\instrument-pc\frames\guest\testJSG\matrix_01_0001.sfrm
+CREATED:09/17/25                            11:37:34
+CUMULAT:15.000000
+ELAPSDR:7.500000
+ELAPSDA:7.500000
+OSCILLA:0
+NSTEPS :1
+RANGE  :0.500000
+START  :326.834808
+INCREME:-0.500000
+NUMBER :1
+NFRAMES:12
+ANGLES :30.000000         326.834808        0.000000          54.785999
+NOVER64:0                       0                       0
+NPIXELB:1                                   1
+NROWS  :512
+NCOLS  :512
+WORDORD:0
+LONGORD:0
+TARGET :Mo
+SOURCEK:50.000000
+SOURCEM:0.600000
+FILTER :Mirrors, multilayer
+CELL   :0.000000      0.000000      0.000000      0.000000      0.000000
+CELL   :0.000000
+MATRIX :0.000000      0.000000      0.000000      0.000000      0.000000
+MATRIX :0.000000          0.000000          0.000000          0.000000
+LOWTEMP:0                       2300                    -4977
+ZOOM   :0.000000                0.000000                1.000000
+CENTER :263.350006        261.290009        263.220001        261.760010
+DISTANC:6.004960                            6.004960
+TRAILER:0
+COMPRES:none
+LINEAR :1.000000                            0.000000
+PHD    :0.000000                            0.000000
+PREAMP :1                                   1
+CORRECT:0732_0512_90s_Mo._fl
+WARPFIL:0732_0512_Mo._ix
+WAVELEN:0.710730          0.709300          0.713590          0.632290
+MAXXY  :456.000000                          198.000000
+AXIS   :2
+ENDING :30.000000         326.334808        0.000000          54.785999
+DETPAR :0.000000      0.000000      0.000000      0.030700      -0.252900
+DETPAR :-0.448900
+LUT    :BB.LUT
+DISPLIM:0.000000                            63.000000
+PROGRAM:BIS 2011.8.1.0/09-Aug-2011 && APEX2_2011.8-0
+ROTATE :0
+BITMASK:$NULL
+OCTMASK:0           0           0           511         511         1022
+OCTMASK:511                                 511
+ESDCELL:0.000000      0.000000      0.000000      0.000000      0.000000
+ESDCELL:0.000000
+DETTYPE:CCD-LDI-APEX2S       83.333000   0.000000    0 0.254000    0.050800    1
+NEXP   :2             555           32            0             1
+CCDPARM:13.900000     9.670000      170.000000    0.000000      5947200.000000
+CHEM   :
+MORPH  :
+CCOLOR :
+CSIZE  :
+DNSMET :
+DARK   :0732_00512_00015._dk
+AUTORNG:0.000000E+000 0.000000E+000 0.000000E+000 0.000000E+000 5.947200E+006
+ZEROADJ:0.000000          0.000000          0.000000          0.000000
+XTRANS :0.000000                0.000000                0.000000
+HKL&XY :0.000000      0.000000      0.000000      0.000000      0.000000
+AXES2  :0.000000          0.000000          0.000000          1.000000
+ENDING2:0.000000          0.000000          0.000000          1.000000
+FILTER2:0.000000                            0.000000
+..............................................................................
+..............................................................................

@@ -8,7 +8,7 @@ use crate::checkcif::{self, Check, Level};
 use crate::config::PollMode;
 use crate::layout;
 use crate::console::LineKind;
-use crate::model::{Run, SampleInfo, Shell, Solve, Status, human_bytes};
+use crate::model::{RemoteFile, Run, RunKind, SampleInfo, Shell, Solve, SolveKind, Status, human_bytes};
 use crate::rank::{self, Criterion};
 use crate::update;
 use ratatui::Frame;
@@ -239,7 +239,7 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     t.spans.push(Span::raw(" "));
     let root = app.remote_root.clone().unwrap_or_else(|| "/".into());
     let path = match &app.alba_date {
-        Some(d) if app.cfg.kind.is_folders() => match d.split_once('/') {
+        Some(d) if app.cfg.kind.source_ids() => match d.split_once('/') {
             Some((_, relative)) => format!("{}/{relative}", root.trim_end_matches('/')),
             None => root.clone(),
         },
@@ -251,7 +251,7 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     };
     let room = area.width.saturating_sub(28) as usize;
     t.spans.push(Span::raw(format!("{} ", shorten(&path, room))).fg(Color::Gray));
-    let keys: &[(&str, &str)] = if app.cfg.kind.is_folders() && app.alba_date.is_some() {
+    let keys: &[(&str, &str)] = if app.cfg.kind.browses_folders() && app.alba_date.is_some() {
         &[("⏎", "open"), ("←", "back"), ("S", "scan files here")]
     } else if app.alba_date.is_some() {
         &[("⏎", "stats"), ("←", "back"), ("S", "scan all")]
@@ -292,7 +292,7 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
                     let colour = if bl == "XAIRA" { Color::LightMagenta } else { Color::LightCyan };
                     spans.push(Span::raw(format!("{bl:<6} ")).fg(colour).bold());
                 }
-                spans.push(Span::raw(format!("{}/", if app.cfg.kind.is_folders() { layout::beamtime_label(d) } else { layout::beamtime_date(d).to_string() })).fg(Color::LightBlue).bold());
+                spans.push(Span::raw(format!("{}/", if app.cfg.kind.source_ids() { layout::beamtime_label(d) } else { layout::beamtime_date(d).to_string() })).fg(Color::LightBlue).bold());
                 spans.push(Span::raw(count).fg(Color::DarkGray));
                 ListItem::new(Line::from(spans))
             }
@@ -306,7 +306,7 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     if let Some(exp) = app.alba_date.as_ref().and_then(|d| app.cache.experiments.get(d)) {
         if let Some(error) = &exp.listing_error {
             items.push(ListItem::new(Line::from(format!("  Cannot list: {error}. Press r to retry.")).fg(Color::Red)));
-        } else if app.cfg.kind.is_folders() && exp.samples.as_ref().is_some_and(Vec::is_empty) {
+        } else if app.cfg.kind.browses_folders() && exp.samples.as_ref().is_some_and(Vec::is_empty) {
             items.push(ListItem::new(Line::from("  No subfolders or supported metadata here.").fg(Color::DarkGray)));
         }
     }
@@ -363,7 +363,7 @@ fn local_mark(app: &App, date: &str, name: &str) -> Option<LocalMark> {
 }
 
 fn sample_item(app: &App, date: &str, name: &str, width: usize) -> ListItem<'static> {
-    if app.cfg.kind.is_folders() && name.ends_with('/') {
+    if app.cfg.kind.browses_folders() && name.ends_with('/') {
         return ListItem::new(Line::from(format!("  {name}")).fg(Color::LightBlue).bold());
     }
     let mark = match local_mark(app, date, name) {
@@ -441,7 +441,7 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), area);
         return;
     };
-    if app.cfg.kind.is_folders() && name.ends_with('/') {
+    if app.cfg.kind.browses_folders() && name.ends_with('/') {
         let block = panel(title(format!("Folder: {name}"), focused), focused, &[]);
         f.render_widget(Paragraph::new("Press Enter in the NAS panel to open this folder. Select an .ins, .res or XDS_ASCII.HKL file inside to read its unit cell. S scans files in the open folder only.")
             .wrap(Wrap { trim: false }).block(block), area);
@@ -465,6 +465,9 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let rows = App::stats_rows(info);
+    if App::is_bruker(info) {
+        return draw_bruker_stats(f, app, area, &date, &name, info, &rows);
+    }
     if rows.is_empty() {
         f.render_widget(
             Paragraph::new("Nothing found for this sample: no processing folders and no raw datasets.")
@@ -514,6 +517,8 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
                 ])
                 .fg(Color::Gray)
             }
+            // Bruker only (drawn by draw_bruker_stats)
+            StatsRow::Block { .. } => Row::new(Vec::<Cell>::new()),
         })
         .collect();
     let mut widths = vec![
@@ -559,6 +564,174 @@ fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// `24.068 27.560 20.502  90.00 121.41  90.00`
+fn cell_text(c: [f64; 6]) -> String {
+    format!("{:>7.3}{:>7.3}{:>7.3}{:>7.2}{:>7.2}{:>7.2}", c[0], c[1], c[2], c[3], c[4], c[5])
+}
+
+/// `C2/c`, or `P*` when only the lattice centring is known.
+fn sg_text(sg: Option<&str>) -> String {
+    match sg {
+        Some(s) => match s.strip_suffix(" (centring only)") {
+            Some(letter) => format!("{letter}*"),
+            None => s.to_string(),
+        },
+        None => "–".to_string(),
+    }
+}
+
+/// The files a Bruker dataset row downloads with `d`: `RDC78A3_test1.hkl .ins .res`, or
+/// `S_01.raw +2` when their names differ.
+fn bruker_files_text(s: &Solve) -> String {
+    let Some(first) = s.hkl.first().map(RemoteFile::name) else { return "?".into() };
+    let stem = |n: &str| n.rsplit_once('.').map_or(n, |(st, _)| st).to_ascii_lowercase();
+    let rest = &s.hkl[1..];
+    if rest.iter().all(|f| stem(f.name()) == stem(first)) {
+        let mut text = first.to_string();
+        for f in rest {
+            text.push_str(&format!(" .{}", f.name().rsplit_once('.').map_or("", |(_, e)| e)));
+        }
+        text
+    } else {
+        format!("{first} +{}", rest.len())
+    }
+}
+
+/// The Bruker results (docs/BRUKER.md §4.2b): the datasets with their quality, as ALBA's
+/// pipelines (from XPREP's `.prp`, or SAINT's listing), then the frame blocks. Cells are in the
+/// Info panel; the sample's cell is a row only when there is no dataset.
+fn draw_bruker_stats(f: &mut Frame, app: &App, area: Rect, date: &str, name: &str, info: &SampleInfo, rows: &[StatsRow]) {
+    let focused = app.focus == Focus::Stats;
+    let prev_offset = app.hit.borrow().stats.offset;
+    let block = panel(
+        title(format!("{name} · {}", layout::beamtime_label(date)), focused),
+        focused,
+        &[("␣", "mark"), ("d", "data"), ("L", "aux"), ("F", "frames"), ("A", "all frames"), ("→", "info")],
+    );
+    if rows.is_empty() {
+        f.render_widget(
+            Paragraph::new("Nothing here yet: no frames and no work/ folder.").fg(Color::DarkGray).block(block),
+            area,
+        );
+        return;
+    }
+    let want = rows.len() as u16 + 3;
+    let table_h = want.min(area.height.saturating_sub(INFO_MIN)).max(TABLE_MIN.min(area.height));
+    let [table_area, info_area] = Layout::vertical([Constraint::Length(table_h), Constraint::Fill(1)]).areas(area);
+    let table_a = block.inner(table_area);
+    f.render_widget(block, table_area);
+
+    let multi = info.distinct_prefixes() > 1;
+    let tick = |on: bool| if on { "[x]" } else { "[ ]" };
+    // the frame rows' text fills Data and the quality columns after it stay empty
+    let blank = || std::iter::repeat_n(Cell::from(""), 6);
+    let table_rows: Vec<Row> = rows
+        .iter()
+        .map(|r| {
+            let (mut cells, style): (Vec<Cell>, Style) = match *r {
+                StatsRow::Solve { run, solve } => {
+                    let s = &info.runs[run].solves[solve];
+                    let st = s.stats.as_ref();
+                    let sg = sg_text(st.and_then(|st| st.space_group.as_deref()));
+                    if s.kind == SolveKind::BrukerCell {
+                        // matrix runs only: `matrix: ezu8f7.p4p · …` names the stage
+                        let stage = s.note.as_deref().and_then(|n| n.split(':').next()).unwrap_or("cell");
+                        let cells = vec![Cell::from(""), Cell::from(format!("Cell ({stage}) · → Info")), Cell::from(sg)];
+                        (cells, Style::new().fg(Color::LightCyan).bold())
+                    } else {
+                        // the files d fetches, then what made them (XPREP / SADABS / SAINT) in grey
+                        let name = Line::from(vec![
+                            Span::raw(bruker_files_text(s)),
+                            Span::raw(format!(" {}", s.kind.label())).fg(Color::DarkGray),
+                        ]);
+                        // as ALBA's pipelines: the overall shell (XPREP's `.prp`, SAINT's coverage)
+                        let o = st.and_then(|st| st.overall.as_ref());
+                        let cells = vec![
+                            Cell::from(tick(app.marks.contains(&s.key()))),
+                            Cell::from(name),
+                            Cell::from(sg).fg(Color::LightGreen),
+                            Cell::from(f2(o.and_then(|o| o.d_high))),
+                            Cell::from(f1(o.and_then(|o| o.rmerge_pct))),
+                            Cell::from(f1(o.and_then(|o| o.completeness))),
+                            Cell::from(f1(o.and_then(|o| o.i_sig))),
+                            Cell::from(f1(o.and_then(|o| o.multiplicity))),
+                        ];
+                        (cells, Style::new())
+                    }
+                }
+                StatsRow::Block { matrix } => {
+                    let runs: Vec<&Run> = App::block_runs(info, matrix).collect();
+                    let on = runs.iter().filter(|r| app.frames_marked(date, name, r)).count();
+                    let mark = match on {
+                        0 => "[ ]",
+                        n if n == runs.len() => "[x]",
+                        _ => "[~]",
+                    };
+                    let frames: u32 = runs.iter().filter_map(|r| r.frames.map(|f| f.count)).sum();
+                    let bytes: u64 = runs.iter().filter_map(|r| r.frames.map(|f| f.bytes)).sum();
+                    let n = runs.len();
+                    let cells = vec![
+                        Cell::from(mark),
+                        Cell::from(format!(
+                            "{} · {n} run{} · {frames} frames · {}",
+                            if matrix { "matrix" } else { "scans" },
+                            if n == 1 { "" } else { "s" },
+                            human_bytes(bytes)
+                        )),
+                    ];
+                    (cells, Style::new().fg(Color::Magenta).bold())
+                }
+                StatsRow::Frames { run } => {
+                    let r = &info.runs[run];
+                    let label = if r.kind == RunKind::Data && multi {
+                        format!("  r{} {}", r.run, r.prefix)
+                    } else {
+                        format!("  r{}", r.run)
+                    };
+                    let size = r.frames.map(|f| human_bytes(f.bytes)).unwrap_or_default();
+                    let cells = vec![
+                        Cell::from(tick(app.frames_marked(date, name, r))),
+                        Cell::from(format!("{label} · {} · {size}", bruker_frames_text(r))),
+                    ];
+                    (cells, Style::new().fg(Color::Gray))
+                }
+            };
+            let missing = 8usize.saturating_sub(cells.len());
+            cells.extend(blank().take(missing));
+            Row::new(cells).style(style)
+        })
+        .collect();
+    // ALBA's columns, without CC½ (XPREP and SAINT give none) and the score (nothing is ranked)
+    let heads = vec!["", "Data", "SG", "d_min", "Rmrg%", "Cmpl%", "I/σ", "Mult"];
+    let widths = vec![
+        Constraint::Length(3),
+        Constraint::Fill(1),
+        Constraint::Length(7),
+        Constraint::Length(5),
+        Constraint::Length(5),
+        Constraint::Length(5),
+        Constraint::Length(4),
+        Constraint::Length(4),
+    ];
+    let header = Row::new(heads.into_iter().map(|h| Cell::from(h).bold())).fg(Color::Gray);
+    let table = Table::new(table_rows, widths)
+        .header(header)
+        .column_spacing(1)
+        .row_highlight_style(highlight(focused || app.focus == Focus::Info));
+    let mut state = TableState::default()
+        .with_selected(Some(app.stats_sel.min(rows.len() - 1)))
+        .with_offset(prev_offset);
+    f.render_stateful_widget(table, table_a, &mut state);
+    app.hit.borrow_mut().stats = ListHit {
+        area: table_area,
+        rows: Rect { y: table_a.y + 1, height: table_a.height.saturating_sub(1), ..table_a },
+        offset: state.offset(),
+    };
+    if info_area.height > 0 {
+        draw_info(f, app, info_area, date, info, rows.get(app.stats_sel));
+    }
+}
+
 /// The Info panel: the highlighted row's subtabs, folded or not, scrolled so the cursor's
 /// subtab shows.
 fn draw_info(f: &mut Frame, app: &App, area: Rect, date: &str, info: &SampleInfo, row: Option<&StatsRow>) {
@@ -567,6 +740,7 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect, date: &str, info: &SampleInfo
     let head = match row {
         Some(StatsRow::Solve { run, solve }) => solve_title(&info.runs[*run], &info.runs[*run].solves[*solve]),
         Some(StatsRow::Frames { run }) => format!("Raw frames · run {}", info.runs[*run].run),
+        Some(StatsRow::Block { matrix }) => format!("Frames · {}", if *matrix { "matrix" } else { "scans" }),
         None => "Info".to_string(),
     };
     let mut block = panel(
@@ -669,6 +843,14 @@ fn draw_info(f: &mut Frame, app: &App, area: Rect, date: &str, info: &SampleInfo
 /// `xia2chem · run 3 · images 1–720 · done`, or `images 1–635 of 720` when the solve
 /// used fewer images than the run has.
 fn solve_title(r: &Run, s: &Solve) -> String {
+    let file = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+    match s.kind {
+        SolveKind::BrukerCell => return format!("Cell of the sample · {}", file(&s.dir)),
+        SolveKind::BrukerXprep | SolveKind::BrukerSadabs | SolveKind::BrukerSaint => {
+            return format!("{} data · {}", s.kind.label(), file(&s.dir));
+        }
+        _ => {}
+    }
     let status = match s.status {
         Status::Done => "done",
         Status::Running => "running",
@@ -860,11 +1042,63 @@ fn info_sections(
     match row {
         Some(StatsRow::Solve { run, solve }) => solve_sections(app, date, info, *run, *solve, limit, width),
         Some(StatsRow::Frames { run }) => (vec![frames_section(date, &info.runs[*run])], 0),
+        Some(StatsRow::Block { matrix }) => (vec![block_section(info, *matrix)], 0),
         None => (Vec::new(), 0),
     }
 }
 
+/// A Bruker run's frames, as the experiment folder lists them.
+fn bruker_frames_text(r: &Run) -> String {
+    let Some(fs) = r.frames else { return String::new() };
+    let span = fs.last.saturating_sub(fs.first) + 1;
+    if fs.has_gaps() {
+        format!("{} of {span} frames", fs.count)
+    } else {
+        format!("{} frames", fs.count)
+    }
+}
+
+/// One block of Bruker frame runs (`matrix` or `scans`): its runs and what F would fetch.
+fn block_section(info: &SampleInfo, matrix: bool) -> Section {
+    let runs: Vec<&Run> = App::block_runs(info, matrix).collect();
+    let frames: u32 = runs.iter().filter_map(|r| r.frames.map(|f| f.count)).sum();
+    let bytes: u64 = runs.iter().filter_map(|r| r.frames.map(|f| f.bytes)).sum();
+    let what = if matrix { "unit-cell (matrix) runs" } else { "data collection runs (scans)" };
+    let mut lines = vec![Line::from(format!("{} {what} · {frames} frames · {}", runs.len(), human_bytes(bytes)))];
+    // the sample's cell (from its highest-authority file), which the matrix runs index
+    if let Some(s) = info.solves().find(|s| s.kind == SolveKind::BrukerCell)
+        && let Some(st) = &s.stats
+        && let Some(c) = st.cell
+    {
+        let from = s.dir.rsplit('/').next().unwrap_or(&s.dir);
+        lines.push(Line::from(vec![
+            Span::raw("sample cell ").fg(Color::Gray),
+            Span::raw(cell_text(c)).fg(Color::LightCyan),
+            Span::raw(format!("  {}", sg_text(st.space_group.as_deref()))).fg(Color::LightGreen),
+            Span::raw(format!("  ({from})")).fg(Color::DarkGray),
+        ]));
+    }
+    for r in &runs {
+        lines.push(Line::from(format!("  r{:<3} {:<20} {}", r.run, r.prefix, bruker_frames_text(r))).fg(Color::Gray));
+    }
+    lines.push(
+        Line::from("Space ticks/unticks the whole block, A ticks every run of every block; F lists the ticked runs and asks, with the size, before downloading.")
+            .fg(Color::DarkGray),
+    );
+    Section::new(Sub::Frames, rule_title(&format!("Frames · {}", if matrix { "matrix" } else { "scans" })), lines)
+}
+
 fn frames_section(date: &str, r: &Run) -> Section {
+    if let Some(fs) = r.frames {
+        let what = if r.kind == RunKind::Matrix { "matrix run" } else { "scan run" };
+        let lines = vec![
+            Line::from(format!("{what} {} · prefix {} · frames {}–{}", r.run, r.prefix, fs.first, fs.last)),
+            Line::from(format!("{} · {}", bruker_frames_text(r), human_bytes(fs.bytes))),
+            Line::from("Space ticks/unticks the run. F lists the ticked runs and asks before downloading.")
+                .fg(Color::DarkGray),
+        ];
+        return Section::new(Sub::Frames, rule_title(&format!("Frames · {what} {}", r.run)), lines);
+    }
     // XAIRA's Eiger writes HDF5 (a master file and data files of many images each);
     // XALOC's Pilatus one CBF of ~6.2 MB per image
     let h5 = layout::beamline_name(date).as_deref() == Some("XAIRA");
@@ -1128,7 +1362,8 @@ fn solve_sections(
             })
             .collect();
         items.push((lines.len(), InfoItem::Hkl));
-        lines.push(Line::from(vec![Span::raw("HKL: ").fg(Color::Gray), Span::raw(names.join(", "))]));
+        let label = if s.kind.is_bruker() { "files: " } else { "HKL: " };
+        lines.push(Line::from(vec![Span::raw(label).fg(Color::Gray), Span::raw(names.join(", "))]));
     }
     if !s.logs.is_empty() {
         // white when `d` takes them along (L toggles), grey when it leaves them out
@@ -1139,8 +1374,10 @@ fn solve_sections(
             (Style::new().fg(Color::DarkGray), "  (left out of d: L)")
         };
         items.push((lines.len(), InfoItem::Logs));
+        // Bruker: the auxiliary files Olex2 reads for the CIF (.pcf, .abs, .p4p, ._ls, .ini)
+        let label = if s.kind.is_bruker() { "aux: " } else { "logs: " };
         lines.push(Line::from(vec![
-            Span::raw("logs: ").fg(Color::Gray),
+            Span::raw(label).fg(Color::Gray),
             Span::styled(names.join(", "), style),
             Span::raw(tail).fg(Color::DarkGray),
         ]));
@@ -1178,7 +1415,32 @@ fn solve_sections(
         shell_line("inner", st.inner.as_ref()),
         shell_line("outer", st.outer.as_ref()),
     ];
-    let mut sections = vec![Section::new(Sub::Shells, rule_title("Shells"), shells), files];
+    // Bruker rows (docs/BRUKER.md §4.2c): Shells is every shell of XPREP's table (or SAINT's
+    // coverage), Scaling SADABS's error model (or SAINT's integration figures); both as the
+    // listings give them, titles in bold
+    let listing = |lines: &[String]| -> Vec<Line<'static>> {
+        lines
+            .iter()
+            .map(|l| {
+                let line = Line::from(l.clone());
+                if l.ends_with(':') { line.bold() } else { line }
+            })
+            .collect()
+    };
+    let mut sections = if s.kind.is_bruker() {
+        let mut v = Vec::new();
+        if !st.shell_table.is_empty() {
+            v.push(Section::new(Sub::Shells, rule_title("Shells"), listing(&st.shell_table)));
+        }
+        if !st.scaling.is_empty() {
+            let name = if s.kind == SolveKind::BrukerSaint { "Integration" } else { "Scaling" };
+            v.push(Section::new(Sub::Scaling, rule_title(name), listing(&st.scaling)));
+        }
+        v.push(files);
+        v
+    } else {
+        vec![Section::new(Sub::Shells, rule_title("Shells"), shells), files]
+    };
 
     // crystal system // space group, then the edges, then the angles
     let head = match st.space_group.as_deref() {
@@ -1459,8 +1721,18 @@ fn cell_hit_lines(app: &App, found: &[crate::cells::Match], limit: usize, width:
     }
     let n = found.len();
     let shown = &found[..n.min(limit)];
-    // compact symbols (P 21 21 21 → P212121) leave more room for the name
-    let sg = |m: &crate::cells::Match| m.entry.sg.as_deref().map_or_else(|| "–".to_string(), |s| s.replace(' ', ""));
+    // compact symbols (P 21 21 21 → P212121) leave more room for the name; `P*` = centring only
+    let sg = |m: &crate::cells::Match| sg_text(m.entry.sg.as_deref()).replace(' ', "");
+    // NAS and Bruker entries have no beamtime date: their server instead, and the folder after
+    let date = |e: &crate::cells::Entry| -> String {
+        if e.date.starts_with("nas-") {
+            "NAS".into()
+        } else if e.date.starts_with("bruker-") {
+            "Bruker".into()
+        } else {
+            e.date.clone()
+        }
+    };
     let sg_w = shown.iter().map(|m| sg(m).chars().count()).max().unwrap_or(1).clamp(2, 10);
     // everything after the name: date, SG, a b c, α β γ, sim%, one space before each
     let fixed = 9 + 1 + sg_w + 3 * 7 + 3 * 6 + 6;
@@ -1479,7 +1751,7 @@ fn cell_hit_lines(app: &App, found: &[crate::cells::Match], limit: usize, width:
         let c = e.cell;
         let mut spans = vec![
             Span::raw(format!("{:<code_w$}", truncate(&e.code, code_w))).fg(Color::LightMagenta).bold(),
-            Span::raw(format!(" {:<8}", e.date)),
+            Span::raw(format!(" {:<8}", truncate(&date(e), 8))),
             Span::raw(format!(" {:<sg_w$}", sg(m))).fg(Color::Gray),
             Span::raw(format!(
                 " {:>6.2} {:>6.2} {:>6.2} {:>5.1} {:>5.1} {:>5.1}",
@@ -1487,10 +1759,11 @@ fn cell_hit_lines(app: &App, found: &[crate::cells::Match], limit: usize, width:
             )),
             Span::raw(format!(" {:>5.1}", m.similarity_pct(tol))).bold(),
         ];
-        // a hand-added cell's note, in whatever room is left
+        // a hand-added cell's note (or a NAS/Bruker entry's folder), in whatever room is left
         let room = width.saturating_sub(code_w + fixed + 2);
-        if let Some(note) = e.note.as_deref().filter(|_| room >= 4) {
-            spans.push(Span::raw(format!("  {}", truncate(note, room))).fg(Color::DarkGray));
+        let folder = layout::is_source_id(&e.date).then(|| layout::beamtime_label(&e.date));
+        if let Some(note) = e.note.clone().or(folder).filter(|_| room >= 4) {
+            spans.push(Span::raw(format!("  {}", truncate(&note, room))).fg(Color::DarkGray));
         }
         lines.push(Line::from(spans));
     }
@@ -1509,7 +1782,7 @@ fn cell_hit_lines(app: &App, found: &[crate::cells::Match], limit: usize, width:
 
 fn date_summary(app: &App, date: &str) -> Vec<Line<'static>> {
     let exp = app.cache.experiments.get(date);
-    if app.cfg.kind.is_folders() {
+    if app.cfg.kind.browses_folders() {
         let mut lines = vec![Line::from(format!("Folder: {}", layout::beamtime_label(date))).bold()];
         if let Some(names) = exp.and_then(|e| e.samples.as_ref()) {
             let folders = names.iter().filter(|n| n.ends_with('/')).count();
@@ -2050,8 +2323,11 @@ fn draw_dialog(f: &mut Frame, app: &App, d: &Dialog) {
                 hit.login_remember_pass = Rect::new(r.x + 1 + 13, r.y + 7, w_pass, 1);
             }
             let detail = match chosen {
-                Some(p) if p.kind.is_folders() => {
+                Some(p) if p.kind.browses_folders() => {
                     format!("  folders from {}", p.root.as_deref().unwrap_or("the login folder"))
+                }
+                Some(p) if p.kind == crate::config::ServerKind::Bruker => {
+                    format!("  Bruker folders from {}", p.root.as_deref().unwrap_or(crate::config::BRUKER_DEFAULT_ROOT))
                 }
                 _ => "  ALBA proposal folders".to_string(),
             };
@@ -2244,7 +2520,7 @@ fn help_lines() -> Vec<Line<'static>> {
         sec("Stats"),
         row("Space / a", "mark a solve or tick a frames run / mark all with HKL files"),
         row("d", "download marked solves into xia2chem_r3/, ednaproc_r3/ …"),
-        row("F / →", "download ticked frame runs (asks) / into Info, under the table"),
+        row("F / A / →", "download ticked frame runs (asks) / Bruker: tick all, download / Info"),
         sec("Info (the highlighted solve; c all similar cells, S searches the CSD again)"),
         row("↑↓  ⏎ ← →", "move between subtabs, HKL and logs / fold, show (← folded: back)"),
         row("⏎ on logs", "download just the logs (on HKL: that solve)"),
@@ -2833,6 +3109,7 @@ mod tests {
         solve.hkl = vec![RemoteFile::new("/user/sample.res", Some(50))];
         let info = SampleInfo { name: "sample.res".into(), scanned_at: 0, runs: vec![Run {
             prefix: "sample.res".into(), run: 1, characterisation: false, solves: vec![solve],
+            kind: crate::model::RunKind::Data, frames: None, note: None, stamp: None,
         }] };
         assert!(crate::rank::best(&info).is_none());
         app.cache.set_dates(vec![date.into()]);
@@ -2847,6 +3124,228 @@ mod tests {
         assert!(screen.contains("NAS") && screen.contains("archive") && screen.contains("sample.res"), "{screen}");
         assert!(!screen.contains("Raw frames"), "{screen}");
         std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A processed Bruker sample as the scan builds it: two scans, three matrix runs, XPREP's
+    /// and SADABS's data, and the sample's cell from the .res.
+    fn bruker_info() -> SampleInfo {
+        use crate::model::{FrameSet, RunKind, Stats};
+        let frames = |prefix: &str, run: u32, kind: RunKind, count: u32| Run {
+            prefix: prefix.into(), run, characterisation: false, solves: vec![], kind,
+            frames: Some(FrameSet { first: 1, last: count, count, bytes: u64::from(count) * 270_000 }),
+            note: None, stamp: None,
+        };
+        let w = "/guest/3286AS264_B/work";
+        let mut xprep = Solve::new(SolveKind::BrukerXprep, format!("{w}/3486S264_A.hkl"), 1);
+        xprep.status = Status::Done;
+        xprep.stats = Some(Stats {
+            cell: Some([24.06787, 27.56022, 20.5019, 90.0, 121.4068, 90.0]),
+            space_group: Some("C2/c".into()),
+            overall: Some(crate::model::Shell {
+                d_high: Some(0.93),
+                completeness: Some(94.9),
+                multiplicity: Some(1.77),
+                i_sig: Some(4.91),
+                rmerge_pct: Some(9.0),
+                ..Default::default()
+            }),
+            shell_table: vec![
+                "XPREP (3286AS264_B_0m.prp), merged in C2/c:".into(),
+                "overall  ∞–0.93         94.9  1.77    4.9     9.0    16.1".into(),
+                "         1.80–1.63     100.0  2.11    8.8     7.6     8.2".into(),
+            ],
+            scaling: vec!["SADABS-2008/1 (3286AS264_B.abs): g = 0.0636 · wR2(int) 0.0903 → 0.0723".into()],
+            ..Stats::default()
+        });
+        xprep.hkl = vec![RemoteFile::new(format!("{w}/3486S264_A.hkl"), Some(392_280)), RemoteFile::new(format!("{w}/3486S264_A.ins"), Some(270))];
+        xprep.logs = vec![RemoteFile::new(format!("{w}/3486S264_A.pcf"), Some(1417)), RemoteFile::new(format!("{w}/3286AS264_B.abs"), Some(16_674))];
+        xprep.note = Some("cell from 3486S264_A.res (final) · space group C2/c from 3486S264_A.pcf".into());
+        let mut sadabs = Solve::new(SolveKind::BrukerSadabs, format!("{w}/3286AS264_B_0m.hkl"), 2);
+        sadabs.status = Status::Done;
+        sadabs.stats = Some(Stats { cell: Some([18.2973, 18.2927, 20.5019, 110.0182, 110.0735, 97.7397]), space_group: Some("P (centring only)".into()), ..Stats::default() });
+        sadabs.hkl = vec![RemoteFile::new(format!("{w}/3286AS264_B_0m.hkl"), Some(463_352))];
+        sadabs.logs = vec![RemoteFile::new(format!("{w}/3286AS264_B.abs"), Some(16_674))];
+        let mut cell = Solve::new(SolveKind::BrukerCell, format!("{w}/3486S264_A.res"), 1);
+        cell.status = Status::Done;
+        cell.stats = xprep.stats.clone();
+        cell.note = Some("final: 3486S264_A.res · final · centring C · cell only, no processing quality".into());
+        SampleInfo {
+            name: "3286AS264_B".into(),
+            scanned_at: 0,
+            runs: vec![
+                frames("3286AS264_B", 1, RunKind::Data, 448),
+                frames("3286AS264_B", 2, RunKind::Data, 360),
+                frames("matrix", 1, RunKind::Matrix, 12),
+                frames("matrix", 2, RunKind::Matrix, 12),
+                frames("matrix", 3, RunKind::Matrix, 12),
+                Run { prefix: "work".into(), run: 0, characterisation: false, solves: vec![xprep, sadabs, cell], kind: RunKind::Work, frames: None, note: None, stamp: Some("s".into()) },
+            ],
+        }
+    }
+
+    #[test]
+    fn bruker_results_list_datasets_the_cell_and_frame_blocks() {
+        use ratatui::crossterm::event::KeyCode;
+        let base = std::env::temp_dir().join(format!("amanece_bruker_ui_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        app.cfg.kind = crate::config::ServerKind::Bruker;
+        let date = "bruker-0123456789abcdef/guest";
+        let info = bruker_info();
+        app.cache.set_dates(vec![date.into()]);
+        let exp = app.cache.experiment_mut(date);
+        exp.samples = Some(vec![info.name.clone()]);
+        exp.infos.insert(info.name.clone(), info.clone());
+        app.alba_date = Some(date.into());
+        app.alba_sel = 1;
+        app.stats_sel = 0;
+        app.focus = Focus::Stats;
+
+        // the datasets (no cell row: they have one), then the blocks
+        let rows = App::stats_rows(&info);
+        assert_eq!(rows.len(), 2 + 1 + 3 + 1 + 2);
+        assert!(matches!(rows[2], StatsRow::Block { matrix: true }) && matches!(rows[6], StatsRow::Block { matrix: false }));
+
+        let screen = render(&app, 200, 45);
+        for want in ["3486S264_A.hkl .ins XPREP", "C2/c", "3286AS264_B_0m.hkl SADABS", "P*", "matrix · 3 runs · 36 frames · 9.7 MB", "scans · 2 runs", "r3 · 12 frames", "r1 · 448 frames · 121.0 MB", "d data", "A all frames"] {
+            assert!(screen.contains(want), "{want}\n{screen}");
+        }
+        // ALBA's quality columns, from XPREP's .prp; no cells, no score
+        let line = |what: &str| screen.lines().find(|l| l.contains(what)).unwrap().to_string();
+        assert!(screen.contains("Rmrg%") && screen.contains("Cmpl%") && screen.contains("d_min"), "{screen}");
+        let row = line("XPREP");
+        let xprep: Vec<&str> = row.split("XPREP").nth(1).unwrap().split_whitespace().collect();
+        assert_eq!(&xprep[..6], ["C2/c", "0.93", "9.0", "94.9", "4.9", "1.8"], "{screen}");
+        assert!(line("SADABS").contains(" – "), "no .prp figures of its own here: {screen}");
+        assert!(!screen.contains("Cell (") && !screen.contains("24.068 27.560") && !screen.contains("★"), "{screen}");
+        // matrix runs only: the sample's cell is the one row before the blocks (its Info has
+        // Similar cells and CellCheckCSD)
+        let mut only_matrix = info.clone();
+        only_matrix.runs[5].solves.retain(|s| s.kind == SolveKind::BrukerCell);
+        let rows = App::stats_rows(&only_matrix);
+        assert!(matches!(rows[0], StatsRow::Solve { run: 5, solve: 0 }) && matches!(rows[1], StatsRow::Block { matrix: true }));
+        // nothing is ticked to begin with
+        let r1 = info.runs.iter().find(|r| r.kind == crate::model::RunKind::Matrix).unwrap();
+        assert!(!app.frames_marked(date, &info.name, r1));
+
+        // Space on the matrix block ticks its three runs, not the scans; again unticks them
+        app.stats_sel = 2;
+        press(&mut app, KeyCode::Char(' '));
+        let ticked = |app: &App| info.runs.iter().filter(|r| app.frames_marked(date, &info.name, r)).count();
+        assert_eq!(ticked(&app), 3);
+        assert!(render(&app, 180, 45).contains("[x] matrix"));
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(ticked(&app), 0);
+        // A ticks every run of every block (and, offline, says so instead of listing them)
+        press(&mut app, KeyCode::Char('A'));
+        assert_eq!(ticked(&app), 5);
+
+        // the block's Info, with the sample's cell; then a frame run's
+        app.stats_sel = 2;
+        let screen = render(&app, 180, 45);
+        assert!(screen.contains("3 unit-cell (matrix) runs") && screen.contains("36 frames"), "{screen}");
+        assert!(screen.contains("sample cell  24.068 27.560 20.502") && screen.contains("(3486S264_A.res)"), "{screen}");
+        app.stats_sel = 7;
+        assert!(render(&app, 180, 45).contains("scan run 1"));
+        // the dataset's Info: Shells (folded, as for ALBA), Scaling, Files, Cell
+        app.stats_sel = 0;
+        let screen = render(&app, 200, 45);
+        assert!(screen.contains("XPREP data · 3486S264_A.hkl") && screen.contains("▸ Shells"), "{screen}");
+        assert!(screen.contains("▾ Scaling") && screen.contains("g = 0.0636"), "{screen}");
+        assert!(screen.contains("24.068") && screen.contains("C2/c"), "the dataset's cell, in its Info: {screen}");
+        app.folded.remove(&Sub::Shells);
+        let screen = render(&app, 200, 45);
+        assert!(screen.contains("▾ Shells") && screen.contains("merged in C2/c") && screen.contains("1.80–1.63"), "{screen}");
+        assert!(screen.contains("files: 3486S264_A.hkl") && screen.contains("aux: 3486S264_A.pcf, 3286AS264_B.abs"), "{screen}");
+        // the dataset sizes are in its Info
+        assert!(screen.contains("3486S264_A.hkl (392.3 KB)"), "{screen}");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn similar_cells_from_nas_and_bruker_show_the_server_and_folder() {
+        let base = std::env::temp_dir().join(format!("amanece_hits_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let app = demo_app(&base);
+        let entry = |code: &str, date: &str, sg: &str| crate::cells::Entry {
+            code: code.into(),
+            date: date.into(),
+            beamline: None,
+            sg: Some(sg.into()),
+            cell: [17.979, 21.88, 23.646, 82.1, 85.05, 89.5],
+            from: Some("cell".into()),
+            note: None,
+        };
+        let nas = entry("RDC78A3_test1.res", "nas-434ad0041efb4a24/guest/15256RDC78A3/work", "P (centring only)");
+        let bruker = entry("15256RDC78A3", "bruker-ee372e0e29339e25/guest", "P-1");
+        let alba = entry("JSG285", "20250704", "P 21 21 21");
+        let found: Vec<crate::cells::Match> =
+            [&nas, &bruker, &alba].into_iter().map(|e| crate::cells::Match { entry: e, score: 0.0 }).collect();
+        let text: Vec<String> = cell_hit_lines(&app, &found, 10, 120)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert!(text[1].contains(" NAS ") && text[1].contains(" P* ") && text[1].ends_with("guest/15256RDC78A3/work"), "{text:?}");
+        assert!(!text[1].contains("nas-434") && !text[1].contains("centring"), "{text:?}");
+        assert!(text[2].contains(" Bruker ") && text[2].contains("P-1") && text[2].ends_with("guest"), "{text:?}");
+        assert!(text[3].contains(" 20250704 ") && text[3].contains("P212121") && !text[3].ends_with("  "), "{text:?}");
+        assert!(text.iter().all(|l| l.chars().count() <= 120), "one line each: {text:?}");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn bruker_datasets_download_into_one_work_folder_once_each() {
+        use crate::app::Conn;
+        use ratatui::crossterm::event::KeyCode;
+        let base = std::env::temp_dir().join(format!("amanece_bruker_dl_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        app.cfg.kind = crate::config::ServerKind::Bruker;
+        let date = "bruker-0123456789abcdef/guest";
+        let info = bruker_info();
+        app.cache.set_dates(vec![date.into()]);
+        let exp = app.cache.experiment_mut(date);
+        exp.samples = Some(vec![info.name.clone()]);
+        exp.infos.insert(info.name.clone(), info.clone());
+        app.alba_date = Some(date.into());
+        app.alba_sel = 1;
+        app.focus = Focus::Stats;
+        app.conn = Conn::Connected("u".into());
+
+        // a frame block downloads no dataset with d
+        app.stats_sel = 2;
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.downloads.queued, 0);
+
+        // both datasets: hkl, ins, pcf, the shared .abs once, the other hkl = 5 files
+        app.stats_sel = 0;
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.downloads.queued, 5);
+        let said = app.console.lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("\n");
+        assert!(said.contains("queued 5 file(s)") && said.contains("work"), "{said}");
+        // one folder, as on the server, recording where each file came from
+        let sources = crate::download::read_sources(&base.join("3286AS264_B").join("work"));
+        let mut names: Vec<&str> = sources.files.keys().map(String::as_str).collect();
+        names.sort();
+        assert_eq!(names, ["3286AS264_B.abs", "3286AS264_B_0m.hkl", "3486S264_A.hkl", "3486S264_A.ins", "3486S264_A.pcf"]);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn bruker_frames_are_matched_by_run_and_block() {
+        let info = bruker_info();
+        let scan1 = &info.runs[0];
+        let matrix1 = &info.runs[2];
+        let p = |n: &str| format!("/guest/3286AS264_B/{n}");
+        assert!(App::run_has_frame(scan1, &p("3286AS264_B_01_0001.sfrm")));
+        assert!(!App::run_has_frame(scan1, &p("3286AS264_B_02_0001.sfrm")));
+        assert!(!App::run_has_frame(scan1, &p("matrix_01_0001.sfrm")), "matrix run 1 is not scan run 1");
+        assert!(App::run_has_frame(matrix1, &p("matrix_01_0012.sfrm")));
+        assert!(!App::run_has_frame(matrix1, &p("3286AS264_B_01_0001.sfrm")));
+        assert!(!App::run_has_frame(scan1, &p("3286AS264_B_am_01_0001.sfrm")), "SAINT's mask frame");
+        assert_eq!(crate::download::frames_tag(matrix1, false), "frames_matrix_r1");
+        assert_eq!(crate::download::frames_tag(scan1, false), "frames_r1");
     }
 
     #[test]
@@ -2932,7 +3431,7 @@ mod tests {
             name: "JSG285b".into(),
             scanned_at: 0,
             runs: vec![
-                Run { prefix: "manually-mounted".into(), run: 2, characterisation: true, solves: vec![] },
+                Run { prefix: "manually-mounted".into(), run: 2, characterisation: true, solves: vec![], kind: crate::model::RunKind::Data, frames: None, note: None, stamp: None, },
                 Run {
                     prefix: "manually-mounted".into(),
                     run: 3,
@@ -2942,6 +3441,7 @@ mod tests {
                         solve(SolveKind::EdnaProc, "ednaproc_ispyb.xml", &[("ep_XDS_ASCII.HKL", 10_554_107)]),
                         solve(SolveKind::AutoProcNoAnom, "autoproc_noanom_ispyb.xml", &[("XDS_ASCII.HKL", 20_879_412)]),
                     ],
+                    kind: crate::model::RunKind::Data, frames: None, note: None, stamp: None,
                 },
             ],
         };
@@ -3667,7 +4167,7 @@ mod tests {
         let shots = SampleInfo {
             name: "JSG285".into(),
             scanned_at: 0,
-            runs: vec![Run { prefix: "p".into(), run: 1, characterisation: true, solves: vec![] }],
+            runs: vec![Run { prefix: "p".into(), run: 1, characterisation: true, solves: vec![], kind: crate::model::RunKind::Data, frames: None, note: None, stamp: None, }],
         };
         app.handle(AppEvent::Remote(RemoteEvent::SampleScanned { date: "20251211".into(), info: shots }));
         assert_eq!(app.alba_rows().len(), rows);
@@ -3676,7 +4176,7 @@ mod tests {
         let raw = SampleInfo {
             name: "JSG285-2".into(),
             scanned_at: 0,
-            runs: vec![Run { prefix: "d".into(), run: 1, characterisation: false, solves: vec![] }],
+            runs: vec![Run { prefix: "d".into(), run: 1, characterisation: false, solves: vec![], kind: crate::model::RunKind::Data, frames: None, note: None, stamp: None, }],
         };
         app.handle(AppEvent::Remote(RemoteEvent::SampleScanned { date: "20251211".into(), info: raw }));
         let screen = render(&app, 170, 42);

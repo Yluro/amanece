@@ -28,9 +28,15 @@ pub fn validate_relative(path: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn source_id(host: &str, port: u16, root: &str) -> String {
-    let digest = Sha256::digest(format!("{host}:{port}:{root}").as_bytes());
-    format!("nas-{:x}", digest)[..20].to_string()
+/// `nas-…` or `bruker-…`: which server and root a beamtime id belongs to. The NAS ids
+/// are what earlier caches hold, so their hash input is unchanged.
+pub fn source_id(kind: crate::config::ServerKind, host: &str, port: u16, root: &str) -> String {
+    let (prefix, seed) = match kind {
+        crate::config::ServerKind::Bruker => ("bruker", format!("bruker:{host}:{port}:{root}")),
+        _ => ("nas", format!("{host}:{port}:{root}")),
+    };
+    let hex = format!("{:x}", Sha256::digest(seed.as_bytes()));
+    format!("{prefix}-{}", &hex[..16])
 }
 
 fn metadata(name: &str) -> bool {
@@ -41,11 +47,11 @@ fn metadata(name: &str) -> bool {
         || name == "ep_xds_ascii.hkl"
 }
 
-fn visible(name: &str) -> bool {
+pub(super) fn visible(name: &str) -> bool {
     !name.starts_with(['.', '@', '#']) && validate_relative(name).is_ok() && !name.contains('/')
 }
 
-fn group_path(sftp: &ReadOnlySftp, date: &str) -> Result<String> {
+pub(super) fn group_path(sftp: &ReadOnlySftp, date: &str) -> Result<String> {
     let id = sftp
         .nas_id
         .as_deref()
@@ -148,11 +154,14 @@ pub async fn scan_sample(sftp: &ReadOnlySftp, date: &str, sample: &str) -> Resul
             run: 1,
             characterisation: false,
             solves: vec![solve],
+            kind: crate::model::RunKind::Data,
+            frames: None,
+            note: None, stamp: None,
         }],
     })
 }
 
-fn valid_cell(c: [f64; 6]) -> bool {
+pub(super) fn valid_cell(c: [f64; 6]) -> bool {
     if !c.iter().all(|v| v.is_finite())
         || !c[..3].iter().all(|v| *v > 0.)
         || !c[3..].iter().all(|v| *v > 0. && *v < 180.)
@@ -300,8 +309,14 @@ mod tests {
         assert!(validate_root("/").is_ok(), "the login folder can be the SFTP root");
         assert!(!visible("@eaDir"));
         assert!(!visible("../secret"));
-        assert_ne!(source_id("nas", 22, "/a"), source_id("nas", 22, "/b"));
-        assert_ne!(source_id("nas", 22, "/a"), source_id("nas", 2222, "/a"));
+        use crate::config::ServerKind::{Bruker, Folders};
+        assert_ne!(source_id(Folders, "nas", 22, "/a"), source_id(Folders, "nas", 22, "/b"));
+        assert_ne!(source_id(Folders, "nas", 22, "/a"), source_id(Folders, "nas", 2222, "/a"));
+        // same server and root as a NAS and as a Bruker server never share cache keys
+        assert_ne!(source_id(Folders, "nas", 22, "/a"), source_id(Bruker, "nas", 22, "/a"));
+        assert!(source_id(Folders, "h", 22, "/a").starts_with("nas-"));
+        assert!(source_id(Bruker, "h", 22, "/a").starts_with("bruker-"));
+        assert_eq!(source_id(Folders, "h", 22, "/a").len(), 20, "NAS ids keep their old length");
         assert_ne!(
             crate::cells::sample_key("nas-a/user", "a.res"),
             crate::cells::sample_key("nas-b/user", "a.res")

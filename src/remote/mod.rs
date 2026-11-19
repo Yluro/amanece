@@ -1,3 +1,5 @@
+pub mod bruker;
+pub mod bruker_quality;
 pub mod nas;
 pub mod scan;
 pub mod session;

@@ -24,6 +24,7 @@ pub async fn list_experiments(sftp: &ReadOnlySftp) -> Result<Experiments> {
     match sftp.kind() {
         ServerKind::Alba => {}
         ServerKind::Folders => return super::nas::list_experiments(sftp).await,
+        ServerKind::Bruker => return super::bruker::list_experiments(sftp).await,
     }
     let mut ids = Vec::new();
     let mut top_names = Vec::new();
@@ -45,6 +46,7 @@ pub async fn list_samples(sftp: &ReadOnlySftp, date: &str) -> Result<(Vec<String
     match sftp.kind() {
         ServerKind::Alba => {}
         ServerKind::Folders => return super::nas::list_samples(sftp, date).await,
+        ServerKind::Bruker => return super::bruker::list_samples(sftp, date).await,
     }
     let dirs = |v: Vec<Entry>| -> Vec<String> {
         v.into_iter()
@@ -71,6 +73,7 @@ pub async fn list_frames(
     match sftp.kind() {
         ServerKind::Alba => {}
         ServerKind::Folders => anyhow::bail!("frames are only found on ALBA servers"),
+        ServerKind::Bruker => return super::bruker::list_frames(sftp, date, sample, runs).await,
     }
     let base = layout::raw_sample_dir(date, sample);
     let top = sftp.list(&base).await?;
@@ -165,6 +168,7 @@ pub async fn scan_sample(
             progress(&info);
             return Ok(info);
         }
+        ServerKind::Bruker => return super::bruker::scan_sample(sftp, date, sample, known, progress).await,
     }
     let base = layout::sample_results_dir(date, sample, flat);
     let mut found = Found::default();
@@ -266,7 +270,7 @@ fn processed_files(kind: SolveKind) -> (Option<&'static str>, &'static [&'static
             &["fast_dp.xml", "fast_dp.log", "CORRECT.LP", "aimless.log"],
         ),
         // not seen succeed on XAIRA yet: status only
-        SolveKind::Archive | SolveKind::Xia2 | SolveKind::Xia2Chem | SolveKind::EdnaProc => (None, &[], &[]),
+        _ => (None, &[], &[]),
     }
 }
 
@@ -322,6 +326,9 @@ fn run_mut<'a>(info: &'a mut SampleInfo, prefix: &str, run: u32) -> &'a mut Run 
         run,
         characterisation: false,
         solves: Vec::new(),
+        kind: crate::model::RunKind::Data,
+        frames: None,
+        note: None, stamp: None,
     });
     info.runs.last_mut().expect("just pushed")
 }

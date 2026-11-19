@@ -14,6 +14,14 @@ pub enum SolveKind {
     /// fast_dp (XAIRA)
     FastDp,
     Xia2,
+    /// Bruker (docs/BRUKER.md §4.2b): a dataset is one `.hkl` of `work/` with the cell of its
+    /// own files, XPREP's output (it has an `.ins`/`.res`) or SADABS's (`<E>_0m.hkl`). The
+    /// sample's one cell, from the highest-authority file, is a row of its own. Never ranked.
+    BrukerXprep,
+    BrukerSadabs,
+    /// SAINT's reflections that were never scaled: the merged `.raw`/`.mul`, to run SADABS/TWINABS on
+    BrukerSaint,
+    BrukerCell,
 }
 
 impl SolveKind {
@@ -26,7 +34,17 @@ impl SolveKind {
             SolveKind::FastDp => "fast_dp",
             SolveKind::Xia2 => "xia2",
             SolveKind::Archive => "archive",
+            SolveKind::BrukerXprep => "XPREP",
+            SolveKind::BrukerSadabs => "SADABS",
+            SolveKind::BrukerSaint => "SAINT",
+            SolveKind::BrukerCell => "cell",
         }
+    }
+
+    /// Bruker rows: a cell and files, no statistics, no quality, no ★.
+    #[allow(dead_code)] // used by the UI and tests
+    pub fn is_bruker(self) -> bool {
+        matches!(self, SolveKind::BrukerXprep | SolveKind::BrukerSadabs | SolveKind::BrukerSaint | SolveKind::BrukerCell)
     }
 
     /// Local folder stem, e.g. `autoproc_noanom` → `autoproc_noanom_r3/`.
@@ -39,6 +57,8 @@ impl SolveKind {
             SolveKind::FastDp => "fastdp",
             SolveKind::Xia2 => "xia2",
             SolveKind::Archive => "archive",
+            // one folder per sample, like the server's, so Olex2 finds every file next to the .ins
+            SolveKind::BrukerXprep | SolveKind::BrukerSadabs | SolveKind::BrukerSaint | SolveKind::BrukerCell => "work",
         }
     }
 }
@@ -75,6 +95,14 @@ pub struct Stats {
     pub outer: Option<Shell>,
     pub images: Option<(u32, u32)>,
     pub anomalous: Option<bool>,
+    /// Bruker: XPREP's statistics per shell (`.prp`) or SAINT's coverage (`_0m._ls`), as lines
+    /// for the Info panel's Shells subtab.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shell_table: Vec<String>,
+    /// Bruker: SADABS's error model (`.abs`) or SAINT's integration figures, for the Scaling
+    /// subtab.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scaling: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +133,9 @@ pub struct Solve {
     pub hkl: Vec<RemoteFile>,
     pub logs: Vec<RemoteFile>,
     pub note: Option<String>,
+    /// Bruker cell files: the file's time (unix seconds), so an unchanged file is not read again.
+    #[serde(default)]
+    pub mtime: Option<u32>,
 }
 
 impl Solve {
@@ -118,12 +149,42 @@ impl Solve {
             hkl: Vec::new(),
             logs: Vec::new(),
             note: None,
+            mtime: None,
         }
     }
 
     /// Unique key of a solve (an autoPROC dir holds both anom and noanom).
     pub fn key(&self) -> String {
         format!("{}#{}", self.dir, self.kind.folder())
+    }
+}
+
+/// What a run is. ALBA has only data runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunKind {
+    #[default]
+    Data,
+    /// Bruker unit-cell run (`matrix_<run>_<frame>.sfrm`): frames to download, nothing to process.
+    Matrix,
+    /// Bruker `work/` folder: not frames, it holds the cell-file rows.
+    Work,
+}
+
+/// The frames of a Bruker run, from the experiment folder's listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameSet {
+    pub first: u32,
+    pub last: u32,
+    pub count: u32,
+    pub bytes: u64,
+}
+
+impl FrameSet {
+    /// Fewer files than the frame numbers span: cut short, still collecting, or lost.
+    #[allow(dead_code)] // the run rows use it from milestone 4
+    pub fn has_gaps(&self) -> bool {
+        u64::from(self.last - self.first) + 1 != u64::from(self.count)
     }
 }
 
@@ -136,9 +197,25 @@ pub struct Run {
     /// A run with neither this flag nor solves is a dataset nobody processed.
     pub characterisation: bool,
     pub solves: Vec<Solve>,
+    #[serde(default)]
+    pub kind: RunKind,
+    /// Bruker: what the folder listing shows of this run's frames.
+    #[serde(default)]
+    pub frames: Option<FrameSet>,
+    /// Something to tell about the run as a whole (Bruker: cell files that were not read).
+    #[serde(default)]
+    pub note: Option<String>,
+    /// Bruker `work/`: what its files looked like when they were read (`bruker::work_stamp`).
+    #[serde(default)]
+    pub stamp: Option<String>,
 }
 
 impl Run {
+    /// A run of frames that is collected data (not matrix, not the `work/` row).
+    pub fn is_data(&self) -> bool {
+        self.kind == RunKind::Data
+    }
+
     pub fn key(&self) -> String {
         format!("{}_{}", self.prefix, self.run)
     }
@@ -178,7 +255,7 @@ impl SampleInfo {
 
     /// Has a collected dataset that no pipeline processed.
     pub fn unprocessed(&self) -> bool {
-        !self.has_data() && self.runs.iter().any(|r| !r.characterisation && r.solves.is_empty())
+        !self.has_data() && self.runs.iter().any(|r| r.is_data() && !r.characterisation && r.solves.is_empty())
     }
 
     pub fn has_running(&self) -> bool {
@@ -190,7 +267,7 @@ impl SampleInfo {
         let mut p: Vec<&str> = self
             .runs
             .iter()
-            .filter(|r| !r.characterisation)
+            .filter(|r| !r.characterisation && r.is_data())
             .map(|r| r.prefix.as_str())
             .collect();
         p.sort();
@@ -251,10 +328,41 @@ mod tests {
             stats: Some(Stats { images, ..Stats::default() }),
             ..Solve::new(SolveKind::AutoProcNoAnom, "d", 1)
         };
-        let run = |solves| Run { prefix: "p".into(), run: 1, characterisation: false, solves };
+        let run = |solves| Run { prefix: "p".into(), run: 1, characterisation: false, solves, kind: RunKind::Data, frames: None, note: None, stamp: None };
         assert_eq!(run(vec![]).images(), None);
         assert_eq!(run(vec![solve(Some((1, 635))), solve(None), solve(Some((1, 720)))]).images(), Some((1, 720)));
         assert_eq!(run(vec![solve(Some((5, 700))), solve(Some((1, 650)))]).images(), Some((1, 700)));
+    }
+
+    #[test]
+    fn caches_from_before_bruker_still_load() {
+        // a sample as the 0.4 cache stored it: no run kind, frames, note or file time
+        let old = r#"{"name":"S","scanned_at":1,"runs":[{"prefix":"p","run":1,"characterisation":false,
+            "solves":[{"kind":"Xia2Chem","dir":"/d","n":1,"status":"Done","stats":null,"hkl":[],"logs":[],"note":null}]}]}"#;
+        let info: SampleInfo = serde_json::from_str(old).unwrap();
+        let run = &info.runs[0];
+        assert_eq!((run.kind, run.frames, run.note.clone()), (RunKind::Data, None, None));
+        assert_eq!(run.solves[0].mtime, None);
+        assert!(run.is_data() && info.has_data());
+
+        // the Bruker additions survive a save and a load
+        let mut s = Solve::new(SolveKind::BrukerCell, "/g/S/work/a.p4p_cn", 1);
+        s.mtime = Some(5);
+        let work = Run {
+            prefix: "work".into(),
+            run: 0,
+            characterisation: false,
+            solves: vec![s],
+            kind: RunKind::Work,
+            frames: Some(FrameSet { first: 1, last: 12, count: 12, bytes: 3 }),
+            note: Some("n".into()),
+            stamp: Some("3:5:7".into()),
+        };
+        let back: Run = serde_json::from_str(&serde_json::to_string(&work).unwrap()).unwrap();
+        assert_eq!(back, work);
+        assert!(SolveKind::BrukerCell.is_bruker() && !SolveKind::Xia2Chem.is_bruker());
+        assert!(!FrameSet { first: 1, last: 12, count: 12, bytes: 0 }.has_gaps());
+        assert!(FrameSet { first: 1, last: 12, count: 11, bytes: 0 }.has_gaps());
     }
 
     #[test]
