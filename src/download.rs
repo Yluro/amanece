@@ -78,6 +78,10 @@ pub fn solve_tag(solve: &Solve, run: &Run, multi_prefix: bool) -> String {
 }
 
 pub fn frames_tag(run: &Run, multi_prefix: bool) -> String {
+    // Bruker's unit-cell runs have numbers of their own: never mixed with the data runs
+    if run.kind == crate::model::RunKind::Matrix {
+        return format!("frames_matrix_r{}", run.run);
+    }
     if multi_prefix {
         format!("frames_{}_r{}", sanitize(&run.prefix), run.run)
     } else {
@@ -161,6 +165,9 @@ mod tests {
             run: n,
             characterisation: false,
             solves: vec![],
+            kind: crate::model::RunKind::Data,
+            frames: None,
+            note: None, stamp: None,
         }
     }
 

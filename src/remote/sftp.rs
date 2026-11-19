@@ -75,7 +75,10 @@ pub struct ReadOnlySftp {
     root: String,
     /// Proposal folders holding beamtimes, relative to `root` (`""` = the root itself).
     proposals: Vec<String>,
+    /// Id of the folder source (`nas-…`, `bruker-…`) once `configure_folders` ran; the
+    /// read-only path guard applies exactly when this is set.
     pub nas_id: Option<String>,
+    kind: crate::config::ServerKind,
 }
 
 impl ReadOnlySftp {
@@ -87,6 +90,7 @@ impl ReadOnlySftp {
             downloads,
             root: "/".into(),
             nas_id: None,
+            kind: crate::config::ServerKind::Alba,
             proposals: vec![String::new()],
         }
     }
@@ -161,18 +165,24 @@ impl ReadOnlySftp {
         Ok(())
     }
 
-    /// What this session browses: plain folders once `configure_nas` ran, else ALBA.
+    /// What this session browses: ALBA until `configure_folders` says otherwise.
     pub fn kind(&self) -> crate::config::ServerKind {
-        match self.nas_id {
-            Some(_) => crate::config::ServerKind::Folders,
-            None => crate::config::ServerKind::Alba,
-        }
+        self.kind
     }
 
-    /// Browse plain folders from `root`, or from the login folder when there is none.
-    pub async fn configure_nas(&mut self, host: &str, port: u16, root: Option<&str>) -> Result<()> {
+    /// Browse folders (`Folders` or `Bruker`) from `root`; without one, `Folders` starts in
+    /// the login folder and `Bruker` in its usual `/xray/data/user`.
+    pub async fn configure_folders(
+        &mut self,
+        kind: crate::config::ServerKind,
+        host: &str,
+        port: u16,
+        root: Option<&str>,
+    ) -> Result<()> {
+        debug_assert!(kind.source_ids());
         let root = match root.map(str::trim).filter(|r| !r.is_empty()) {
             Some(r) => r.to_string(),
+            None if kind == crate::config::ServerKind::Bruker => crate::config::BRUKER_DEFAULT_ROOT.to_string(),
             None => {
                 self.limiter.acquire().await;
                 self.inner
@@ -185,7 +195,8 @@ impl ReadOnlySftp {
         };
         super::nas::validate_root(&root)?;
         self.root = root.trim_end_matches('/').to_string();
-        self.nas_id = Some(super::nas::source_id(host, port, &self.root));
+        self.nas_id = Some(super::nas::source_id(kind, host, port, &self.root));
+        self.kind = kind;
         Ok(())
     }
 

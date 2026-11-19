@@ -285,6 +285,10 @@ fn read(path: &Path) -> std::result::Result<Vec<Entry>, String> {
 /// The solve whose cell stands for the sample: the ★ one, else any finished one with a cell.
 pub fn sample_cell(info: &SampleInfo) -> Option<(&Solve, [f64; 6])> {
     let cell = |s: &Solve| s.stats.as_ref().and_then(|st| st.cell);
+    // Bruker: the sample's one cell, from its highest-authority file (docs/BRUKER.md §4.2b)
+    if let Some(s) = info.solves().find(|s| s.kind == crate::model::SolveKind::BrukerCell) {
+        return Some((s, cell(s)?));
+    }
     let best = rank::best(info).map(|(k, _)| k);
     info.solves()
         .find(|s| best.as_deref() == Some(s.key().as_str()) && cell(s).is_some())
@@ -681,8 +685,30 @@ mod tests {
                 run: 1,
                 characterisation: false,
                 solves: vec![s],
+                kind: crate::model::RunKind::Data, frames: None, note: None, stamp: None,
             }],
         }
+    }
+
+    #[test]
+    fn a_bruker_sample_records_its_one_cell_and_test_samples_none() {
+        // a dataset (its own cell, another setting) and the sample's cell from the .res
+        let mut info = sample("JSG285b", [18.297, 18.293, 20.502, 110.0, 110.1, 97.7], "P (centring only)");
+        info.runs[0].solves[0].kind = SolveKind::BrukerSadabs;
+        let mut cell = Solve::new(SolveKind::BrukerCell, "/g/JSG285b/work/a.res", 1);
+        cell.status = Status::Done;
+        cell.stats = Some(Stats { cell: Some([24.068, 27.560, 20.502, 90.0, 121.41, 90.0]), space_group: Some("C2/c".into()), ..Stats::default() });
+        info.runs[0].solves.push(cell);
+        let mut db = CellDb::load(None);
+        db.record("bruker-0123456789abcdef/guest", &info);
+        assert_eq!(db.len(), 1);
+        assert_eq!(db.entries[0].cell[0], 24.068, "the sample's cell, not the dataset's");
+        assert_eq!((db.entries[0].sg.as_deref(), db.entries[0].from.as_deref()), (Some("C2/c"), Some("cell")));
+        // "test" samples are shots of many crystals: never recorded
+        let mut test = info.clone();
+        test.name = "RDTtest".into();
+        db.record("bruker-0123456789abcdef/guest", &test);
+        assert_eq!(db.len(), 1);
     }
 
     #[test]

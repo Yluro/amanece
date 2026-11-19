@@ -128,7 +128,7 @@ impl Cache {
         let day = |s: &String| crate::layout::beamtime_date(s).to_string();
         dates.sort_by(|a, b| day(b).cmp(&day(a)).then(b.cmp(a)));
         self.experiments.retain(|d, _| dates.contains(d)
-            || (d.starts_with("nas-") && dates.iter().any(|root| d.starts_with(&format!("{root}/")))));
+            || (crate::layout::is_source_id(d) && dates.iter().any(|root| d.starts_with(&format!("{root}/")))));
         for d in &dates {
             self.experiments.entry(d.clone()).or_insert_with(|| Experiment {
                 date: d.clone(),

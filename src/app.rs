@@ -9,7 +9,7 @@ use crate::ui::splash::Egg;
 use crate::event::AppEvent;
 use crate::layout;
 use crate::local::LocalPanel;
-use crate::model::{RemoteFile, SampleInfo, Solve, Status, human_bytes, now_secs};
+use crate::model::{RemoteFile, Run, RunKind, SampleInfo, Solve, SolveKind, Status, human_bytes, now_secs};
 use crate::notify;
 use crate::remote::session::HostKey;
 use crate::remote::{DownloadEvent, DownloadJob, RemoteCmd, RemoteEvent, RemoteHandle};
@@ -68,6 +68,8 @@ impl Focus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Sub {
     Shells,
+    /// Bruker: SADABS's error model, or SAINT's integration figures.
+    Scaling,
     Files,
     CheckCif,
     Cell,
@@ -109,8 +111,13 @@ pub fn has_checkcif(s: &Solve) -> bool {
 pub fn solve_items(s: &Solve, folded: &HashSet<Sub>) -> Vec<InfoItem> {
     let has_stats = s.stats.is_some();
     let mut v = Vec::new();
-    if has_stats {
+    // Bruker: Shells and Scaling when the programs' listings gave them
+    let st = s.stats.as_ref();
+    if has_stats && (!s.kind.is_bruker() || st.is_some_and(|st| !st.shell_table.is_empty())) {
         v.push(InfoItem::Head(Sub::Shells));
+    }
+    if st.is_some_and(|st| !st.scaling.is_empty()) {
+        v.push(InfoItem::Head(Sub::Scaling));
     }
     v.push(InfoItem::Head(Sub::Files));
     if !folded.contains(&Sub::Files) {
@@ -241,6 +248,8 @@ pub enum AlbaRow {
 pub enum StatsRow {
     Solve { run: usize, solve: usize },
     Frames { run: usize },
+    /// Bruker: the header of a block of frame runs, `matrix` or `scans` (docs/BRUKER.md §4.2).
+    Block { matrix: bool },
 }
 
 /// Where a list was drawn, so mouse clicks can be mapped to rows.
@@ -771,7 +780,7 @@ impl App {
     /// Shown dimmed: named "test…", or only test shots once scanned. Only the name-based
     /// ones are hidden (by default), so scanning never removes rows from the list.
     pub fn is_test_sample(&self, date: &str, name: &str) -> bool {
-        (!self.cfg.kind.is_folders() && layout::is_test_name(name)) || self.info(date, name).is_some_and(SampleInfo::test_shots_only)
+        (self.cfg.kind.hides_test_names() && layout::is_test_name(name)) || self.info(date, name).is_some_and(SampleInfo::test_shots_only)
     }
 
     /// After the rows changed, put the highlight back on the same beamtime or sample.
@@ -793,7 +802,7 @@ impl App {
         let mut rows = vec![AlbaRow::Up];
         if let Some(names) = self.cache.experiments.get(date).and_then(|e| e.samples.as_ref()) {
             for n in names {
-                if self.cfg.kind.is_folders() || self.show_test || !layout::is_test_name(n) {
+                if !self.cfg.kind.hides_test_names() || self.show_test || !layout::is_test_name(n) {
                     rows.push(AlbaRow::Sample {
                         date: date.clone(),
                         name: n.clone(),
@@ -810,13 +819,58 @@ impl App {
 
     pub fn selected_sample(&self) -> Option<(String, String)> {
         match self.selected_row()? {
-            AlbaRow::Sample { date, name } if !(self.cfg.kind.is_folders() && name.ends_with('/')) => Some((date, name)),
+            AlbaRow::Sample { date, name } if !(self.cfg.kind.browses_folders() && name.ends_with('/')) => Some((date, name)),
             AlbaRow::Sample { .. } => None,
             AlbaRow::Date(_) | AlbaRow::Up => None,
         }
     }
 
+    /// A Bruker sample: its runs come from frame listings (docs/BRUKER.md).
+    pub fn is_bruker(info: &SampleInfo) -> bool {
+        info.runs.iter().any(|r| r.frames.is_some() || r.kind != RunKind::Data)
+    }
+
+    /// Bruker rows: the datasets (one per `.hkl`, then SAINT's; else the sample's cell), then the frame blocks
+    /// `matrix` and `scans`, each a header row and its runs.
+    fn bruker_rows(info: &SampleInfo) -> Vec<StatsRow> {
+        let mut rows = Vec::new();
+        let solves = |cell: bool| {
+            info.runs.iter().enumerate().flat_map(move |(ri, r)| {
+                r.solves
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, s)| (s.kind == SolveKind::BrukerCell) == cell)
+                    .map(move |(si, _)| StatsRow::Solve { run: ri, solve: si })
+            })
+        };
+        // the datasets, with their quality; each one's cell is in its Info. The sample's cell is
+        // a row only when there is no dataset (matrix runs only): its Cell, Similar cells and
+        // CellCheckCSD are reached there.
+        rows.extend(solves(false));
+        if rows.is_empty() {
+            rows.extend(solves(true));
+        }
+        for matrix in [true, false] {
+            let kind = if matrix { RunKind::Matrix } else { RunKind::Data };
+            let runs: Vec<usize> = (0..info.runs.len()).filter(|&i| info.runs[i].kind == kind).collect();
+            if !runs.is_empty() {
+                rows.push(StatsRow::Block { matrix });
+                rows.extend(runs.into_iter().map(|run| StatsRow::Frames { run }));
+            }
+        }
+        rows
+    }
+
+    /// The runs of one Bruker frame block.
+    pub fn block_runs(info: &SampleInfo, matrix: bool) -> impl Iterator<Item = &Run> {
+        let kind = if matrix { RunKind::Matrix } else { RunKind::Data };
+        info.runs.iter().filter(move |r| r.kind == kind)
+    }
+
     pub fn stats_rows(info: &SampleInfo) -> Vec<StatsRow> {
+        if Self::is_bruker(info) {
+            return Self::bruker_rows(info);
+        }
         let mut rows = Vec::new();
         for (ri, run) in info.runs.iter().enumerate() {
             for si in 0..run.solves.len() {
@@ -839,7 +893,25 @@ impl App {
         self.frame_marks
             .get(&Self::frame_key(date, sample, &run.key()))
             .copied()
-            .unwrap_or(!run.characterisation)
+            // Bruker frames are only fetched when ticked: nothing is ticked to begin with
+            .unwrap_or(!run.characterisation && run.frames.is_none() && run.kind == RunKind::Data)
+    }
+
+    /// Does the remote file at `path` belong to `run`? Bruker `.sfrm` names carry prefix and run
+    /// (SAINT's mask and background frames belong to none); ALBA's are matched by layout.
+    pub fn run_has_frame(run: &Run, path: &str) -> bool {
+        if run.frames.is_none() {
+            return layout::frame_belongs(path, &run.prefix, run.run);
+        }
+        let name = path.rsplit('/').next().unwrap_or(path);
+        crate::remote::bruker::frame_of(name).is_some_and(|f| {
+            !f.is_helper()
+                && f.run == run.run
+                && match run.kind {
+                    RunKind::Matrix => f.is_matrix(),
+                    _ => !f.is_matrix() && f.prefix == run.prefix,
+                }
+        })
     }
 
     fn store_info(&mut self, date: &str, info: SampleInfo) {
@@ -853,7 +925,7 @@ impl App {
         if !self.connected() {
             return;
         }
-        if self.cfg.kind.is_folders() && sample.ends_with('/') { return; }
+        if self.cfg.kind.browses_folders() && sample.ends_with('/') { return; }
         let key = (date.to_string(), sample.to_string());
         if !background && self.scanning.contains(&key) {
             return;
@@ -1131,7 +1203,7 @@ impl App {
                         Some(p) => format!("set remote_root in {}", p.display()),
                         None => "set remote_root in config.toml".into(),
                     };
-                    self.alba_note = Some(if self.cfg.kind.is_folders() {
+                    self.alba_note = Some(if self.cfg.kind.browses_folders() {
                         format!("No archive folders or supported metadata in {home}. Check remote_root and permissions.")
                     } else { format!("No beamtime folders (YYYYMMDD) in {home}. If your data is elsewhere, {hint}.") });
                     self.say(
@@ -1208,7 +1280,7 @@ impl App {
                 from_poll,
             } => {
                 let prev = self.selected_row();
-                names.sort_by_key(|n| (self.cfg.kind.is_folders() && !n.ends_with('/'), n.to_lowercase()));
+                names.sort_by_key(|n| (self.cfg.kind.browses_folders() && !n.ends_with('/'), n.to_lowercase()));
                 let baseline = self.listed_this_session.insert(date.clone());
                 let exp = self.cache.experiment_mut(&date);
                 let old = exp.samples.clone().unwrap_or_default();
@@ -1219,7 +1291,7 @@ impl App {
                 self.cache_dirty = true;
                 if !baseline {
                     for n in names.iter().filter(|n| !old.contains(n)) {
-                        if (self.cfg.kind.is_folders() && n.ends_with('/')) || (!self.cfg.kind.is_folders() && layout::is_test_name(n)) {
+                        if (self.cfg.kind.browses_folders() && n.ends_with('/')) || (self.cfg.kind.hides_test_names() && layout::is_test_name(n)) {
                             continue;
                         }
                         self.console
@@ -2208,7 +2280,7 @@ impl App {
             Some(AlbaRow::Date(d)) => self.open_date(&d),
             Some(AlbaRow::Up) => self.close_date(),
             Some(AlbaRow::Sample { date, name }) => {
-                if self.cfg.kind.is_folders() && name.ends_with('/') {
+                if self.cfg.kind.browses_folders() && name.ends_with('/') {
                     self.open_date(&format!("{date}/{}", name.trim_end_matches('/')));
                     return;
                 }
@@ -2246,7 +2318,7 @@ impl App {
         let Some(date) = self.alba_date.take() else {
             return;
         };
-        if self.cfg.kind.is_folders() {
+        if self.cfg.kind.browses_folders() {
             if let Some((parent, child)) = date.rsplit_once('/') {
                 if !self.cache.dates.contains(&date) {
                     self.open_date(parent);
@@ -2294,11 +2366,11 @@ impl App {
                 AlbaRow::Sample { date: d, name } if d == date => Some(name),
                 _ => None,
             })
-            .filter(|n| !(self.cfg.kind.is_folders() && n.ends_with('/')))
+            .filter(|n| !(self.cfg.kind.browses_folders() && n.ends_with('/')))
             .filter(|n| self.info(&date, n).is_none_or(|i| i.has_running()))
             .collect();
         if todo.is_empty() {
-            if self.cfg.kind.is_folders() {
+            if self.cfg.kind.browses_folders() {
                 let files = self.cache.experiments.get(&date).and_then(|e| e.samples.as_ref())
                     .map(|names| names.iter().filter(|n| !n.ends_with('/')).count());
                 let message = match files {
@@ -2369,6 +2441,13 @@ impl App {
             }
             KeyCode::Char('d') => self.download_solves(&date, &info),
             KeyCode::Char('F') => self.request_frames(&date, &info),
+            // Bruker: tick every run of every block, then list them (one confirmation, with the size)
+            KeyCode::Char('A') if Self::is_bruker(&info) => {
+                for r in info.runs.iter().filter(|r| r.frames.is_some()) {
+                    self.frame_marks.insert(Self::frame_key(&date, &sample, &r.key()), true);
+                }
+                self.request_frames(&date, &info);
+            }
             KeyCode::Char('s') => self.rescan_selected(),
             KeyCode::Char('c') => self.cell_hits_all = !self.cell_hits_all,
             KeyCode::Char('S') => self.csd_search(),
@@ -2401,7 +2480,7 @@ impl App {
                 }
                 items
             }
-            Some(StatsRow::Frames { .. }) => vec![InfoItem::Head(Sub::Frames)],
+            Some(StatsRow::Frames { .. } | StatsRow::Block { .. }) => vec![InfoItem::Head(Sub::Frames)],
             None => Vec::new(),
         }
     }
@@ -2552,7 +2631,7 @@ impl App {
         let info = self.info(&date, &sample)?;
         match Self::stats_rows(info).get(self.stats_sel)? {
             StatsRow::Solve { run, solve } => Some(info.runs[*run].solves[*solve].clone()),
-            StatsRow::Frames { .. } => None,
+            StatsRow::Frames { .. } | StatsRow::Block { .. } => None,
         }
     }
 
@@ -2692,6 +2771,13 @@ impl App {
                 self.frame_marks
                     .insert(Self::frame_key(&date, &sample, &r.key()), !now);
             }
+            Some(StatsRow::Block { matrix }) => {
+                // all ticked: untick them all; otherwise tick them all
+                let all = Self::block_runs(&info, *matrix).all(|r| self.frames_marked(&date, &sample, r));
+                for r in Self::block_runs(&info, *matrix) {
+                    self.frame_marks.insert(Self::frame_key(&date, &sample, &r.key()), !all);
+                }
+            }
             None => {}
         }
     }
@@ -2709,14 +2795,17 @@ impl App {
             .enumerate()
             .flat_map(|(ri, r)| r.solves.iter().map(move |s| (ri, s)))
             .filter(|(_, s)| self.marks.contains(&s.key()))
+            .filter(|(_, s)| !(s.kind.is_bruker() && s.hkl.is_empty()))
             .collect();
         if picked.is_empty()
             && let Some(StatsRow::Solve { run, solve }) = Self::stats_rows(info).get(self.stats_sel)
+            && !(info.runs[*run].solves[*solve].kind.is_bruker() && info.runs[*run].solves[*solve].hkl.is_empty())
         {
             picked.push((*run, &info.runs[*run].solves[*solve]));
         }
         if picked.is_empty() {
-            self.say(LineKind::Warn, "mark solves with Space (or highlight one), then press d");
+            let what = if Self::is_bruker(info) { "datasets" } else { "solves" };
+            self.say(LineKind::Warn, format!("mark {what} with Space (or highlight one), then press d"));
             return;
         }
         let mut list = Vec::new();
@@ -2736,9 +2825,31 @@ impl App {
     }
 
     /// Queues `files` of each solve into its own folder (`xia2chem_r3/` …), ahead of frames.
+    /// Bruker datasets all go into one `work/` folder, as on the server, so that Olex2 finds the
+    /// `.pcf`, `.abs`, `.p4p` and `._ls` next to the `.ins`; a file two datasets share comes once.
     fn queue_solve_files(&mut self, date: &str, info: &SampleInfo, list: Vec<(usize, &Solve, Vec<RemoteFile>)>) {
         let multi = info.distinct_prefixes() > 1;
         let cwd = self.local.cwd.clone();
+        if list.iter().any(|(_, s, _)| s.kind.is_bruker()) {
+            let mut files: Vec<RemoteFile> = Vec::new();
+            for (_, solve, fs) in &list {
+                for f in fs {
+                    if !files.iter().any(|g| g.path == f.path) {
+                        files.push(f.clone());
+                    }
+                }
+                self.marks.remove(&solve.key());
+            }
+            if files.is_empty() {
+                return;
+            }
+            let dir = download::solve_dir(&download::sample_dir(&cwd, &info.name), "work", date, &info.name);
+            let total = files.iter().filter_map(|f| f.size).sum::<u64>();
+            if let Some(jobs) = self.plan_folder(&dir, &files, date, &info.name, "Bruker data", 0, true) {
+                self.enqueue(jobs, total, &[folder_label(&cwd, &dir)], true);
+            }
+            return;
+        }
         let mut jobs = Vec::new();
         let mut folders = Vec::new();
         let mut total: u64 = 0;
@@ -2872,12 +2983,18 @@ impl App {
             for r in &info.runs {
                 let mine: Vec<&RemoteFile> = files
                     .iter()
-                    .filter(|f| layout::frame_belongs(&f.path, &r.prefix, r.run))
+                    .filter(|f| Self::run_has_frame(r, &f.path))
                     .collect();
                 if mine.is_empty() {
                     continue;
                 }
-                let kind = if r.characterisation { " (characterisation)" } else { "" };
+                let kind = if r.characterisation {
+                    " (characterisation)"
+                } else if r.kind == RunKind::Matrix {
+                    " (matrix)"
+                } else {
+                    ""
+                };
                 let n = mine.len();
                 let h5 = mine.iter().any(|f| f.path.ends_with(".h5"));
                 let what = match (h5, r.images()) {
@@ -2915,7 +3032,7 @@ impl App {
         for r in &info.runs {
             let mine: Vec<RemoteFile> = files
                 .iter()
-                .filter(|f| layout::frame_belongs(&f.path, &r.prefix, r.run))
+                .filter(|f| Self::run_has_frame(r, &f.path))
                 .cloned()
                 .collect();
             if mine.is_empty() {
@@ -3253,6 +3370,7 @@ mod poll_tests {
                 run: 1,
                 characterisation: false,
                 solves: vec![Solve::new(SolveKind::Xia2Chem, "/d", 1)],
+                kind: crate::model::RunKind::Data, frames: None, note: None, stamp: None,
             }],
         };
         app.cache.experiment_mut("D").infos.insert("S".into(), info);

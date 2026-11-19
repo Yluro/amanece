@@ -45,7 +45,7 @@ struct Args {
     /// Start without the login dialog (cached data and local files only)
     #[arg(long)]
     offline: bool,
-    /// Type of that server: alba (default) or folders (plain folders, like a NAS)
+    /// Type of that server: alba (default), bruker, or folders (plain folders, like a NAS)
     #[arg(long = "type", value_enum)]
     server_type: Option<config::ServerKind>,
     /// Same as --type folders
@@ -76,7 +76,7 @@ fn main() -> Result<()> {
         }
         if let Some(k) = kind {
             p.kind = k;
-            if k.is_folders() {
+            if k.source_ids() {
                 p.root = None; // ALBA's proposal folder means nothing here
             }
         }
@@ -94,7 +94,7 @@ fn main() -> Result<()> {
         servers.insert(0, s);
     }
     config::Config::check_servers(&servers)?;
-    if servers.iter().any(|s| s.kind.is_folders()) {
+    if servers.iter().any(|s| s.kind.source_ids()) {
         cfg.check_updates = false; // Do not replace this local build with an upstream release.
     }
     let base = local::strip_verbatim(std::env::current_dir()?.canonicalize()?);

@@ -156,10 +156,16 @@ pub fn frame_belongs(path: &str, prefix: &str, run: u32) -> bool {
     is_frame_of(name, prefix, run) || (parent == prefix && name.ends_with(".h5"))
 }
 
+/// Ids of folder servers start with their source id (`nas-…`, `bruker-…`) and are kept whole
+/// (the hash tells two servers or roots apart); ALBA ids are dates under some path.
+pub fn is_source_id(id: &str) -> bool {
+    id.starts_with("nas-") || id.starts_with("bruker-")
+}
+
 /// Beamtime ids are paths relative to the SFTP root: `20251211` for proposal accounts,
 /// `bl06/projects/cycle2026-I/<proposal>/20260711` for beamline-tree accounts.
 pub fn beamtime_date(id: &str) -> &str {
-    if id.starts_with("nas-") {
+    if is_source_id(id) {
         id
     } else {
         id.rsplit('/').next().unwrap_or(id)
@@ -181,7 +187,7 @@ pub fn beamline_name(id: &str) -> Option<String> {
 
 /// `XAIRA 20260711`, or just the date.
 pub fn beamtime_label(id: &str) -> String {
-    if id.starts_with("nas-") {
+    if is_source_id(id) {
         return id.split_once('/').map(|(_, group)| group.to_string())
             .unwrap_or_else(|| "Archive root".into());
     }
@@ -305,6 +311,17 @@ mod tests {
         assert!(frame_belongs(p, "BSample-19X01_w1_01", 1));
         assert!(!frame_belongs(p, "ref-BSample-19X01_01", 1));
         assert!(frame_belongs("/x/manually-mounted/manually-mounted_3_0001.cbf", "manually-mounted", 3));
+    }
+
+    #[test]
+    fn folder_server_ids_are_kept_whole() {
+        for id in ["nas-0123456789abcdef/user", "bruker-0123456789abcdef/guest"] {
+            assert!(is_source_id(id));
+            assert_eq!(beamtime_date(id), id, "the hash tells servers apart, so the id is the date");
+        }
+        assert_eq!(beamtime_label("bruker-0123456789abcdef/guest"), "guest");
+        assert_eq!(beamtime_label("nas-0123456789abcdef"), "Archive root");
+        assert!(!is_source_id("bl13/projects/c/p/20260307") && !is_source_id("20251211"));
     }
 
     #[test]

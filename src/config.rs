@@ -53,9 +53,9 @@ pub fn interval_label(d: Duration) -> String {
     }
 }
 
-/// The layout of a server's folders: a facility amanece knows (`type = "alba"`), or
-/// plain folders (no `type`, or `type = "nas"`). A new facility is a new variant plus
-/// its scan code; every `match` on the type then asks for it.
+/// The layout of a server's folders: a facility amanece knows (`type = "alba"`,
+/// `type = "bruker"`), or plain folders (no `type`, or `type = "nas"`). A new facility is
+/// a new variant plus its scan code; every `match` on the type then asks for it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerKind {
@@ -67,11 +67,30 @@ pub enum ServerKind {
     Folders,
     /// ALBA proposal folders: beamtimes by date, autoprocessing results, frames.
     Alba,
+    /// The group's Bruker diffractometer: a folder per person, an experiment folder per
+    /// sample, cells from the `.p4p` files, `.sfrm` frames split into runs (docs/BRUKER.md).
+    Bruker,
 }
 
+/// Where a Bruker server's browsing starts when its `root` is not set.
+pub const BRUKER_DEFAULT_ROOT: &str = "/xray/data/user";
+
 impl ServerKind {
-    pub fn is_folders(self) -> bool {
+    /// Beamtime ids are `<source id>/<folder path>` (see `remote::nas::source_id`), not
+    /// ALBA dates: the panel shows paths and the id says which server and root it is under.
+    pub fn source_ids(self) -> bool {
+        matches!(self, ServerKind::Folders | ServerKind::Bruker)
+    }
+
+    /// Folders are rows of their own (`name/`, opened with Enter) and the samples are
+    /// metadata files: the NAS way. ALBA and Bruker samples are folders.
+    pub fn browses_folders(self) -> bool {
         self == ServerKind::Folders
+    }
+
+    /// Samples named "test…" are test shots: hidden unless `show_test` (ALBA, Bruker).
+    pub fn hides_test_names(self) -> bool {
+        matches!(self, ServerKind::Alba | ServerKind::Bruker)
     }
 }
 
@@ -240,9 +259,10 @@ rint = [10.0, 15.0, 20.0]
 # Servers of your own, offered in the login dialog after the built-in ALBA (←→ in its
 # first row picks one). Put them at the END of the file: any [table] after a
 # [[servers]] entry belongs to that entry.
-#   type: a facility amanece knows ("alba"), or leave it out (or "nas") to browse
-#         plain folders: any SFTP server, cells read from SHELX and XDS files
+#   type: a facility amanece knows ("alba", "bruker"), or leave it out (or "nas") to
+#         browse plain folders: any SFTP server, cells read from SHELX and XDS files
 #   root: where browsing starts (absolute SFTP path); default the login folder
+#         (for "bruker": /xray/data/user)
 #   port: 22 unless set
 #
 # [[servers]]
@@ -294,9 +314,10 @@ impl Config {
             );
             anyhow::ensure!(!s.host.trim().is_empty(), "server \"{}\" has no host", s.name);
             match (s.kind, &s.root) {
-                (ServerKind::Folders, Some(root)) => crate::remote::nas::validate_root(root)
-                    .with_context(|| format!("server \"{}\"", s.name))?,
-                (ServerKind::Folders, None) | (ServerKind::Alba, _) => {}
+                (ServerKind::Folders | ServerKind::Bruker, Some(root)) => {
+                    crate::remote::nas::validate_root(root).with_context(|| format!("server \"{}\"", s.name))?
+                }
+                (ServerKind::Folders | ServerKind::Bruker, None) | (ServerKind::Alba, _) => {}
             }
         }
         Ok(())
@@ -306,6 +327,12 @@ impl Config {
     pub fn cache_host(&self) -> String {
         match self.kind {
             ServerKind::Alba => self.host.clone(),
+            ServerKind::Bruker => format!(
+                "bruker:v1:{}:{}:{}",
+                self.host,
+                self.port,
+                self.remote_root.as_deref().unwrap_or(BRUKER_DEFAULT_ROOT).trim_end_matches('/')
+            ),
             ServerKind::Folders => format!(
                 "nas:browse-v2:{}:{}:{}",
                 self.host,
@@ -650,5 +677,49 @@ mod tests {
         assert!(Config::check_servers(&[p("x", "h")]).is_ok());
         assert!(Config::check_servers(&[rooted("data")]).is_err());
         assert!(Config::check_servers(&[rooted("/data/XRay")]).is_ok());
+    }
+
+    #[test]
+    fn bruker_servers_parse_validate_and_keep_their_own_cache() {
+        let cfg: Config = toml::from_str(
+            "[[servers]]
+name = \"bruker\"
+host = \"b.example.org\"
+type = \"bruker\"
+             [[servers]]
+name = \"b2\"
+host = \"b.example.org\"
+type = \"bruker\"
+root = \"/xray/data/user/guest\"
+",
+        )
+        .unwrap();
+        let list = cfg.server_list();
+        assert_eq!((list[1].kind, list[1].port, list[1].root.as_deref()), (ServerKind::Bruker, 22, None));
+        assert!(Config::check_servers(&list).is_ok());
+        let mut bad = list.clone();
+        bad[2].root = Some("xray".into());
+        assert!(Config::check_servers(&bad).is_err(), "a Bruker root must be absolute like a folders root");
+
+        // the default root and an explicit one are different caches; neither is ALBA's or a NAS's
+        let (mut a, mut b) = (Config::default(), Config::default());
+        a.apply(&list[1]);
+        b.apply(&list[2]);
+        assert_eq!(a.cache_host(), "bruker:v1:b.example.org:22:/xray/data/user");
+        assert_ne!(a.cache_host(), b.cache_host());
+        let mut nas = a.clone();
+        nas.kind = ServerKind::Folders;
+        assert_ne!(a.cache_host(), nas.cache_host());
+        assert_ne!(a.cache_host(), Config::default().cache_host());
+    }
+
+    #[test]
+    fn server_kinds_say_what_they_browse() {
+        use ServerKind::{Alba, Bruker, Folders};
+        // (source ids, trailing-slash folders, test names hidden)
+        let caps = |k: ServerKind| (k.source_ids(), k.browses_folders(), k.hides_test_names());
+        assert_eq!(caps(Alba), (false, false, true));
+        assert_eq!(caps(Folders), (true, true, false));
+        assert_eq!(caps(Bruker), (true, false, true));
     }
 }
