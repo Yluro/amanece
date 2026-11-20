@@ -40,10 +40,10 @@ Unpack it and put `amanece` (`amanece.exe`) somewhere on your `PATH`. Each archi
 
 ### CellCheckCSD _(optional)_
 
-Amanece can search the CSD and the ICSD, using [CellCheckCSD](https://www.ccdc.cam.ac.uk/solutions/software/cellcheckcsd/).
+Amanece can search the CSD and the ICSD using [CellCheckCSD](https://www.ccdc.cam.ac.uk/solutions/software/cellcheckcsd/).
 CellCheck is free to download after registering an account in the CCDC. Amanece looks in its default 
 instalation folder (`C:\Program Files\CCDC\CellCheckCSD` on Windows, or `/opt/CCDC/CellCheckCSD` on Linux). If you have
-CellCheckCSD installed in a custom folder: change the `cellcheck_dir` value in `config.toml`.
+CellCheckCSD installed in a different folder: change the `cellcheck_dir` value in `config.toml`.
 
 ### Build from source
 
@@ -73,12 +73,12 @@ Since v0.4.1, Amanece routinely asks GitHub whether there is a newer release. Wh
 automatically updates amanece.
 Restart amanece again to use the new version. `o` in that dialog opens the release notes.
 
-`check_updates = false` in `config.toml` stops the automatic check; `U` still checks when you ask.
+You can turn off automatic updates setting `check_updates = false` in `config.toml`.
 
 
 ## Running amanece
 
-You can simply run amanece by calling the executable from any terminal:
+You can run amanece by calling the executable from any terminal:
 
 ```bash
 amanece
@@ -108,8 +108,8 @@ The TUI is fully mouse compatible, although there are several useful key shortcu
 
 | Key | Action |
 |---|---|
-| `Tab` | cycle panels |
-| `C` | log in; when connected, reconnect or change server (`Esc` keeps the connection) |
+| `Tab`/`Shift + Tab` | cycle panels forward/backward |
+| `C` | log in; when connected, reconnect or change server |
 | `p` | cycle polling: manual → 10 min → 2 min → 30 s → 5 s (the fast rates only re-list the open beamtime; sample rescans stay at most once a minute) |
 | `n` | toggle the new-sample sound |
 | `E` | open the Local folder in the file explorer |
@@ -119,21 +119,33 @@ The TUI is fully mouse compatible, although there are several useful key shortcu
 
 ### Local file tree panel (left)
 
-Browse folders; `N` makes a new folder, `Supr` moves the selected file or folder to the Recycle Bin
+Browse folders; `N`/`F7` makes a new folder, `Supr` moves the selected file or folder to the Recycle Bin
 (asks first). Downloads land in `<sample>/<program>/` inside the folder open here.
-### ALBA panel
+### Remote panel
+
+The remote panel uses a simplified file tree. It automatically detects samples by looking for relevant files or logs. File exploration works the same was as the local folder tab.
+
+- A green ◆ next to a sample: it's already downloaded (from this beamtime) into the Local folder.
+- A yellow ◆: only a local folder with the same name exists.
+
+**Important:** The remote panel follows a convention to hide all samples/folders that containing `test` in its name by default. This behaviour can be toggled by pressing `t`.
+
+#### ALBA type folders
+
+Amanece automatically scans the proposal id folders and lists its beamtimes.
 
 ![ALBA panel: the samples of a beamtime with their solve status](docs/images/alba.png)
 
 Beamtimes appear like folders, from XALOC (BL13) and XAIRA (BL06) together, newest first. `Enter`
 opens one (the others are hidden), `Backspace` goes back.
 
-- A green ◆ next to a sample: it's already downloaded (from this beamtime) into the Local folder.
-- A yellow ◆: only a local folder with the same name exists.
+#### Bruker type folders
 
-The ALBA panel hides samples containing `test` in its name by default. Pressing `t` shows all experiments in the beamtime.
+Amanece looks for folders that contain `.sfrm` files or the `work` folder created by APEX. Folders containing either are treated as samples and are scanned for unit cell, integration or SHELX-type files.
 
 ### Stats panel
+
+#### ALBA type folders
 
 ![Stats panel: solves table, ranking, cell, similar cells, shells and checkCIF](docs/images/stats.png)
 
@@ -188,9 +200,6 @@ It lists the closest 5; `c` (or a click on `+N more`) lists them all.
 
 Amanece comes with its own terminal emulator (Windows ConPTY). Commands run in the Local folder and a bare program name
 gets the selected file, e.g.: with `XDS_ASCII.HKL` selected, `xprep` runs `xprep XDS_ASCII.HKL`.
-
-### Mouse
-
 
 ## Settings
 
@@ -255,7 +264,7 @@ rint = [10.0, 15.0, 20.0]                  # RINTA01: %, alert above (compared w
 ```
 
 ## Files
-Amanece writes several files for logging/database creation/
+Amanece writes several files for logging/database creation purposes
 
 - `.alba_source.json` in each download folder – which server file each download came from
 
