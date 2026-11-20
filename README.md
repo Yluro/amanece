@@ -130,6 +130,12 @@ The remote panel uses a simplified file tree. It automatically detects samples b
 
 **Important:** The remote panel follows a convention to hide all samples/folders that containing `test` in its name by default. This behaviour can be toggled by pressing `t`.
 
+**Filter (`/`):** type a regular expression to narrow the list shown (beamtimes, person folders
+or samples). It ignores case and matches anywhere in the name unless anchored: `JSG28[5-9]`,
+`^3570`, `cu|ni`. The list narrows as you type; `Enter` keeps the filter, `Esc` clears it, and a
+pattern that is not a valid regex is matched as plain text. Opening or leaving a folder clears it.
+`S` then scans only the samples shown, so a large folder can be scanned in pieces.
+
 #### ALBA type folders
 
 Amanece automatically scans the proposal id folders and lists its beamtimes.
@@ -217,10 +223,22 @@ entries.
 | `poll_mode` | `"manual"` | polling at startup: `"manual"`, `"slow"`, `"fast"`, `"30s"` or `"5s"` (`p` cycles them in the app) |
 | `slow_poll_minutes` | `10.0` | interval of the `slow` mode |
 | `fast_poll_minutes` | `2.0` | interval of the `fast` mode |
-| `max_requests_per_second` | `3.0` | sustained SFTP request rate (capped at 5) |
+| `max_requests_per_second` | `3.0` | sustained SFTP request rate; `0` = no limit |
 | `burst` | `6` | requests allowed in a burst above that rate |
-| `parallel_downloads` | `3` | frames downloaded at a time (1–4); HKL/log downloads always get an extra slot |
+| `background_gap_seconds` | `3.0` | pause between background sample scans (`S`, poll rescans); `0` = back to back |
+| `parallel_downloads` | `3` | frames downloaded at a time (1–16); HKL/log downloads always get an extra slot |
 | `check_updates` | `true` | ask GitHub for a newer release at startup and once a day (`U` still works when off) |
+
+The defaults are deliberately gentle: ALBA is a facility server shared by many groups. On a
+server you may load harder (your group's own NAS, say), a power user can lift the brakes:
+
+```toml
+max_requests_per_second = 0    # no limit
+background_gap_seconds = 0     # scan samples back to back
+parallel_downloads = 8
+```
+
+These settings apply to every server, ALBA included, so set them back before working on ALBA.
 
 Polls never run more often than every 5 s, and at `30s` / `5s` only the open beamtime is re-listed;
 the beamtime list and sample rescans happen at most once a minute.
