@@ -65,12 +65,12 @@ impl Cache {
             })
     }
 
-    /// What to show before logging in: the cache of `user` when it is known, else the
-    /// most recently saved one, else an empty one (adopted by the first login).
+    /// What to show before logging in: the cache of `user` when it has one, else the
+    /// most recently saved one of this server, else an empty one (adopted by the first login).
+    /// `user` may be a name remembered for another server, so a miss falls back too.
     pub fn load_startup(dir: Option<&Path>, host: &str, user: Option<&str>) -> Cache {
-        dir.and_then(|dir| match user {
-            Some(u) => Self::read(&file(dir, &account_key(u, host)), host),
-            None => {
+        dir.and_then(|dir| {
+            user.and_then(|u| Self::read(&file(dir, &account_key(u, host)), host)).or_else(|| {
                 let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
                     .ok()?
                     .flatten()
@@ -82,7 +82,7 @@ impl Cache {
                     .collect();
                 files.sort_by_key(|f| std::cmp::Reverse(f.0));
                 files.iter().find_map(|(_, p)| Self::read(p, host))
-            }
+            })
         })
         .unwrap_or_else(|| Self::fresh(host))
     }
@@ -184,7 +184,9 @@ mod tests {
         assert!(Cache::load_all(Some(&dir), "other-host").is_empty());
         // before login: the named account's, else the latest one
         assert_eq!(Cache::load_startup(Some(&dir), "h", Some("ua")).dates, vec!["20251211"]);
-        assert_eq!(Cache::load_startup(Some(&dir), "h", None).account, Some(a));
+        assert_eq!(Cache::load_startup(Some(&dir), "h", None).account, Some(a.clone()));
+        // a name with no cache on this server (remembered for another one): the latest one
+        assert_eq!(Cache::load_startup(Some(&dir), "h", Some("other")).account, Some(a));
         std::fs::remove_dir_all(&root).ok();
     }
 }

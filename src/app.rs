@@ -768,15 +768,22 @@ impl App {
         self.fill_login(l, self.saved_users[i].clone());
     }
 
-    /// After a login: switch to that account's cache, or claim the empty one shown
-    /// before logging in.
+    /// After a login: switch to that account's saved cache, or claim the empty one shown
+    /// before logging in when the account has none.
     fn use_account_cache(&mut self, user: &str) {
         let key = crate::cache::account_key(user, &self.cfg.cache_host());
         match self.cache.account.as_deref() {
             Some(k) if k == key => {}
+            // the empty cache shown before login (startup looked under another name):
+            // the account's own saved cache wins, never overwritten by the empty one
             None => {
-                self.cache.account = Some(key);
-                self.cache_dirty = true;
+                let saved = Cache::load_account(self.state_dir.as_deref(), &self.cfg.cache_host(), &key);
+                if saved.dates.is_empty() {
+                    self.cache.account = Some(key);
+                    self.cache_dirty = true;
+                } else {
+                    self.show_cache(saved);
+                }
             }
             Some(_) => {
                 self.show_cache(Cache::load_account(self.state_dir.as_deref(), &self.cfg.cache_host(), &key));
