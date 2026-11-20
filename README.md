@@ -226,6 +226,7 @@ entries.
 | `max_requests_per_second` | `3.0` | sustained SFTP request rate; `0` = no limit |
 | `burst` | `6` | requests allowed in a burst above that rate |
 | `background_gap_seconds` | `3.0` | pause between background sample scans (`S`, poll rescans); `0` = back to back |
+| `parallel_scans` | `1` | background sample scans running at once (1–32); worth raising only with a short gap |
 | `parallel_downloads` | `3` | frames downloaded at a time (1–16); HKL/log downloads always get an extra slot |
 | `check_updates` | `true` | ask GitHub for a newer release at startup and once a day (`U` still works when off) |
 
@@ -235,6 +236,7 @@ server you may load harder (your group's own NAS, say), a power user can lift th
 ```toml
 max_requests_per_second = 0    # no limit
 background_gap_seconds = 0     # scan samples back to back
+parallel_scans = 8             # eight samples at a time
 parallel_downloads = 8
 ```
 

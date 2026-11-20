@@ -6,7 +6,7 @@ pub mod session;
 pub mod sftp;
 pub mod worker;
 
-pub use worker::{DownloadEvent, DownloadJob, RemoteCmd, RemoteEvent, RemoteHandle, Settings, spawn};
+pub use worker::{DownloadEvent, DownloadJob, MAX_PARALLEL_SCANS, RemoteCmd, RemoteEvent, RemoteHandle, Settings, spawn};
 
 /// Live check against the real server, run by hand only:
 /// `ALBA_USER=… ALBA_PASS=… cargo test live_probe -- --ignored --nocapture`.

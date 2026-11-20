@@ -140,6 +140,8 @@ pub struct Config {
     /// Pause between background scans ("fetch all stats", poll rescans), from the start
     /// of one to the start of the next; 0 = back to back.
     pub background_gap_seconds: f64,
+    /// Background scans running at once (1–32), all on the one connection.
+    pub parallel_scans: usize,
     /// Frames downloaded at a time over the one connection (1–16). HKL/log downloads
     /// always get a slot of their own on top.
     pub parallel_downloads: usize,
@@ -184,6 +186,7 @@ impl Default for Config {
             max_requests_per_second: 3.0,
             burst: 6,
             background_gap_seconds: 3.0,
+            parallel_scans: 1,
             parallel_downloads: 3,
             beamlines: vec!["bl13".into(), "bl06".into()],
             remote_root: None,
@@ -227,6 +230,8 @@ max_requests_per_second = 3.0
 burst = 6
 # seconds between background sample scans ("S" fetch all, poll rescans); 0 = back to back
 background_gap_seconds = 3.0
+# background sample scans running at once (1-32); more only helps with a short gap
+parallel_scans = 1
 # frames downloaded at a time over the one connection (1-16); HKL/log downloads
 # always get a slot of their own on top and never wait behind frames
 parallel_downloads = 3

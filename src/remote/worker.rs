@@ -22,6 +22,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Upper bound for `parallel_downloads`.
 pub const MAX_PARALLEL_DOWNLOADS: usize = 16;
+/// Upper bound for `parallel_scans`.
+pub const MAX_PARALLEL_SCANS: usize = 32;
 
 const MAX_BACKOFF: Duration = Duration::from_secs(600);
 /// Tries in a row without any new bytes before a file is given up (reconnecting in
@@ -146,6 +148,8 @@ pub struct Settings {
     pub parallel_downloads: usize,
     /// Pause between background scans ("fetch all stats", poll rescans), start to start.
     pub background_gap: Duration,
+    /// Background scans running at once; clamped to 1..=MAX_PARALLEL_SCANS.
+    pub parallel_scans: usize,
 }
 
 pub struct RemoteHandle {
@@ -272,32 +276,59 @@ async fn command_loop(
     let mut reconnect_pending = false;
     let mut background: VecDeque<Background> = VecDeque::new();
     let background_gap = settings.background_gap;
+    let parallel_scans = settings.parallel_scans.clamp(1, MAX_PARALLEL_SCANS);
     let mut last_background: Option<Instant> = None;
+    // background scans in flight, each a task of its own on the shared session
+    let mut in_flight: tokio::task::JoinSet<Result<()>> = tokio::task::JoinSet::new();
 
     loop {
         let gap = last_background.map_or(Duration::ZERO, |t| background_gap.saturating_sub(t.elapsed()));
-        let cmd = tokio::select! {
+        let room = in_flight.len() < parallel_scans;
+        let step = tokio::select! {
             biased;
             cmd = rx.recv() => match cmd {
-                Some(c) => c,
+                Some(c) => Step::Cmd(c),
                 None => break,
             },
-            _ = tokio::time::sleep(gap), if !background.is_empty() && conn.is_some() => {
-                let job = background.pop_front().expect("non-empty");
+            Some(done) = in_flight.join_next(), if !in_flight.is_empty() => Step::Finished(done),
+            _ = tokio::time::sleep(gap), if room && !background.is_empty() && conn.is_some() => {
+                Step::Start(background.pop_front().expect("non-empty"))
+            }
+        };
+        let cmd = match step {
+            Step::Cmd(cmd) => cmd,
+            Step::Start(job) => {
                 last_background = Some(Instant::now());
-                RemoteCmd::ScanSample {
+                let op = RemoteCmd::ScanSample {
                     date: job.date,
                     sample: job.sample,
                     flat: job.flat,
                     known: job.known,
                     background: false,
+                };
+                let Some(sftp) = shared.get() else {
+                    emit(&events, RemoteEvent::Error(not_connected(&op)));
+                    continue;
+                };
+                let events = events.clone();
+                in_flight.spawn(async move { run_op(&sftp, op, &events).await });
+                continue;
+            }
+            Step::Finished(done) => {
+                // a panicked or aborted task is no session error
+                if let Ok(Err(e)) = done {
+                    op_failed(e, &mut conn, &shared, &events, creds.is_some(), &self_tx, &mut reconnect_pending);
                 }
+                continue;
             }
         };
 
         match cmd {
             RemoteCmd::Shutdown => break,
             RemoteCmd::Connect { server, user, password } => {
+                // scans of the previous server must not land in the next one's cache
+                in_flight.abort_all();
+                background.clear();
                 if let Some(c) = conn.take() {
                     shared.set(None);
                     c.close().await;
@@ -430,22 +461,45 @@ async fn command_loop(
                     continue;
                 };
                 if let Err(e) = run_op(&sftp, op, &events).await {
-                    let closed = conn.as_ref().is_none_or(|c| c.handle.is_closed());
-                    if closed {
-                        shared.set(None);
-                        conn = None;
-                        emit(&events, RemoteEvent::Disconnected { message: e.to_string() });
-                        if creds.is_some() {
-                            schedule_reconnect(&self_tx, Duration::from_secs(2), &mut reconnect_pending, &events);
-                        }
-                    }
+                    op_failed(e, &mut conn, &shared, &events, creds.is_some(), &self_tx, &mut reconnect_pending);
                 }
             }
         }
     }
+    in_flight.abort_all();
     shared.set(None);
     if let Some(c) = conn.take() {
         c.close().await;
+    }
+}
+
+/// What the command loop does next.
+enum Step {
+    Cmd(RemoteCmd),
+    /// Start this background scan as a task of its own.
+    Start(Background),
+    /// A background scan task ended.
+    Finished(Result<Result<()>, tokio::task::JoinError>),
+}
+
+/// An operation failed: if the session died with it, drop it and reconnect.
+fn op_failed(
+    e: anyhow::Error,
+    conn: &mut Option<Connection>,
+    shared: &Shared,
+    events: &std::sync::mpsc::Sender<AppEvent>,
+    has_creds: bool,
+    self_tx: &UnboundedSender<RemoteCmd>,
+    reconnect_pending: &mut bool,
+) {
+    let closed = conn.as_ref().is_none_or(|c| c.handle.is_closed());
+    if closed {
+        shared.set(None);
+        *conn = None;
+        emit(events, RemoteEvent::Disconnected { message: e.to_string() });
+        if has_creds {
+            schedule_reconnect(self_tx, Duration::from_secs(2), reconnect_pending, events);
+        }
     }
 }
 

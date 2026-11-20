@@ -643,7 +643,8 @@ Milestones 1–2 are independent of server access and can start as soon as the p
 
 - Open person folder: 1 listing. Open experiment: 2–12 requests, usually 3–5 (§3.3), spaced by the
   existing limiter (3/s, burst 6) and background scans at one sample per 3 s (the defaults;
-  `max_requests_per_second = 0` and `background_gap_seconds = 0` lift both).
+  `max_requests_per_second = 0` and `background_gap_seconds = 0` lift both, and
+  `parallel_scans` runs several samples at once).
 - "Fetch all stats" on `guest/` with N experiments ≈ 3·N requests ≈ N·3 s; for N = 300 about
   15 min in the background, interruptible, cached afterwards (finished scans are reused
   until the folder's mtime changes, as for ALBA).

@@ -113,6 +113,7 @@ fn main() -> Result<()> {
             beamlines: cfg.beamlines.clone(),
             parallel_downloads: cfg.parallel_downloads,
             background_gap: cfg.background_gap(),
+            parallel_scans: cfg.parallel_scans,
         },
         tx.clone(),
     );

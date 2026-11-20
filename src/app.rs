@@ -2550,10 +2550,12 @@ impl App {
     /// How background scans are spaced, for messages: "one every 3 s", "back to back".
     pub fn scan_pace(&self) -> String {
         let gap = self.cfg.background_gap().as_secs_f64();
-        if gap == 0.0 {
-            "back to back".into()
-        } else {
-            format!("one every {gap} s")
+        let n = self.cfg.parallel_scans.clamp(1, crate::remote::MAX_PARALLEL_SCANS);
+        match (n, gap == 0.0) {
+            (1, true) => "back to back".into(),
+            (1, false) => format!("one every {gap} s"),
+            (n, true) => format!("{n} at a time"),
+            (n, false) => format!("{n} at a time, one started every {gap} s"),
         }
     }
 
@@ -3297,7 +3299,7 @@ mod live {
                 known_hosts: Some(std::env::temp_dir().join("amanece_live_known_hosts")),
                 beamlines: vec!["bl13".into(), "bl06".into()],
                 parallel_downloads: 3,
-                background_gap: Duration::from_secs(3),
+                background_gap: Duration::from_secs(3), parallel_scans: 1,
             },
             tx.clone(),
         );
@@ -3464,7 +3466,7 @@ mod trash_check {
                 known_hosts: None,
                 beamlines: vec!["bl13".into(), "bl06".into()],
                 parallel_downloads: 3,
-                background_gap: Duration::from_secs(3),
+                background_gap: Duration::from_secs(3), parallel_scans: 1,
             },
             tx.clone(),
         );
@@ -3511,7 +3513,7 @@ mod poll_tests {
                 known_hosts: None,
                 beamlines: vec!["bl13".into(), "bl06".into()],
                 parallel_downloads: 3,
-                background_gap: Duration::from_secs(3),
+                background_gap: Duration::from_secs(3), parallel_scans: 1,
             },
             tx.clone(),
         );
@@ -3572,7 +3574,7 @@ mod login_tests {
                 known_hosts: None,
                 beamlines: vec!["bl13".into()],
                 parallel_downloads: 3,
-                background_gap: Duration::from_secs(3),
+                background_gap: Duration::from_secs(3), parallel_scans: 1,
             },
             tx.clone(),
         );
@@ -3610,7 +3612,7 @@ mod login_tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (tx, _rx) = std::sync::mpsc::channel();
-        let settings = crate::remote::Settings { rate: 1.0, burst: 1, known_hosts: None, beamlines: vec![], parallel_downloads: 1, background_gap: Duration::from_secs(3) };
+        let settings = crate::remote::Settings { rate: 1.0, burst: 1, known_hosts: None, beamlines: vec![], parallel_downloads: 1, background_gap: Duration::from_secs(3), parallel_scans: 1 };
         let remote = crate::remote::spawn(&rt, settings, tx.clone());
         let mut app = App::new(cfg, servers, Some(config.join("config.toml")), root.join("launch"), remote, tx, None, false);
         let key = |app: &mut App, k| app.on_key(KeyEvent::from(k));
@@ -3929,7 +3931,7 @@ mod login_tests {
                 known_hosts: None,
                 beamlines: vec!["bl13".into()],
                 parallel_downloads: 3,
-                background_gap: Duration::from_secs(3),
+                background_gap: Duration::from_secs(3), parallel_scans: 1,
             },
             tx.clone(),
         );

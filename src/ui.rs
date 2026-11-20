@@ -3449,7 +3449,7 @@ mod tests {
                 known_hosts: None,
                 beamlines: vec!["bl13".into()],
                 parallel_downloads: 3,
-                background_gap: std::time::Duration::from_secs(3),
+                background_gap: std::time::Duration::from_secs(3), parallel_scans: 1,
             },
             tx.clone(),
         );
