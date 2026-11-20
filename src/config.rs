@@ -13,8 +13,8 @@ pub const MIN_POLL: Duration = Duration::from_secs(5);
 /// Below this interval a poll only re-lists the open/newest beamtime; the beamtime
 /// list and sample rescans happen at most this often (see `App::poll_now`).
 pub const HEAVY_POLL_GAP: Duration = Duration::from_secs(60);
-/// Upper bound for the SFTP request rate, whatever the config says.
-pub const MAX_REQUESTS_PER_SECOND: f64 = 5.0;
+/// Lowest SFTP request rate accepted (a typo like 0.01 would freeze the app).
+pub const MIN_REQUESTS_PER_SECOND: f64 = 0.2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -134,9 +134,13 @@ pub struct Config {
     /// Programs always started detached in their own window. Windows GUI programs
     /// (xprep, shelxle, olex2, …) are detected automatically and need no entry.
     pub external_window: Vec<String>,
+    /// Sustained SFTP requests per second; 0 = no limit. Polite by default, no upper cap.
     pub max_requests_per_second: f64,
     pub burst: u32,
-    /// Frames downloaded at a time over the one connection (1–4). HKL/log downloads
+    /// Pause between background scans ("fetch all stats", poll rescans), from the start
+    /// of one to the start of the next; 0 = back to back.
+    pub background_gap_seconds: f64,
+    /// Frames downloaded at a time over the one connection (1–16). HKL/log downloads
     /// always get a slot of their own on top.
     pub parallel_downloads: usize,
     /// Beamline folders searched for the proposal (`/bl13/projects/cycle*/...`):
@@ -179,6 +183,7 @@ impl Default for Config {
             external_window: vec!["xprep".into()],
             max_requests_per_second: 3.0,
             burst: 6,
+            background_gap_seconds: 3.0,
             parallel_downloads: 3,
             beamlines: vec!["bl13".into(), "bl06".into()],
             remote_root: None,
@@ -215,10 +220,14 @@ show_test = false
 # Windows GUI programs (xprep, shelxle, olex2, ...) are detected automatically.
 external_window = ["xprep"]
 
-# SFTP politeness: sustained requests per second (max 5) and burst size
+# SFTP politeness. The defaults are gentle on shared servers (ALBA is a facility
+# server used by many groups); raise them only on a server you may load harder.
+# Sustained requests per second (0 = no limit) and burst size:
 max_requests_per_second = 3.0
 burst = 6
-# frames downloaded at a time over the one connection (1-4); HKL/log downloads
+# seconds between background sample scans ("S" fetch all, poll rescans); 0 = back to back
+background_gap_seconds = 3.0
+# frames downloaded at a time over the one connection (1-16); HKL/log downloads
 # always get a slot of their own on top and never wait behind frames
 parallel_downloads = 3
 
@@ -382,8 +391,22 @@ impl Config {
         Some(d.max(MIN_POLL))
     }
 
+    /// Requests per second for the limiter: infinite for 0 (no limit), else at least
+    /// `MIN_REQUESTS_PER_SECOND`.
     pub fn request_rate(&self) -> f64 {
-        self.max_requests_per_second.clamp(0.2, MAX_REQUESTS_PER_SECOND)
+        let r = self.max_requests_per_second;
+        if r == 0.0 {
+            f64::INFINITY
+        } else if r.is_nan() || r < 0.0 {
+            Config::default().max_requests_per_second
+        } else {
+            r.max(MIN_REQUESTS_PER_SECOND)
+        }
+    }
+
+    pub fn background_gap(&self) -> Duration {
+        let s = self.background_gap_seconds;
+        Duration::from_secs_f64(if s.is_finite() && s > 0.0 { s.min(3600.0) } else { 0.0 })
     }
 
     pub fn cell_tolerance(&self) -> crate::cells::Tolerance {
@@ -582,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn poll_floor_and_rate_cap() {
+    fn poll_floor_and_request_rate() {
         let cfg = Config {
             fast_poll_minutes: 0.01,
             max_requests_per_second: 50.0,
@@ -604,7 +627,14 @@ mod tests {
         let parsed: Config = toml::from_str("poll_mode = \"5s\"").unwrap();
         assert_eq!(parsed.poll_mode, PollMode::Every5s);
         assert_eq!(cfg.poll_interval(PollMode::Manual), None);
-        assert_eq!(cfg.request_rate(), MAX_REQUESTS_PER_SECOND);
+        // no upper cap: a power user may go as fast as the server lets them; 0 = no limit
+        assert_eq!(cfg.request_rate(), 50.0);
+        assert!(Config { max_requests_per_second: 0.0, ..Config::default() }.request_rate().is_infinite());
+        assert_eq!(Config { max_requests_per_second: 0.01, ..Config::default() }.request_rate(), MIN_REQUESTS_PER_SECOND);
+        assert_eq!(Config { max_requests_per_second: -1.0, ..Config::default() }.request_rate(), 3.0);
+        assert_eq!(Config::default().background_gap(), Duration::from_secs(3));
+        assert_eq!(Config { background_gap_seconds: 0.0, ..Config::default() }.background_gap(), Duration::ZERO);
+        assert_eq!(Config { background_gap_seconds: -2.0, ..Config::default() }.background_gap(), Duration::ZERO);
     }
 
     #[test]

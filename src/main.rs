@@ -112,6 +112,7 @@ fn main() -> Result<()> {
             known_hosts: config::Config::known_hosts_path(),
             beamlines: cfg.beamlines.clone(),
             parallel_downloads: cfg.parallel_downloads,
+            background_gap: cfg.background_gap(),
         },
         tx.clone(),
     );

@@ -12,7 +12,7 @@ use tokio::io::AsyncReadExt;
 /// Token bucket shared by every remote request (listings, stats, opens).
 pub struct Limiter {
     state: tokio::sync::Mutex<(f64, Instant)>,
-    rate: f64,
+    pub rate: f64,
     burst: f64,
     pub count: Arc<AtomicU64>,
 }
@@ -29,6 +29,11 @@ impl Limiter {
     }
 
     pub async fn acquire(&self) {
+        // no limit (`max_requests_per_second = 0`): only counted
+        if self.rate.is_infinite() {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         loop {
             let wait = {
                 let mut s = self.state.lock().await;
@@ -83,7 +88,9 @@ pub struct ReadOnlySftp {
 
 impl ReadOnlySftp {
     pub fn new(inner: SftpSession, limiter: Arc<Limiter>) -> Self {
-        let downloads = Arc::new(Limiter::new(DOWNLOAD_OPENS_PER_SECOND, 10, limiter.count.clone()));
+        // never slower than the main limiter: raising the request rate speeds frame opens too
+        let opens = DOWNLOAD_OPENS_PER_SECOND.max(limiter.rate);
+        let downloads = Arc::new(Limiter::new(opens, 10, limiter.count.clone()));
         ReadOnlySftp {
             inner,
             limiter,
@@ -379,5 +386,17 @@ mod tests {
         // 2 from the burst, then 2 more at 10/s ≈ 0.2 s
         assert!(t.elapsed() >= Duration::from_millis(150));
         assert_eq!(count.load(Ordering::Relaxed), 4);
+    }
+
+    #[tokio::test]
+    async fn no_limit_never_waits_but_still_counts() {
+        let count = Arc::new(AtomicU64::new(0));
+        let l = Limiter::new(f64::INFINITY, 1, count.clone());
+        let t = Instant::now();
+        for _ in 0..10_000 {
+            l.acquire().await;
+        }
+        assert!(t.elapsed() < Duration::from_secs(1));
+        assert_eq!(count.load(Ordering::Relaxed), 10_000);
     }
 }

@@ -251,16 +251,19 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
     };
     let room = area.width.saturating_sub(28) as usize;
     t.spans.push(Span::raw(format!("{} ", shorten(&path, room))).fg(Color::Gray));
-    let keys: &[(&str, &str)] = if app.cfg.kind.browses_folders() && app.alba_date.is_some() {
-        &[("⏎", "open"), ("←", "back"), ("S", "scan files here")]
+    let filtering = app.alba_filter_edit || !app.alba_filter.is_empty();
+    let keys: &[(&str, &str)] = if app.alba_filter_edit {
+        &[("⏎", "keep filter"), ("Esc", "clear"), ("↑↓", "move")]
+    } else if app.cfg.kind.browses_folders() && app.alba_date.is_some() {
+        &[("⏎", "open"), ("←", "back"), ("S", "scan files here"), ("/", "filter")]
     } else if app.alba_date.is_some() {
-        &[("⏎", "stats"), ("←", "back"), ("S", "scan all")]
+        &[("⏎", "stats"), ("←", "back"), ("S", "scan all"), ("/", "filter")]
     } else {
-        &[("⏎", "open"), ("r", "refresh")]
+        &[("⏎", "open"), ("r", "refresh"), ("/", "filter")]
     };
     let block = panel(t, focused, keys);
     let rows = app.alba_rows();
-    if rows.is_empty() {
+    if rows.is_empty() && !filtering {
         let text = match (&app.conn, &app.alba_note) {
             (_, Some(note)) => Line::from(note.clone()).yellow(),
             (Conn::Connected(_), None) => Line::from("listing beamtimes…").fg(Color::DarkGray),
@@ -310,18 +313,50 @@ fn draw_alba(f: &mut Frame, app: &App, area: Rect) {
             items.push(ListItem::new(Line::from("  No subfolders or supported metadata here.").fg(Color::DarkGray)));
         }
     }
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(highlight(focused));
+    // the filter takes the panel's last line; the list the rest
+    let (rows, bar) = if filtering && rows.height > 1 {
+        let [list, bar] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(rows);
+        (list, Some(bar))
+    } else {
+        (rows, None)
+    };
+    f.render_widget(block, area);
+    let list = List::new(items).highlight_style(highlight(focused));
     let mut state = ListState::default()
         .with_selected(Some(app.alba_sel))
         .with_offset(prev_offset);
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, rows, &mut state);
+    if let Some(bar) = bar {
+        f.render_widget(Paragraph::new(filter_line(app)), bar);
+    }
     app.hit.borrow_mut().alba = ListHit {
         area,
         rows,
         offset: state.offset(),
     };
+}
+
+/// `/pattern▏  12 of 997` under the remote panel's list, while a filter is typed or kept.
+fn filter_line(app: &App) -> Line<'static> {
+    let shown = app.alba_rows().iter().filter(|r| **r != AlbaRow::Up).count();
+    let total = match &app.alba_date {
+        None => app.cache.dates.len(),
+        Some(d) => app.cache.experiments.get(d).and_then(|e| e.samples.as_ref()).map_or(0, Vec::len),
+    };
+    let valid = app.alba_filter_regex().is_none_or(|(_, ok)| ok);
+    let colour = if valid { Color::Yellow } else { Color::LightRed };
+    let mut spans = vec![
+        Span::raw(" /").fg(ACCENT).bold(),
+        Span::raw(app.alba_filter.clone()).fg(colour),
+    ];
+    if app.alba_filter_edit {
+        spans.push(Span::raw("▏").fg(ACCENT));
+    }
+    spans.push(Span::raw(format!("  {shown} of {total}")).fg(Color::DarkGray));
+    if !valid {
+        spans.push(Span::raw("  not a regex: plain text").fg(Color::LightRed));
+    }
+    Line::from(spans)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1804,7 +1839,7 @@ fn date_summary(app: &App, date: &str) -> Vec<Line<'static>> {
             lines.push(Line::from(format!("{t} sample folders, {scanned} scanned")));
             lines.push(Line::from(""));
             lines.push(
-                Line::from("Enter opens the beamtime. S fetches stats for every sample (one every 3 s).")
+                Line::from(format!("Enter opens the beamtime. S fetches stats for every sample ({}).", app.scan_pace()))
                     .fg(Color::DarkGray),
             );
         }
@@ -2523,7 +2558,7 @@ fn help_lines() -> Vec<Line<'static>> {
         sec("ALBA (beamtimes and samples, like folders)"),
         row("Enter / →", "open a beamtime (hides the others) / go to a sample's stats"),
         row("Backspace / ←", "back to the beamtime list    r  refresh listing"),
-        row("s", "rescan sample      S  fetch stats for the whole beamtime"),
+        row("s  S  /", "rescan sample · whole beamtime · filter (regex, any case; Esc clears)"),
         sec("Stats"),
         row("Space / a", "mark a solve or tick a frames run / mark all with HKL files"),
         row("d", "download marked solves into xia2chem_r3/, ednaproc_r3/ …"),
@@ -3414,6 +3449,7 @@ mod tests {
                 known_hosts: None,
                 beamlines: vec!["bl13".into()],
                 parallel_downloads: 3,
+                background_gap: std::time::Duration::from_secs(3),
             },
             tx.clone(),
         );
@@ -4230,6 +4266,58 @@ mod tests {
         }));
         assert_eq!(app.alba_rows().len(), rows + 1);
         assert_eq!(selected(&app).as_deref(), Some("JSG285b"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn slash_filters_the_remote_list_by_regex() {
+        use ratatui::crossterm::event::KeyCode;
+        let base = std::env::temp_dir().join(format!("amanece_filter_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mut app = demo_app(&base);
+        app.focus = Focus::Alba;
+        let names = |app: &App| {
+            app.alba_rows()
+                .into_iter()
+                .filter_map(|r| match r {
+                    AlbaRow::Sample { name, .. } => Some(name),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let all = names(&app);
+        assert!(all.len() > 1);
+
+        // typed keys go to the filter (q, S, C… are letters here); case-insensitive regex
+        key(&mut app, '/');
+        for c in "jsg285b$".chars() {
+            key(&mut app, c);
+        }
+        assert!(!app.quit);
+        assert_eq!(names(&app), vec!["JSG285b"]);
+        assert_eq!(app.selected_sample().map(|s| s.1).as_deref(), Some("JSG285b"));
+        assert!(app.alba_rows().contains(&AlbaRow::Up), "`..` stays");
+        let screen = render(&app, 170, 42);
+        assert!(screen.contains("/jsg285b$") && screen.contains("1 of "));
+
+        // Enter keeps the filter and gives the keys back; Esc clears it
+        press(&mut app, KeyCode::Enter);
+        assert!(!app.alba_filter_edit);
+        assert_eq!(names(&app), vec!["JSG285b"]);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(names(&app), all);
+        assert_eq!(app.selected_sample().map(|s| s.1).as_deref(), Some("JSG285b"));
+
+        // not a regex: matched as plain text, and said so
+        key(&mut app, '/');
+        key(&mut app, '(');
+        assert!(names(&app).is_empty());
+        assert!(render(&app, 170, 42).contains("not a regex"));
+
+        // leaving the beamtime drops the filter
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Left);
+        assert!(app.alba_filter.is_empty() && app.alba_date.is_none());
         std::fs::remove_dir_all(&base).ok();
     }
 

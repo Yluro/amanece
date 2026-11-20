@@ -21,10 +21,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// Upper bound for `parallel_downloads`.
-pub const MAX_PARALLEL_DOWNLOADS: usize = 4;
+pub const MAX_PARALLEL_DOWNLOADS: usize = 16;
 
-/// Pause between background scans ("fetch all stats", poll rescans).
-const BACKGROUND_GAP: Duration = Duration::from_secs(3);
 const MAX_BACKOFF: Duration = Duration::from_secs(600);
 /// Tries in a row without any new bytes before a file is given up (reconnecting in
 /// between). Tries that move the download forward don't count: it resumes from `.part`.
@@ -146,6 +144,8 @@ pub struct Settings {
     pub beamlines: Vec<String>,
     /// Bulk download workers (frames); clamped to 1..=MAX_PARALLEL_DOWNLOADS.
     pub parallel_downloads: usize,
+    /// Pause between background scans ("fetch all stats", poll rescans), start to start.
+    pub background_gap: Duration,
 }
 
 pub struct RemoteHandle {
@@ -271,10 +271,11 @@ async fn command_loop(
     let mut backoff = Duration::from_secs(30);
     let mut reconnect_pending = false;
     let mut background: VecDeque<Background> = VecDeque::new();
-    let mut last_background = Instant::now() - BACKGROUND_GAP;
+    let background_gap = settings.background_gap;
+    let mut last_background: Option<Instant> = None;
 
     loop {
-        let gap = BACKGROUND_GAP.saturating_sub(last_background.elapsed());
+        let gap = last_background.map_or(Duration::ZERO, |t| background_gap.saturating_sub(t.elapsed()));
         let cmd = tokio::select! {
             biased;
             cmd = rx.recv() => match cmd {
@@ -283,7 +284,7 @@ async fn command_loop(
             },
             _ = tokio::time::sleep(gap), if !background.is_empty() && conn.is_some() => {
                 let job = background.pop_front().expect("non-empty");
-                last_background = Instant::now();
+                last_background = Some(Instant::now());
                 RemoteCmd::ScanSample {
                     date: job.date,
                     sample: job.sample,

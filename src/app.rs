@@ -428,6 +428,11 @@ pub struct App {
     /// CellCheckCSD subtab; and the field's text while it is being typed. Session only.
     pub csd_filter: HashMap<(String, String), Vec<String>>,
     pub csd_edit: Option<String>,
+    /// Remote panel filter (`/`): a case-insensitive regex on the names of the level shown;
+    /// cleared when a beamtime or folder is opened or closed. Session only.
+    pub alba_filter: String,
+    /// The filter is being typed: every key goes to it.
+    pub alba_filter_edit: bool,
     /// Marked solves, by `Solve::key()` (contains the full remote path).
     pub marks: HashSet<String>,
     /// Frame-run checkbox overrides, keyed `date/sample/prefix_run`.
@@ -538,6 +543,8 @@ impl App {
             csd_next: 0,
             csd_filter: HashMap::new(),
             csd_edit: None,
+            alba_filter: String::new(),
+            alba_filter_edit: false,
             marks: HashSet::new(),
             frame_marks: HashMap::new(),
             console: Console::default(),
@@ -697,6 +704,7 @@ impl App {
         self.save_cache();
         self.cache = cache;
         self.cells.record_cache(&self.cache);
+        self.clear_alba_filter();
         self.alba_date = None;
         self.alba_sel = 0;
         self.stats_sel = 0;
@@ -829,13 +837,22 @@ impl App {
     /// Rows of the ALBA panel, like a folder listing: the beamtimes, or the samples
     /// of the opened beamtime behind a `..` row.
     pub fn alba_rows(&self) -> Vec<AlbaRow> {
+        let filter = self.alba_filter_regex().map(|(re, _)| re);
+        let keep = |s: &str| filter.as_ref().is_none_or(|re| re.is_match(s));
         let Some(date) = &self.alba_date else {
-            return self.cache.dates.iter().cloned().map(AlbaRow::Date).collect();
+            return self
+                .cache
+                .dates
+                .iter()
+                .filter(|d| keep(&self.date_label(d)))
+                .cloned()
+                .map(AlbaRow::Date)
+                .collect();
         };
         let mut rows = vec![AlbaRow::Up];
         if let Some(names) = self.cache.experiments.get(date).and_then(|e| e.samples.as_ref()) {
             for n in names {
-                if !self.cfg.kind.hides_test_names() || self.show_test || !layout::is_test_name(n) {
+                if (!self.cfg.kind.hides_test_names() || self.show_test || !layout::is_test_name(n)) && keep(n) {
                     rows.push(AlbaRow::Sample {
                         date: date.clone(),
                         name: n.clone(),
@@ -844,6 +861,74 @@ impl App {
             }
         }
         rows
+    }
+
+    /// A beamtime row as the panel names it (`x8user`, `bl13/…/20260307`), for the filter.
+    pub fn date_label(&self, id: &str) -> String {
+        if self.cfg.kind.source_ids() {
+            layout::beamtime_label(id)
+        } else {
+            id.to_string()
+        }
+    }
+
+    /// The remote panel filter, compiled case-insensitively, and whether it was a valid
+    /// regex (if not, it is matched as plain text). `None` when there is no filter.
+    pub fn alba_filter_regex(&self) -> Option<(regex::Regex, bool)> {
+        let pattern = self.alba_filter.as_str();
+        if pattern.is_empty() {
+            return None;
+        }
+        let build = |p: &str| regex::RegexBuilder::new(p).case_insensitive(true).size_limit(1 << 20).build();
+        match build(pattern) {
+            Ok(re) => Some((re, true)),
+            Err(_) => build(&regex::escape(pattern)).ok().map(|re| (re, false)),
+        }
+    }
+
+    /// Drops the filter (opening or closing a level).
+    fn clear_alba_filter(&mut self) {
+        self.alba_filter.clear();
+        self.alba_filter_edit = false;
+    }
+
+    /// Typing the remote panel filter: the list narrows as you type. Enter keeps the filter,
+    /// Esc drops it, ↑↓ move in the filtered list.
+    fn alba_filter_key(&mut self, key: KeyEvent) {
+        let prev = self.selected_row();
+        match key.code {
+            KeyCode::Esc => self.clear_alba_filter(),
+            KeyCode::Enter => self.alba_filter_edit = false,
+            KeyCode::Up => return self.move_alba(-1),
+            KeyCode::Down => return self.move_alba(1),
+            KeyCode::PageUp => return self.move_alba(-10),
+            KeyCode::PageDown => return self.move_alba(10),
+            KeyCode::Backspace => {
+                if self.alba_filter.pop().is_none() {
+                    self.alba_filter_edit = false;
+                }
+            }
+            // AltGr arrives as Ctrl+Alt on Windows (`|`, `\`, `[` on Spanish keyboards)
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.alba_filter.push(c)
+            }
+            _ => return,
+        }
+        self.refilter(prev);
+    }
+
+    /// After the filter changed: keep the highlighted row if it is still listed, else the
+    /// first match (not `..`).
+    fn refilter(&mut self, prev: Option<AlbaRow>) {
+        let rows = self.alba_rows();
+        self.alba_sel = match prev.filter(|p| *p != AlbaRow::Up).and_then(|p| rows.iter().position(|r| *r == p)) {
+            Some(i) => i,
+            None => rows.iter().position(|r| *r != AlbaRow::Up).unwrap_or(0),
+        };
+        self.stats_sel = 0;
+        self.sel_changed = Some(Instant::now());
     }
 
     pub fn selected_row(&self) -> Option<AlbaRow> {
@@ -1730,6 +1815,13 @@ impl App {
             }
             self.csd_edit = None;
         }
+        if self.alba_filter_edit {
+            if self.focus == Focus::Alba {
+                self.alba_filter_key(key);
+                return;
+            }
+            self.alba_filter_edit = false;
+        }
         let shift_tab = key.code == KeyCode::BackTab;
         match key.code {
             KeyCode::Char('q') => self.request_quit(),
@@ -2323,6 +2415,12 @@ impl App {
             KeyCode::Char('s') => self.rescan_selected(),
             KeyCode::Char('S') => self.fetch_all(),
             KeyCode::Char('r') => self.refresh_remote(),
+            KeyCode::Char('/') => self.alba_filter_edit = true,
+            KeyCode::Esc if !self.alba_filter.is_empty() => {
+                let prev = self.selected_row();
+                self.clear_alba_filter();
+                self.refilter(prev);
+            }
             _ => {}
         }
     }
@@ -2348,6 +2446,7 @@ impl App {
 
     /// Opens a beamtime like a folder: only its samples are shown.
     fn open_date(&mut self, date: &str) {
+        self.clear_alba_filter();
         self.alba_date = Some(date.to_string());
         let listed = self
             .cache
@@ -2371,6 +2470,7 @@ impl App {
         let Some(date) = self.alba_date.take() else {
             return;
         };
+        self.clear_alba_filter();
         if self.cfg.kind.browses_folders() {
             if let Some((parent, child)) = date.rsplit_once('/') {
                 if !self.cache.dates.contains(&date) {
@@ -2443,8 +2543,18 @@ impl App {
         }
         self.say(
             LineKind::Info,
-            format!("fetching stats for {n} samples of {date} in the background (one every 3 s)"),
+            format!("fetching stats for {n} samples of {date} in the background ({})", self.scan_pace()),
         );
+    }
+
+    /// How background scans are spaced, for messages: "one every 3 s", "back to back".
+    pub fn scan_pace(&self) -> String {
+        let gap = self.cfg.background_gap().as_secs_f64();
+        if gap == 0.0 {
+            "back to back".into()
+        } else {
+            format!("one every {gap} s")
+        }
     }
 
     fn refresh_remote(&mut self) {
@@ -3187,6 +3297,7 @@ mod live {
                 known_hosts: Some(std::env::temp_dir().join("amanece_live_known_hosts")),
                 beamlines: vec!["bl13".into(), "bl06".into()],
                 parallel_downloads: 3,
+                background_gap: Duration::from_secs(3),
             },
             tx.clone(),
         );
@@ -3353,6 +3464,7 @@ mod trash_check {
                 known_hosts: None,
                 beamlines: vec!["bl13".into(), "bl06".into()],
                 parallel_downloads: 3,
+                background_gap: Duration::from_secs(3),
             },
             tx.clone(),
         );
@@ -3399,6 +3511,7 @@ mod poll_tests {
                 known_hosts: None,
                 beamlines: vec!["bl13".into(), "bl06".into()],
                 parallel_downloads: 3,
+                background_gap: Duration::from_secs(3),
             },
             tx.clone(),
         );
@@ -3459,6 +3572,7 @@ mod login_tests {
                 known_hosts: None,
                 beamlines: vec!["bl13".into()],
                 parallel_downloads: 3,
+                background_gap: Duration::from_secs(3),
             },
             tx.clone(),
         );
@@ -3496,7 +3610,7 @@ mod login_tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (tx, _rx) = std::sync::mpsc::channel();
-        let settings = crate::remote::Settings { rate: 1.0, burst: 1, known_hosts: None, beamlines: vec![], parallel_downloads: 1 };
+        let settings = crate::remote::Settings { rate: 1.0, burst: 1, known_hosts: None, beamlines: vec![], parallel_downloads: 1, background_gap: Duration::from_secs(3) };
         let remote = crate::remote::spawn(&rt, settings, tx.clone());
         let mut app = App::new(cfg, servers, Some(config.join("config.toml")), root.join("launch"), remote, tx, None, false);
         let key = |app: &mut App, k| app.on_key(KeyEvent::from(k));
@@ -3815,6 +3929,7 @@ mod login_tests {
                 known_hosts: None,
                 beamlines: vec!["bl13".into()],
                 parallel_downloads: 3,
+                background_gap: Duration::from_secs(3),
             },
             tx.clone(),
         );
